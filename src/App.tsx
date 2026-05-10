@@ -1155,7 +1155,7 @@ function AdminShell() {
     resetOperationalData: resetOperationalDataMutation,
     zeroSellableStock: zeroSellableStockMutation,
   } = useFinanceData()
-  const { ingredients, setIngredients } = useInventoryState(ingredientLogs, recipeIngredients)
+  const { ingredients, setIngredients, persistIngredients } = useInventoryState(ingredientLogs, recipeIngredients)
   const [activeTab, setActiveTab] = useState<AppTab>('more')
   const [inventoryRoute, setInventoryRoute] = useState<InventoryRoute>('overview')
   const [moreRoute, setMoreRoute] = useState<MoreRoute>('home')
@@ -1869,28 +1869,47 @@ function AdminShell() {
     setFlashMessage(`${recipeName} saved to Supabase recipes.`)
   }
 
-  function handleFrequencyChange(ingredientId: string, nextFrequency: Frequency) {
-    setIngredients((current) =>
-      current.map((ingredient) =>
-        ingredient.id === ingredientId
-          ? { ...ingredient, countingFrequency: nextFrequency }
-          : ingredient,
-      ),
-    )
+  async function syncInventoryIngredients(nextIngredients: Ingredient[], successMessage: string) {
     setIsSynced(false)
-    setFlashMessage('Inventory configuration updated.')
+    setFlashMessage('Syncing inventory to Supabase...')
+    try {
+      await persistIngredients(nextIngredients)
+      setIsSynced(true)
+      setFlashMessage(successMessage)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Inventory failed to sync to Supabase.'
+      setIsSynced(false)
+      setFlashMessage(`Inventory sync failed: ${message}`)
+      throw error
+    }
   }
 
-  function handleCountingToggle(ingredientId: string) {
-    setIngredients((current) =>
-      current.map((ingredient) =>
-        ingredient.id === ingredientId
-          ? { ...ingredient, countingEnabled: !ingredient.countingEnabled }
-          : ingredient,
-      ),
+  async function handleFrequencyChange(ingredientId: string, nextFrequency: Frequency) {
+    const nextIngredients = ingredients.map((ingredient) =>
+      ingredient.id === ingredientId
+        ? { ...ingredient, countingFrequency: nextFrequency }
+        : ingredient,
     )
-    setIsSynced(false)
-    setFlashMessage('Tracking state updated.')
+    setIngredients(nextIngredients)
+    try {
+      await syncInventoryIngredients(nextIngredients, 'Inventory configuration synced to Supabase.')
+    } catch {
+      // The flash message already carries the Supabase error.
+    }
+  }
+
+  async function handleCountingToggle(ingredientId: string) {
+    const nextIngredients = ingredients.map((ingredient) =>
+      ingredient.id === ingredientId
+        ? { ...ingredient, countingEnabled: !ingredient.countingEnabled }
+        : ingredient,
+    )
+    setIngredients(nextIngredients)
+    try {
+      await syncInventoryIngredients(nextIngredients, 'Inventory tracking synced to Supabase.')
+    } catch {
+      // The flash message already carries the Supabase error.
+    }
   }
 
   function handlePurchaseDraftChange(ingredientId: string, value: string) {
@@ -1902,7 +1921,7 @@ function AdminShell() {
     }
   }
 
-  function handleSubmitPurchases() {
+  async function handleSubmitPurchases() {
     const nextErrors: PurchaseErrors = {}
     let hasInvalidValue = false
     let hasAtLeastOneEntry = false
@@ -1929,27 +1948,29 @@ function AdminShell() {
       return
     }
 
-    setIngredients((current) =>
-      current.map((ingredient) => {
-        const rawValue = purchaseDrafts[ingredient.id]?.trim() ?? ''
-        const quantity = rawValue ? Number(rawValue) : 0
-        const nextOnHand = ingredient.estimatedOnHand + quantity
-        return quantity > 0
-          ? {
-              ...ingredient,
-              estimatedOnHand: nextOnHand,
-              overdue: false,
-              status: updateIngredientStatus(nextOnHand, ingredient.reorderLevel),
-            }
-          : ingredient
-      }),
-    )
+    const nextIngredients = ingredients.map((ingredient) => {
+      const rawValue = purchaseDrafts[ingredient.id]?.trim() ?? ''
+      const quantity = rawValue ? Number(rawValue) : 0
+      const nextOnHand = ingredient.estimatedOnHand + quantity
+      return quantity > 0
+        ? {
+            ...ingredient,
+            estimatedOnHand: nextOnHand,
+            overdue: false,
+            status: updateIngredientStatus(nextOnHand, ingredient.reorderLevel),
+          }
+        : ingredient
+    })
 
-    setPurchaseDrafts({})
-    setPurchaseErrors({})
-    setPurchaseModalOpen(false)
-    setIsSynced(false)
-    setFlashMessage('Purchase log saved and inventory refreshed.')
+    setIngredients(nextIngredients)
+    try {
+      await syncInventoryIngredients(nextIngredients, 'Purchase log saved and inventory synced to Supabase.')
+      setPurchaseDrafts({})
+      setPurchaseErrors({})
+      setPurchaseModalOpen(false)
+    } catch {
+      // Keep the entered quantities visible so the user can retry after fixing the sync problem.
+    }
   }
 
   function openFixCount(ingredientId: string) {
@@ -1971,18 +1992,18 @@ function AdminShell() {
 
     const nextValue = Number(fixCountValue)
     try {
-      setIngredients((current) =>
-        current.map((ingredient) =>
-          ingredient.id === activeFixIngredient.id
-            ? {
-                ...ingredient,
-                estimatedOnHand: nextValue,
-                overdue: false,
-                status: updateIngredientStatus(nextValue, ingredient.reorderLevel),
-              }
-            : ingredient,
-        ),
+      const nextIngredients = ingredients.map((ingredient) =>
+        ingredient.id === activeFixIngredient.id
+          ? {
+              ...ingredient,
+              estimatedOnHand: nextValue,
+              overdue: false,
+              status: updateIngredientStatus(nextValue, ingredient.reorderLevel),
+            }
+          : ingredient,
       )
+      setIngredients(nextIngredients)
+      await syncInventoryIngredients(nextIngredients, `${activeFixIngredient.name} count synced to Supabase.`)
 
       await recordInventoryCount({
         id: createRandomId('inventory-count'),
@@ -1996,8 +2017,6 @@ function AdminShell() {
       setActiveFixCountId(null)
       setFixCountValue('')
       setFixCountError('')
-      setIsSynced(false)
-      setFlashMessage(`${activeFixIngredient.name} count updated.`)
     } catch (error) {
       setFixCountError(error instanceof Error ? error.message : 'Failed to save fix count.')
     }

@@ -144,6 +144,39 @@ function mergeRemoteItems(seedIngredients: InventoryIngredient[], remoteItems: I
   return merged
 }
 
+function toInventoryItems(ingredients: InventoryIngredient[]): InventoryItem[] {
+  const updatedAt = new Date().toISOString()
+  return ingredients.map((ingredient) => ({
+    id: ingredient.id,
+    name: ingredient.name,
+    category: ingredient.category,
+    unit: ingredient.unit,
+    onHand: ingredient.estimatedOnHand,
+    reorderLevel: ingredient.reorderLevel,
+    countingEnabled: ingredient.countingEnabled,
+    countingFrequency: ingredient.countingFrequency,
+    overdue: ingredient.overdue,
+    updatedAt,
+  }))
+}
+
+function writePersistedOverrides(ingredients: InventoryIngredient[]) {
+  if (typeof window === 'undefined') return
+  const payload = Object.fromEntries(
+    ingredients.map((ingredient) => [
+      ingredient.id,
+      {
+        estimatedOnHand: ingredient.estimatedOnHand,
+        reorderLevel: ingredient.reorderLevel,
+        countingEnabled: ingredient.countingEnabled,
+        countingFrequency: ingredient.countingFrequency,
+        overdue: ingredient.overdue,
+      },
+    ]),
+  )
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+}
+
 export function useInventoryState(logs: IngredientPriceLog[], recipeIngredients: RecipeIngredient[]) {
   const seedIngredients = useMemo(
     () => buildSeedIngredients(logs, recipeIngredients),
@@ -196,40 +229,20 @@ export function useInventoryState(logs: IngredientPriceLog[], recipeIngredients:
 
   useEffect(() => {
     if (!hydrated) return
-    if (typeof window === 'undefined') return
-    const payload = Object.fromEntries(
-      ingredients.map((ingredient) => [
-        ingredient.id,
-        {
-          estimatedOnHand: ingredient.estimatedOnHand,
-          reorderLevel: ingredient.reorderLevel,
-          countingEnabled: ingredient.countingEnabled,
-          countingFrequency: ingredient.countingFrequency,
-          overdue: ingredient.overdue,
-        },
-      ]),
-    )
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
-    void upsertInventoryItems(
-      ingredients.map((ingredient) => ({
-        id: ingredient.id,
-        name: ingredient.name,
-        category: ingredient.category,
-        unit: ingredient.unit,
-        onHand: ingredient.estimatedOnHand,
-        reorderLevel: ingredient.reorderLevel,
-        countingEnabled: ingredient.countingEnabled,
-        countingFrequency: ingredient.countingFrequency,
-        overdue: ingredient.overdue,
-        updatedAt: new Date().toISOString(),
-      })),
-    ).catch(() => {
+    writePersistedOverrides(ingredients)
+    void upsertInventoryItems(toInventoryItems(ingredients)).catch(() => {
       // The local cache remains the fallback until the inventory tables exist in Supabase.
     })
   }, [hydrated, ingredients])
 
+  async function persistIngredients(nextIngredients: InventoryIngredient[]) {
+    writePersistedOverrides(nextIngredients)
+    await upsertInventoryItems(toInventoryItems(nextIngredients))
+  }
+
   return {
     ingredients,
     setIngredients,
+    persistIngredients,
   }
 }

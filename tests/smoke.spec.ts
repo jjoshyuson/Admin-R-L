@@ -148,16 +148,53 @@ test('daily log and recipes open without runtime crashes', async ({ page }) => {
   await openRecipes(page)
   await capture(page, '07-recipe-tab-load.png')
 
-  await page.getByRole('button', { name: /create recipe|manage recipe/i }).first().click()
-  await page.waitForTimeout(800)
-  await capture(page, '08-recipe-editor.png')
-  await page.getByRole('button', { name: /close/i }).click()
-  await page.waitForTimeout(400)
+  const menuRecipeAction = page.getByRole('button', { name: /create recipe|manage recipe/i }).first()
+  if (await menuRecipeAction.count()) {
+    await menuRecipeAction.click()
+    await page.waitForTimeout(800)
+    await capture(page, '08-recipe-editor.png')
+    await page.getByRole('button', { name: /close/i }).click()
+    await page.waitForTimeout(400)
+  }
 
   await page.getByRole('button', { name: /add prep product/i }).first().click()
   await page.waitForTimeout(800)
   await capture(page, '09-prep-product-modal.png')
 
+  expect(consoleErrors).toEqual([])
+  expect(pageErrors).toEqual([])
+})
+
+test('inventory purchase log syncs to Supabase', async ({ page }) => {
+  const { consoleErrors, pageErrors, mutationStatuses } = attachErrorTracking(page)
+  const ingredientName = `Inventory Smoke ${Date.now()}`
+
+  await page.goto('/', { waitUntil: 'networkidle' })
+  await page.getByRole('button', { name: /daily log/i }).click()
+  await page.waitForTimeout(800)
+  await page.getByRole('button', { name: /create daily log/i }).click()
+  await page.waitForTimeout(500)
+  await page.getByRole('button', { name: /add ingredient/i }).click()
+  await page.waitForTimeout(300)
+  await page.getByLabel('Ingredient').last().fill(ingredientName)
+  await page.getByLabel('Price').last().fill('42')
+  await page.getByLabel('Unit').last().fill('kg')
+  await page.getByRole('button', { name: /save daily log/i }).click()
+  await page.waitForTimeout(2500)
+
+  await page.getByRole('button', { name: /^inventory$/i }).click()
+  await expect(page.getByText(ingredientName)).toBeVisible({ timeout: 10000 })
+  await capture(page, '27-inventory-before-purchase-sync.png')
+
+  await page.getByRole('button', { name: /open purchase log/i }).click()
+  await page.getByLabel(`Purchased quantity for ${ingredientName}`).fill('3')
+  await page.getByRole('button', { name: /log purchases/i }).click()
+  await expect(page.getByText(/purchase log saved and inventory synced to supabase/i)).toBeVisible({ timeout: 15000 })
+  await expect(page.locator('.sync-badge')).toContainText(/synced/i)
+  await capture(page, '28-inventory-after-purchase-sync.png')
+
+  expect(mutationStatuses.some((response) => response.url.includes('inventory_items'))).toBe(true)
+  expect(mutationStatuses.every((response) => response.status < 400)).toBe(true)
   expect(consoleErrors).toEqual([])
   expect(pageErrors).toEqual([])
 })

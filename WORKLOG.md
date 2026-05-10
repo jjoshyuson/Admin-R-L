@@ -383,3 +383,13 @@
 - Test result: build passed; unit tests passed 4/4 including a split-payment regression; browser check confirmed the Financial Summary now reads from the selected metrics period and no page or console errors occurred.
 - Screenshot filename: `debug-screenshots/26-dashboard-financial-summary-period-fixed.png`
 - Remaining issue if any: none for the dashboard split-payment and period-summary correction.
+
+### Attempt 17
+
+- What was broken: inventory changes appeared to remain in `Pending Sync`, and purchase/fix-count updates could fail silently instead of proving that `inventory_items` was written to Supabase.
+- Suspected cause: `useInventoryState` only wrote inventory updates through a fire-and-forget effect, swallowed Supabase errors, and the Inventory screen set `isSynced` to false after local changes without any success path to set it back to true. Fix-count history could also race ahead of the inventory item upsert.
+- Files changed: `src/hooks/useInventoryState.ts`, `src/App.tsx`, `tests/smoke.spec.ts`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; `npx playwright test --grep "inventory purchase log syncs" --reporter=line`; `npm run test:smoke -- --reporter=line`
+- Test result: build passed; unit tests passed 4/4; focused inventory browser test passed and confirmed a successful Supabase `inventory_items` mutation; full Playwright smoke suite passed 5/5 after making the existing recipes smoke test handle an empty menu catalog.
+- Screenshot filename: `debug-screenshots/27-inventory-before-purchase-sync.png`, `debug-screenshots/28-inventory-after-purchase-sync.png`
+- Remaining issue if any: none for the inventory purchase/configuration/fix-count sync status path; the live Supabase project still needs the `SUPABASE_INVENTORY.sql` tables/policies installed for new environments.
