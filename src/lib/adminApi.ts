@@ -486,8 +486,6 @@ export async function saveMenuCatalog(input: SaveMenuCatalogInput) {
   return maybeConfigured(undefined, async () => {
     const supabase = requireSupabase()
     const now = new Date().toISOString()
-    const existingCategories = await fetchMenuCategories()
-    const existingProducts = await fetchMenuProducts()
     const halfPriceColumn = await detectProductHalfPriceColumn()
     const desiredCategories = input.categories.map((category, index) => ({
       id: category.id,
@@ -496,19 +494,6 @@ export async function saveMenuCatalog(input: SaveMenuCatalogInput) {
       is_active: category.isActive !== false,
       updated_at: now,
     }))
-    const desiredCategoryIds = new Set(desiredCategories.map((category) => category.id))
-    const categoriesPayload = [
-      ...desiredCategories,
-      ...existingCategories
-        .filter((category) => !desiredCategoryIds.has(category.id))
-        .map((category) => ({
-          id: category.id,
-          name: category.name.trim() || 'Uncategorized',
-          sort_order: category.sortOrder,
-          is_active: false,
-          updated_at: now,
-        })),
-    ]
     const desiredProducts = input.products.map((product) => ({
       id: product.id,
       category_id: product.categoryId,
@@ -522,29 +507,32 @@ export async function saveMenuCatalog(input: SaveMenuCatalogInput) {
       is_active: product.isActive,
       updated_at: now,
     }))
-    const desiredProductIds = new Set(desiredProducts.map((product) => product.id))
-    const productsPayload = [
-      ...desiredProducts,
-      ...existingProducts
-        .filter((product) => !desiredProductIds.has(product.id))
-        .map((product) => ({
-          id: product.id,
-          category_id: product.categoryId,
-          name: product.name.trim(),
-          price: product.price,
-          ...(halfPriceColumn ? { [halfPriceColumn]: product.halfOrderPrice } : {}),
-          status: String(product.status).toLowerCase(),
-          image_path: normalizeImagePathForWrite(product.imagePath),
-          stock_count: product.stockCount,
-          is_low_stock: product.isLowStock,
-          is_active: false,
-          updated_at: now,
-        })),
-    ]
-    const categoryResult = await supabase.from('categories').upsert(categoriesPayload, { onConflict: 'id' })
+    const categoryResult = await supabase.from('categories').upsert(desiredCategories, { onConflict: 'id' })
     if (categoryResult.error) throw categoryResult.error
-    const productResult = await supabase.from('products').upsert(productsPayload, { onConflict: 'id' })
+    const productResult = await supabase.from('products').upsert(desiredProducts, { onConflict: 'id' })
     if (productResult.error) throw productResult.error
+  })
+}
+
+export async function deactivateMenuProduct(productId: string) {
+  return maybeConfigured(undefined, async () => {
+    const supabase = requireSupabase()
+    const { error } = await supabase
+      .from('products')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('id', productId)
+    if (error) throw error
+  })
+}
+
+export async function deactivateMenuCategory(categoryId: string) {
+  return maybeConfigured(undefined, async () => {
+    const supabase = requireSupabase()
+    const { error } = await supabase
+      .from('categories')
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .eq('id', categoryId)
+    if (error) throw error
   })
 }
 

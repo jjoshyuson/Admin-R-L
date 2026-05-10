@@ -393,3 +393,14 @@
 - Test result: build passed; unit tests passed 4/4; focused inventory browser test passed and confirmed a successful Supabase `inventory_items` mutation; full Playwright smoke suite passed 5/5 after making the existing recipes smoke test handle an empty menu catalog.
 - Screenshot filename: `debug-screenshots/27-inventory-before-purchase-sync.png`, `debug-screenshots/28-inventory-after-purchase-sync.png`
 - Remaining issue if any: none for the inventory purchase/configuration/fix-count sync status path; the live Supabase project still needs the `SUPABASE_INVENTORY.sql` tables/policies installed for new environments.
+
+### Attempt 18
+
+- What was broken: Menu Settings showed no real menu even though Supabase still had products; Supabase showed the PANSIT category and products marked `is_active = false`. Half-order pricing still showed as unavailable.
+- Suspected cause: `saveMenuCatalog(...)` deactivated every existing category/product missing from the current web payload. A save from an incomplete web payload could therefore hide real cloud rows without the user pressing delete. Half-order pricing was unavailable because the live `products` table still has no `half_order_price` or `half_price` column.
+- Files changed: `src/lib/adminApi.ts`, `src/App.tsx`, `WORKLOG.md`
+- Supabase repair applied: reactivated the real `PANSIT` category and 7 real PANSIT products; kept smoke-test menu rows inactive.
+- Command run: live Supabase row-count checks; `npm run build`; `npm test`; `npm run test:smoke -- --reporter=line`
+- Test result: build passed; unit tests passed 4/4; Playwright smoke suite passed 5/5 with explicit product/category deactivation paths.
+- Screenshot filename: existing smoke screenshots regenerated during the smoke suite.
+- Remaining issue if any: half-order pricing still requires running `SUPABASE_MENU_HALF_PRICE.sql` in Supabase SQL editor or applying the equivalent database migration with owner/service-role credentials.

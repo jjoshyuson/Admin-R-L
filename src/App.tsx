@@ -14,6 +14,8 @@ import {
   clearMenuCatalogData,
   clearOrdersData,
   clearRecipesData,
+  deactivateMenuCategory,
+  deactivateMenuProduct,
   recordInventoryCount,
   seedTroubleshootingData,
 } from './lib/adminApi'
@@ -2223,6 +2225,7 @@ function AdminShell() {
     )
     try {
       await persistMenuCatalog(nextCategories, nextMenuItems)
+      await deactivateMenuProduct(itemId)
       setMenuItems(nextMenuItems)
       setCategories(nextCategories)
       setProductModal(null)
@@ -2347,6 +2350,7 @@ function AdminShell() {
     }))
     try {
       await persistMenuCatalog(nextCategories, nextMenuItems)
+      await deactivateMenuCategory(categoryId)
       await refreshMenuCatalog()
       setCategories(nextCategories)
       setMenuItems(nextMenuItems)
