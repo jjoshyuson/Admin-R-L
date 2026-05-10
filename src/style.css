@@ -2460,6 +2460,35 @@ button {
   text-align: left;
 }
 
+.date-range-input-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.date-input-shell {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-radius: 14px;
+  border: 1px solid #d7e0e4;
+  background: rgba(255, 255, 255, 0.98);
+  color: #334155;
+  box-shadow: 0 10px 20px rgba(148, 163, 184, 0.08);
+}
+
+.date-input-shell input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #111827;
+  font: inherit;
+  min-width: 0;
+}
+
 .shared-chip-row {
   display: flex;
   gap: 10px;
@@ -3102,6 +3131,7 @@ button {
   }
 
   .finance-split-grid,
+  .date-range-input-grid,
   .finance-table-head,
   .finance-table-row {
     grid-template-columns: 1fr;

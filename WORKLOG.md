@@ -363,3 +363,23 @@
 - Test result: build passed; unit tests passed 3/3; targeted browser run confirmed the picker has no native select, shows 22 icon choices, and has no page or console errors.
 - Screenshot filename: `debug-screenshots/17-category-icon-picker-expanded.png`
 - Remaining issue if any: none for the expanded picker; icon values still persist locally until the Supabase category schema gets an icon column.
+
+### Attempt 15
+
+- What was broken: there was no flexible Operating screen for sales totals over a custom date range, Order History still displayed a static non-functional date range control, and Cash Overview was labeled like sales intake instead of current cash availability.
+- Suspected cause: the existing dashboard sales trend logic was period-based, not user-entered date-range based, and Order History kept a placeholder date range button from the static UI pass.
+- Files changed: `src/App.tsx`, `src/style.css`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright checks against `http://127.0.0.1:4175/`
+- Test result: build passed; unit tests passed 3/3; browser checks confirmed the new `Sales Range` Operating row opens, Sales Range has two date inputs and totals cash + GCash correctly, Order History now has two working date inputs, and Cash Overview labels the headline as `Total Cash Available` with the Main Safe included in the total row.
+- Screenshot filename: `debug-screenshots/19-sales-range-screen.png`, `debug-screenshots/20-order-history-date-range.png`, `debug-screenshots/22-sales-range-total-fixed.png`, `debug-screenshots/23-cash-overview-current-cash.png`
+- Remaining issue if any: none for this scoped sales-range and date-filter pass.
+
+### Attempt 16
+
+- What was broken: Dashboard Sales Trend and Financial Summary were mixing payment definitions. Split-payment rows could make cash include GCash, and Financial Summary labels such as `Today Cash` were reading the dashboard chart range instead of the selected metrics period.
+- Suspected cause: dashboard calculations used raw `order.total`, `cashAmount`, and `gcashAmount` in different places, while the live order data can store GCash separately and still keep cash-like collected fields populated.
+- Files changed: `src/App.tsx`, `src/lib/mappers.ts`, `src/lib/mappers.test.ts`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright check against `http://127.0.0.1:4175/`
+- Test result: build passed; unit tests passed 4/4 including a split-payment regression; browser check confirmed the Financial Summary now reads from the selected metrics period and no page or console errors occurred.
+- Screenshot filename: `debug-screenshots/26-dashboard-financial-summary-period-fixed.png`
+- Remaining issue if any: none for the dashboard split-payment and period-summary correction.

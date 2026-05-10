@@ -39,6 +39,7 @@ type MoreRoute =
   | 'home'
   | 'sync'
   | 'orders'
+  | 'sales-range'
   | 'menu-settings'
   | 'category-settings'
   | 'recipes'
@@ -286,6 +287,21 @@ type CashOverviewData = {
   cashSalesToday: number
   digitalPayments: number
   totalCashOnHand: number
+}
+
+type DateRangeValue = {
+  start: string
+  end: string
+}
+
+type SalesRangeSummary = {
+  rangeLabel: string
+  orderCount: number
+  cashSales: number
+  gcashSales: number
+  otherSales: number
+  totalSales: number
+  averageOrder: number
 }
 
 type CashAccountType = 'safe' | 'tablet' | 'bank'
@@ -1150,6 +1166,14 @@ function AdminShell() {
   const [activeMenuCategory, setActiveMenuCategory] = useState('All')
   const [orderPaymentFilter, setOrderPaymentFilter] = useState('All Methods')
   const [orderDeviceFilter, setOrderDeviceFilter] = useState('All Devices')
+  const [orderDateRange, setOrderDateRange] = useState<DateRangeValue>(() => ({
+    start: manilaDateOffset(-6),
+    end: manilaDateOffset(0),
+  }))
+  const [salesDateRange, setSalesDateRange] = useState<DateRangeValue>(() => ({
+    start: manilaDateOffset(-6),
+    end: manilaDateOffset(0),
+  }))
   const [activeRecipeFilter, setActiveRecipeFilter] = useState('All')
   const [dashboardMetricsPeriod, setDashboardMetricsPeriod] = useState<DashboardMetricsPeriod>('Today')
   const [salesRange, setSalesRange] = useState<SalesRange>('Last 7 Days')
@@ -1317,13 +1341,36 @@ function AdminShell() {
   const visibleOrderHistory = orderHistory
   const visibleRecipeViews = recipeViews
   const visibleLogViews = logViews
+  const orderCreatedAtById = useMemo(
+    () => new Map(orders.map((order) => [order.deviceOrderId, order.createdAt])),
+    [orders],
+  )
   const filteredOrders = useMemo(() => {
     return visibleOrderHistory.filter((item) => {
       const matchesPayment = orderPaymentFilter === 'All Methods' || item.payment === orderPaymentFilter
       const matchesDevice = orderDeviceFilter === 'All Devices' || item.device === orderDeviceFilter
-      return matchesPayment && matchesDevice
+      const matchesDate = isIsoInDateRange(orderCreatedAtById.get(item.id), orderDateRange)
+      return matchesPayment && matchesDevice && matchesDate
     })
-  }, [orderDeviceFilter, orderPaymentFilter, visibleOrderHistory])
+  }, [orderCreatedAtById, orderDateRange, orderDeviceFilter, orderPaymentFilter, visibleOrderHistory])
+  const salesRangeSummary = useMemo<SalesRangeSummary>(() => {
+    const voidedIds = new Set(voids.map((item) => item.deviceOrderId))
+    const rangeOrders = orders.filter((order) => !voidedIds.has(order.deviceOrderId) && isIsoInDateRange(order.createdAt, salesDateRange))
+    const cashSales = rangeOrders.reduce((sum, order) => sum + resolveCashOrderAmount(order), 0)
+    const gcashSales = rangeOrders.reduce((sum, order) => sum + resolveGcashOrderAmount(order), 0)
+    const recordedSales = rangeOrders.reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0)
+    const otherSales = Math.max(recordedSales - cashSales - gcashSales, 0)
+    const totalSales = cashSales + gcashSales + otherSales
+    return {
+      rangeLabel: formatDateRangeLabel(salesDateRange),
+      orderCount: rangeOrders.length,
+      cashSales,
+      gcashSales,
+      otherSales,
+      totalSales,
+      averageOrder: rangeOrders.length > 0 ? totalSales / rangeOrders.length : 0,
+    }
+  }, [orders, salesDateRange, voids])
   const filteredRecipes = useMemo(() => {
     if (activeRecipeFilter === 'All') {
       return visibleRecipeViews.filter((item) => {
@@ -1418,8 +1465,8 @@ function AdminShell() {
     const digitalPayments = sourceAccounts
       .filter((account) => account.type === 'bank')
       .reduce((sum, account) => sum + account.salesToday, 0)
-    const totalCashOnHand = cashSalesToday + digitalPayments
     const mainSafeOpeningCash = sourceAccounts.find((account) => account.id === 'main-safe')?.currentBalance ?? 0
+    const totalCashOnHand = mainSafeOpeningCash + cashSalesToday + digitalPayments
     return {
       openingCash: mainSafeOpeningCash,
       cashSalesToday,
@@ -1428,7 +1475,7 @@ function AdminShell() {
     }
   }, [cashAccounts])
   const cashOverviewExpectedTotal = useMemo(
-    () => cashOverview.cashSalesToday + cashOverview.digitalPayments,
+    () => cashOverview.openingCash + cashOverview.cashSalesToday + cashOverview.digitalPayments,
     [cashOverview],
   )
   const cashOverviewDifference = cashOverview.totalCashOnHand - cashOverviewExpectedTotal
@@ -2587,8 +2634,10 @@ function AdminShell() {
                 orderItems={filteredOrders}
                 orderPaymentFilter={orderPaymentFilter}
                 orderDeviceFilter={orderDeviceFilter}
+                orderDateRange={orderDateRange}
                 onOrderPaymentFilterChange={setOrderPaymentFilter}
                 onOrderDeviceFilterChange={setOrderDeviceFilter}
+                onOrderDateRangeChange={setOrderDateRange}
                 onSelectOrder={setSelectedOrderId}
                 selectedOrder={selectedOrder}
                 selectedOrderVoid={selectedOrderVoid}
@@ -2608,6 +2657,9 @@ function AdminShell() {
                 cashOverview={cashOverview}
                 cashOverviewExpectedTotal={cashOverviewExpectedTotal}
                 cashOverviewDifference={cashOverviewDifference}
+                salesRangeSummary={salesRangeSummary}
+                salesDateRange={salesDateRange}
+                onSalesDateRangeChange={setSalesDateRange}
                 cashAccounts={visibleCashAccounts}
                 cashMovements={cashMovementsView}
                 selectedCashAccount={selectedCashAccount}
@@ -2856,12 +2908,16 @@ function buildDashboardView({
   })
   const trend = buildSalesTrendView(salesOrders, salesRange, now)
   const paymentBreakdown = {
-    cash: salesOrders.reduce((sum, order) => sum + (order.cashAmount ?? 0), 0),
-    gcash: salesOrders.reduce((sum, order) => sum + (order.gcashAmount ?? 0), 0),
+    cash: salesOrders.reduce((sum, order) => sum + resolveCashOrderAmount(order), 0),
+    gcash: salesOrders.reduce((sum, order) => sum + resolveGcashOrderAmount(order), 0),
+  }
+  const metricPaymentBreakdown = {
+    cash: metricOrders.reduce((sum, order) => sum + resolveCashOrderAmount(order), 0),
+    gcash: metricOrders.reduce((sum, order) => sum + resolveGcashOrderAmount(order), 0),
   }
   const deviceBreakdown = {
-    tablet1: salesOrders.filter((order) => normalizeDeviceId(order.deviceId) === 'tablet-1').reduce((sum, order) => sum + order.total, 0),
-    tablet2: salesOrders.filter((order) => normalizeDeviceId(order.deviceId) === 'tablet-2').reduce((sum, order) => sum + order.total, 0),
+    tablet1: salesOrders.filter((order) => normalizeDeviceId(order.deviceId) === 'tablet-1').reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
+    tablet2: salesOrders.filter((order) => normalizeDeviceId(order.deviceId) === 'tablet-2').reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
   }
   const rangeLabel = metricsPeriodLabel(metricsPeriod)
   const accountingWindow = accounting.filter((record) => {
@@ -2895,7 +2951,7 @@ function buildDashboardView({
   const recentActivity = [
     ...salesOrders.slice().sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt)).slice(0, 3).map((order) => ({
       actor: friendlyDeviceLabel(order.deviceId),
-      detail: `Accepted order ${order.deviceOrderId} for ${formatPhp(order.total)}`,
+      detail: `Accepted order ${order.deviceOrderId} for ${formatPhp(resolveOrderSalesAmount(order))}`,
       ago: formatActivityStamp(order.createdAt),
     })),
     ...voids.slice().sort((left, right) => Date.parse(right.voidedAt) - Date.parse(left.voidedAt)).slice(0, 2).map((item) => ({
@@ -2909,7 +2965,7 @@ function buildDashboardView({
     metrics: [
       {
         label: metricsSalesTitle(metricsPeriod),
-        value: formatPhp(metricOrders.reduce((sum, order) => sum + order.total, 0)),
+        value: formatPhp(metricOrders.reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0)),
         hint: `${rangeLabel} from synced orders`,
         hintTone: 'positive' as const,
       },
@@ -2933,8 +2989,8 @@ function buildDashboardView({
       },
     ],
     financialMetrics: [
-      { label: `${rangeLabel} Cash`, value: formatPhp(paymentBreakdown.cash) },
-      { label: `${rangeLabel} GCash`, value: formatPhp(paymentBreakdown.gcash) },
+      { label: `${rangeLabel} Cash`, value: formatPhp(metricPaymentBreakdown.cash) },
+      { label: `${rangeLabel} GCash`, value: formatPhp(metricPaymentBreakdown.gcash) },
       { label: `${rangeLabel} Orders`, value: String(metricOrders.length) },
       { label: `${rangeLabel} Net Profit`, value: formatPhp(accountingNetProfit), tone: accountingNetProfit < 0 ? 'danger' as const : 'default' as const },
     ],
@@ -3059,7 +3115,7 @@ function buildSalesTrendPrimary(orders: OrderRecord[], range: SalesRange, now: D
           const date = new Date(order.createdAt)
           return orderFallsInRange(order, range, orders, now) && date.getHours() >= bucket.min && date.getHours() < bucket.max
         })
-        .reduce((sum, order) => sum + order.total, 0),
+        .reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
     }))
   }
 
@@ -3067,7 +3123,7 @@ function buildSalesTrendPrimary(orders: OrderRecord[], range: SalesRange, now: D
     const monthly = orders.reduce<Map<string, number>>((acc, order) => {
       const date = new Date(order.createdAt)
       const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
-      acc.set(key, (acc.get(key) ?? 0) + order.total)
+      acc.set(key, (acc.get(key) ?? 0) + resolveOrderSalesAmount(order))
       return acc
     }, new Map())
     return Array.from(monthly.entries())
@@ -3107,7 +3163,7 @@ function buildSalesTrendPrimary(orders: OrderRecord[], range: SalesRange, now: D
           const ts = Date.parse(order.createdAt)
           return Number.isFinite(ts) && ts >= dayStart && ts < dayEnd
         })
-        .reduce((sum, order) => sum + order.total, 0),
+        .reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
     }
   })
 }
@@ -3851,6 +3907,12 @@ function SettingsMoreScreen({
           subtitle="Recent transactions, source, and device tracking"
           onClick={() => onNavigate('orders')}
         />
+        <ActionRow
+          icon={<FinanceOverviewIcon />}
+          title="Sales Range"
+          subtitle="Sales totals for a custom date range"
+          onClick={() => onNavigate('sales-range')}
+        />
       </MoreSection>
 
       <MoreSection title="PRODUCT MANAGEMENT">
@@ -4123,8 +4185,10 @@ type MoreDetailScreenProps = {
   orderItems: OrderHistoryItem[]
   orderPaymentFilter: string
   orderDeviceFilter: string
+  orderDateRange: DateRangeValue
   onOrderPaymentFilterChange: (value: string) => void
   onOrderDeviceFilterChange: (value: string) => void
+  onOrderDateRangeChange: (value: DateRangeValue | ((current: DateRangeValue) => DateRangeValue)) => void
   onSelectOrder: (orderId: string) => void
   selectedOrder: OrderRecord | null
   selectedOrderVoid: OrderVoidRecord | null
@@ -4142,6 +4206,9 @@ type MoreDetailScreenProps = {
   cashOverview: CashOverviewData
   cashOverviewExpectedTotal: number
   cashOverviewDifference: number
+  salesRangeSummary: SalesRangeSummary
+  salesDateRange: DateRangeValue
+  onSalesDateRangeChange: (value: DateRangeValue | ((current: DateRangeValue) => DateRangeValue)) => void
   cashAccounts: CashAccount[]
   cashMovements: CashMovement[]
   selectedCashAccount: CashAccount
@@ -4185,8 +4252,10 @@ function MoreDetailScreen({
   orderItems,
   orderPaymentFilter,
   orderDeviceFilter,
+  orderDateRange,
   onOrderPaymentFilterChange,
   onOrderDeviceFilterChange,
+  onOrderDateRangeChange,
   onSelectOrder,
   selectedOrder,
   selectedOrderVoid,
@@ -4204,6 +4273,9 @@ function MoreDetailScreen({
   cashOverview,
   cashOverviewExpectedTotal,
   cashOverviewDifference,
+  salesRangeSummary,
+  salesDateRange,
+  onSalesDateRangeChange,
   cashAccounts,
   cashMovements,
   selectedCashAccount,
@@ -4245,8 +4317,10 @@ function MoreDetailScreen({
           items={orderItems}
           paymentFilter={orderPaymentFilter}
           deviceFilter={orderDeviceFilter}
+          dateRange={orderDateRange}
           onPaymentFilterChange={onOrderPaymentFilterChange}
           onDeviceFilterChange={onOrderDeviceFilterChange}
+          onDateRangeChange={onOrderDateRangeChange}
           onSelectOrder={onSelectOrder}
           selectedOrder={selectedOrder}
           selectedOrderVoid={selectedOrderVoid}
@@ -4302,6 +4376,17 @@ function MoreDetailScreen({
         data={cashOverview}
         expectedTotal={cashOverviewExpectedTotal}
         difference={cashOverviewDifference}
+        onBack={onBack}
+      />
+    )
+  }
+
+  if (route === 'sales-range') {
+    return (
+      <SalesRangeScreen
+        summary={salesRangeSummary}
+        dateRange={salesDateRange}
+        onDateRangeChange={onSalesDateRangeChange}
         onBack={onBack}
       />
     )
@@ -4389,8 +4474,10 @@ type OrderHistoryScreenProps = {
   items: OrderHistoryItem[]
   paymentFilter: string
   deviceFilter: string
+  dateRange: DateRangeValue
   onPaymentFilterChange: (value: string) => void
   onDeviceFilterChange: (value: string) => void
+  onDateRangeChange: (value: DateRangeValue | ((current: DateRangeValue) => DateRangeValue)) => void
   onSelectOrder: (orderId: string) => void
   selectedOrder: OrderRecord | null
   selectedOrderVoid: OrderVoidRecord | null
@@ -4403,8 +4490,10 @@ function OrderHistoryScreen({
   items,
   paymentFilter,
   deviceFilter,
+  dateRange,
   onPaymentFilterChange,
   onDeviceFilterChange,
+  onDateRangeChange,
   onSelectOrder,
   selectedOrder,
   selectedOrderVoid,
@@ -4445,13 +4534,10 @@ function OrderHistoryScreen({
         </label>
       </div>
 
-      <label className="control-field control-field-full">
+      <div className="control-field control-field-full">
         <span>Date Range</span>
-        <button type="button" className="date-filter-button">
-          <CalendarIcon />
-          <span>May 1 - May 7, 2026</span>
-        </button>
-      </label>
+        <DateRangeInputs value={dateRange} onChange={onDateRangeChange} />
+      </div>
 
       <div className="shared-card-list">
         {items.length > 0 ? (
@@ -4959,7 +5045,7 @@ function CashOverviewScreen({ data, expectedTotal, difference, onBack }: CashOve
       </header>
 
       <section className={`finance-highlight-card ${isBalanced ? 'is-healthy' : 'is-warning'}`}>
-        <p className="finance-highlight-label">Total Sales Intake</p>
+        <p className="finance-highlight-label">Total Cash Available</p>
         <strong>{formatPhp(data.totalCashOnHand)}</strong>
         <div className="finance-split-grid">
           <div>
@@ -4998,11 +5084,119 @@ function CashOverviewScreen({ data, expectedTotal, difference, onBack }: CashOve
             <strong>{formatPhp(data.digitalPayments)}</strong>
           </div>
           <div className="finance-row total-row">
-            <span>Cash + GCash Total</span>
+            <span>Main Safe + Cash + GCash</span>
             <strong>{formatPhp(expectedTotal)}</strong>
           </div>
         </article>
       </section>
+    </div>
+  )
+}
+
+type SalesRangeScreenProps = {
+  summary: SalesRangeSummary
+  dateRange: DateRangeValue
+  onDateRangeChange: (value: DateRangeValue | ((current: DateRangeValue) => DateRangeValue)) => void
+  onBack: () => void
+}
+
+function SalesRangeScreen({ summary, dateRange, onDateRangeChange, onBack }: SalesRangeScreenProps) {
+  return (
+    <div className="finance-screen">
+      <header className="record-header">
+        <button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back">
+          <span aria-hidden="true">&lt;</span>
+        </button>
+        <h1>Sales Range</h1>
+        <span className="header-spacer" aria-hidden="true" />
+      </header>
+
+      <div className="control-field control-field-full">
+        <span>Date Range</span>
+        <DateRangeInputs value={dateRange} onChange={onDateRangeChange} />
+      </div>
+
+      <section className="finance-highlight-card is-healthy">
+        <p className="finance-highlight-label">Total Sales Intake</p>
+        <strong>{formatPhp(summary.totalSales)}</strong>
+        <div className="finance-split-grid">
+          <div>
+            <span>Cash</span>
+            <strong>{formatPhp(summary.cashSales)}</strong>
+          </div>
+          <div>
+            <span>GCash</span>
+            <strong>{formatPhp(summary.gcashSales)}</strong>
+          </div>
+          <div>
+            <span>Orders</span>
+            <strong>{summary.orderCount}</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="finance-card-stack">
+        <article className="surface-card finance-detail-card">
+          <div className="finance-row">
+            <span>Date Range</span>
+            <strong>{summary.rangeLabel}</strong>
+          </div>
+          <div className="finance-row">
+            <span>Cash Sales</span>
+            <strong>{formatPhp(summary.cashSales)}</strong>
+          </div>
+          <div className="finance-row">
+            <span>GCash</span>
+            <strong>{formatPhp(summary.gcashSales)}</strong>
+          </div>
+          {summary.otherSales > 0.001 ? (
+            <div className="finance-row">
+              <span>Other Payments</span>
+              <strong>{formatPhp(summary.otherSales)}</strong>
+            </div>
+          ) : null}
+          <div className="finance-row">
+            <span>Average Order</span>
+            <strong>{formatPhp(summary.averageOrder)}</strong>
+          </div>
+          <div className="finance-row total-row">
+            <span>Total Sales</span>
+            <strong>{formatPhp(summary.totalSales)}</strong>
+          </div>
+        </article>
+      </section>
+    </div>
+  )
+}
+
+type DateRangeInputsProps = {
+  value: DateRangeValue
+  onChange: (value: DateRangeValue | ((current: DateRangeValue) => DateRangeValue)) => void
+}
+
+function DateRangeInputs({ value, onChange }: DateRangeInputsProps) {
+  return (
+    <div className="date-range-input-grid">
+      <label className="date-input-shell">
+        <CalendarIcon />
+        <input
+          type="date"
+          value={value.start}
+          max={value.end || undefined}
+          aria-label="Start date"
+          onChange={(event) => onChange((current) => ({ ...current, start: event.target.value }))}
+        />
+      </label>
+      <label className="date-input-shell">
+        <CalendarIcon />
+        <input
+          type="date"
+          value={value.end}
+          min={value.start || undefined}
+          aria-label="End date"
+          onChange={(event) => onChange((current) => ({ ...current, end: event.target.value }))}
+        />
+      </label>
     </div>
   )
 }
@@ -7272,6 +7466,75 @@ function formatQuantity(value: number, unit: string) {
 function formatShortOrderNumber(value: string) {
   const cleaned = value.trim()
   return cleaned.length <= 8 ? cleaned : cleaned.slice(-8)
+}
+
+function resolveCashOrderAmount(order: OrderRecord) {
+  const gcashAmount = resolveGcashOrderAmount(order)
+  if (gcashAmount > 0 && order.total >= gcashAmount) {
+    return Math.max(order.total - gcashAmount, 0)
+  }
+  if (typeof order.cashAmount === 'number') {
+    return order.cashAmount
+  }
+  return order.paymentMethod.toLowerCase().includes('cash') ? order.total : 0
+}
+
+function resolveGcashOrderAmount(order: OrderRecord) {
+  return Math.max(order.gcashAmount ?? 0, 0)
+}
+
+function resolveOrderSalesAmount(order: OrderRecord) {
+  const cashAmount = resolveCashOrderAmount(order)
+  const gcashAmount = resolveGcashOrderAmount(order)
+  return Math.max(order.total, cashAmount + gcashAmount)
+}
+
+function isoDateKey(value: string | undefined) {
+  if (!value) {
+    return ''
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date)
+}
+
+function normalizeDateRange(range: DateRangeValue) {
+  const start = range.start && range.end && range.start > range.end ? range.end : range.start
+  const end = range.start && range.end && range.start > range.end ? range.start : range.end
+  return { start, end }
+}
+
+function isIsoInDateRange(value: string | undefined, range: DateRangeValue) {
+  const key = isoDateKey(value)
+  if (!key) {
+    return false
+  }
+  const normalized = normalizeDateRange(range)
+  return (!normalized.start || key >= normalized.start) && (!normalized.end || key <= normalized.end)
+}
+
+function formatDateRangeLabel(range: DateRangeValue) {
+  const normalized = normalizeDateRange(range)
+  if (!normalized.start && !normalized.end) {
+    return 'All dates'
+  }
+  if (normalized.start && normalized.end && normalized.start === normalized.end) {
+    return formatDueDate(normalized.start)
+  }
+  if (!normalized.start) {
+    return `Until ${formatDueDate(normalized.end)}`
+  }
+  if (!normalized.end) {
+    return `From ${formatDueDate(normalized.start)}`
+  }
+  return `${formatDueDate(normalized.start)} - ${formatDueDate(normalized.end)}`
 }
 
 function formatPhp(value: number) {

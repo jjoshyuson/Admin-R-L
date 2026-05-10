@@ -128,6 +128,27 @@ export function accountLabel(accountId: string) {
   }
 }
 
+export function resolveGcashOrderAmount(order: OrderRecord) {
+  return Math.max(order.gcashAmount ?? 0, 0)
+}
+
+export function resolveCashOrderAmount(order: OrderRecord) {
+  const gcashAmount = resolveGcashOrderAmount(order)
+  if (gcashAmount > 0 && order.total >= gcashAmount) {
+    return Math.max(order.total - gcashAmount, 0)
+  }
+  if (typeof order.cashAmount === 'number') {
+    return order.cashAmount
+  }
+  return order.paymentMethod.toLowerCase().includes('cash') ? order.total : 0
+}
+
+export function resolveOrderSalesAmount(order: OrderRecord) {
+  const cashAmount = resolveCashOrderAmount(order)
+  const gcashAmount = resolveGcashOrderAmount(order)
+  return Math.max(order.total, cashAmount + gcashAmount)
+}
+
 export function movementSignedAmount(movement: CashMovement) {
   switch (movement.movementKind) {
     case 'OPENING_FLOAT':
@@ -149,7 +170,7 @@ export function buildOrderHistoryViews(orders: OrderRecord[], voids: OrderVoidRe
       return {
         id: order.deviceOrderId,
         itemCount: order.items.length,
-        total: formatPhp(order.total),
+        total: formatPhp(resolveOrderSalesAmount(order)),
         table: order.deviceOrderId.slice(-4).padStart(4, '0'),
         payment: order.paymentMethod || 'Unknown',
         device: accountLabel(order.deviceId),
@@ -214,7 +235,7 @@ function groupOrdersByDay(orders: OrderRecord[]) {
     const ts = orderSortTimestamp(order)
     if (!ts) continue
     const key = new Date(ts).toISOString().slice(0, 10)
-    totals.set(key, (totals.get(key) ?? 0) + order.total)
+    totals.set(key, (totals.get(key) ?? 0) + resolveOrderSalesAmount(order))
   }
   return totals
 }
@@ -247,9 +268,9 @@ export function buildDashboardSnapshot(
     value: (salesByDay.get(key) ?? 0) * 0.75,
   }))
 
-  const totalSales = activeOrders.reduce((sum, order) => sum + order.total, 0)
-  const cashSales = activeOrders.reduce((sum, order) => sum + (order.cashAmount ?? 0), 0)
-  const gcashSales = activeOrders.reduce((sum, order) => sum + (order.gcashAmount ?? 0), 0)
+  const totalSales = activeOrders.reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0)
+  const cashSales = activeOrders.reduce((sum, order) => sum + resolveCashOrderAmount(order), 0)
+  const gcashSales = activeOrders.reduce((sum, order) => sum + resolveGcashOrderAmount(order), 0)
   const latestAccounting = [...accounting].sort((left, right) => Date.parse(right.businessDate) - Date.parse(left.businessDate))[0]
   const today = new Date().toISOString().slice(0, 10)
   const todayOrders = activeOrders.filter((order) => order.createdAt.startsWith(today))
@@ -257,7 +278,7 @@ export function buildDashboardSnapshot(
   const metrics: DashboardMetric[] = [
     {
       label: "Today's Sales",
-      value: formatPhp(todayOrders.reduce((sum, order) => sum + order.total, 0)),
+      value: formatPhp(todayOrders.reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0)),
       hint: 'Today from synced orders',
       hintTone: 'positive',
     },
@@ -283,8 +304,8 @@ export function buildDashboardSnapshot(
 
   const paymentBreakdown: PaymentBreakdown = { cash: cashSales, gcash: gcashSales }
   const deviceBreakdown: DeviceSalesBreakdown = {
-    tablet1: activeOrders.filter((order) => normalizeAccountId(order.deviceId) === 'tablet-1').reduce((sum, order) => sum + order.total, 0),
-    tablet2: activeOrders.filter((order) => normalizeAccountId(order.deviceId) === 'tablet-2').reduce((sum, order) => sum + order.total, 0),
+    tablet1: activeOrders.filter((order) => normalizeAccountId(order.deviceId) === 'tablet-1').reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
+    tablet2: activeOrders.filter((order) => normalizeAccountId(order.deviceId) === 'tablet-2').reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
   }
 
   const devices: DeviceStatus[] = ['tablet-1', 'tablet-2'].map((deviceId) => {
@@ -367,7 +388,7 @@ export function buildCashAccounts(orders: OrderRecord[], movements: CashMovement
     const movementBalance = matchingMovements.reduce((sum, movement) => sum + movementSignedAmount(movement), 0)
     const salesToday = orders
       .filter((order) => normalizeAccountId(order.deviceId) === id || (id === 'bank-gcash' && (order.gcashAmount ?? 0) > 0))
-      .reduce((sum, order) => sum + (id === 'bank-gcash' ? order.gcashAmount ?? 0 : order.cashAmount ?? order.total), 0)
+      .reduce((sum, order) => sum + (id === 'bank-gcash' ? resolveGcashOrderAmount(order) : resolveCashOrderAmount(order)), 0)
     const currentBalance = id === 'bank-gcash' ? movementBalance + salesToday : movementBalance
     const latestMovement = matchingMovements[0]
     return {

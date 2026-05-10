@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildBillViews,
+  buildCashAccounts,
   buildDashboardSnapshot,
   buildOrderHistoryViews,
+  resolveCashOrderAmount,
+  resolveOrderSalesAmount,
 } from './mappers'
 import type {
   CashMovement,
@@ -107,6 +110,38 @@ describe('buildDashboardSnapshot', () => {
 
     expect(snapshot.syncBannerTitle).toContain('Orders synchronized')
     expect(snapshot.financialMetrics[0].value).toContain('200')
+  })
+})
+
+describe('split payment totals', () => {
+  it('does not count GCash twice when cash amount stores the full collected value', () => {
+    const order: OrderRecord = {
+      deviceOrderId: 'SPLIT-1',
+      deviceId: 'tablet-1',
+      paymentMethod: 'CASH',
+      paymentReference: null,
+      cashAmount: 1040,
+      gcashAmount: 195,
+      subtotal: 928.57,
+      tax: 111.43,
+      total: 1040,
+      createdAt: new Date().toISOString(),
+      items: [{ name: 'Mixed Payment', quantity: 1, lineTotal: 1040 }],
+    }
+
+    expect(resolveCashOrderAmount(order)).toBe(845)
+    expect(resolveOrderSalesAmount(order)).toBe(1040)
+
+    const snapshot = buildDashboardSnapshot([order], [], [], [], [], [])
+    expect(snapshot.paymentBreakdown.cash).toBe(845)
+    expect(snapshot.paymentBreakdown.gcash).toBe(195)
+    expect(snapshot.financialMetrics.find((item) => item.label === 'Total Sales')?.value).toContain('1,040')
+    expect(snapshot.financialMetrics.find((item) => item.label === 'Cash Sales')?.value).toContain('845')
+    expect(snapshot.financialMetrics.find((item) => item.label === 'GCash Sales')?.value).toContain('195')
+
+    const accounts = buildCashAccounts([order], [])
+    expect(accounts.find((account) => account.id === 'tablet-1')?.salesToday).toBe(845)
+    expect(accounts.find((account) => account.id === 'bank-gcash')?.salesToday).toBe(195)
   })
 })
 
