@@ -47,6 +47,29 @@ type MoreRoute =
   | 'payables'
   | 'profit'
 type MenuItemStatus = 'available' | 'unavailable' | 'hidden'
+type CategoryIconKey =
+  | 'default'
+  | 'plate'
+  | 'meal'
+  | 'burger'
+  | 'pizza'
+  | 'noodles'
+  | 'rice'
+  | 'chicken'
+  | 'meat'
+  | 'seafood'
+  | 'drink'
+  | 'coffee'
+  | 'dessert'
+  | 'icecream'
+  | 'bakery'
+  | 'bundle'
+  | 'prep'
+  | 'sauce'
+  | 'snack'
+  | 'salad'
+  | 'soup'
+  | 'grill'
 
 type MenuItem = {
   id: string
@@ -63,6 +86,7 @@ type CategoryItem = {
   id: string
   name: string
   description: string
+  icon: CategoryIconKey
   itemCount: number
   orderIndex: number
 }
@@ -341,6 +365,30 @@ const menuFilterChips = ['All']
 const recipeFilterChips = ['All', 'Meals', 'Dishes', 'Drinks', 'Bundles', 'Desserts']
 const paymentFilters = ['All Methods', 'GCash', 'Cash', 'Card']
 const deviceFilters = ['All Devices', 'Tablet 1', 'Tablet 2', 'Bank/GCash']
+const categoryIconOptions: Array<{ value: CategoryIconKey; label: string }> = [
+  { value: 'default', label: 'Default' },
+  { value: 'plate', label: 'Plate' },
+  { value: 'meal', label: 'Meal' },
+  { value: 'burger', label: 'Burger' },
+  { value: 'pizza', label: 'Pizza' },
+  { value: 'noodles', label: 'Noodles' },
+  { value: 'rice', label: 'Rice Bowl' },
+  { value: 'chicken', label: 'Chicken' },
+  { value: 'meat', label: 'Meat' },
+  { value: 'seafood', label: 'Seafood' },
+  { value: 'drink', label: 'Drink' },
+  { value: 'coffee', label: 'Coffee' },
+  { value: 'dessert', label: 'Dessert' },
+  { value: 'icecream', label: 'Ice Cream' },
+  { value: 'bakery', label: 'Bakery' },
+  { value: 'bundle', label: 'Bundle' },
+  { value: 'prep', label: 'Prep' },
+  { value: 'sauce', label: 'Sauce' },
+  { value: 'snack', label: 'Snack' },
+  { value: 'salad', label: 'Salad' },
+  { value: 'soup', label: 'Soup' },
+  { value: 'grill', label: 'Grill' },
+]
 const financeBusinessDate = new Date('2026-05-02T09:00:00+08:00')
 
 const initialIngredients: Ingredient[] = [
@@ -464,6 +512,175 @@ function normalizeMenuImagePath(imagePath: string | null | undefined) {
   }
 
   return normalized
+}
+
+function normalizeCategoryNameKey(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, '-')
+}
+
+function inferCategoryIcon(name: string): CategoryIconKey {
+  const key = normalizeCategoryNameKey(name)
+  if (key.includes('beverage') || key.includes('drink') || key.includes('coffee') || key.includes('shake')) {
+    return key.includes('coffee') ? 'coffee' : 'drink'
+  }
+  if (key.includes('dessert') || key.includes('cake') || key.includes('sweet')) {
+    return 'dessert'
+  }
+  if (key.includes('bundle') || key.includes('set')) {
+    return 'bundle'
+  }
+  if (key.includes('noodle') || key.includes('pancit') || key.includes('pasta')) {
+    return 'noodles'
+  }
+  if (key.includes('rice')) {
+    return 'rice'
+  }
+  if (key.includes('chicken')) {
+    return 'chicken'
+  }
+  if (key.includes('meat') || key.includes('beef') || key.includes('pork')) {
+    return 'meat'
+  }
+  if (key.includes('seafood') || key.includes('fish') || key.includes('shrimp')) {
+    return 'seafood'
+  }
+  if (key.includes('burger')) {
+    return 'burger'
+  }
+  if (key.includes('pizza')) {
+    return 'pizza'
+  }
+  if (key.includes('bread') || key.includes('bakery')) {
+    return 'bakery'
+  }
+  if (key.includes('snack') || key.includes('side')) {
+    return 'snack'
+  }
+  if (key.includes('salad') || key.includes('vegetable')) {
+    return 'salad'
+  }
+  if (key.includes('soup')) {
+    return 'soup'
+  }
+  if (key.includes('grill')) {
+    return 'grill'
+  }
+  if (key.includes('meal')) {
+    return 'meal'
+  }
+  if (key.includes('prep') || key.includes('sauce') || key.includes('mix')) {
+    return key.includes('sauce') ? 'sauce' : 'prep'
+  }
+  if (key.includes('dish') || key.includes('main')) {
+    return 'plate'
+  }
+  return 'default'
+}
+
+function readStoredCategoryIcons(): Record<string, CategoryIconKey> {
+  if (typeof window === 'undefined') {
+    return {}
+  }
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem('admin-web-category-icons') ?? '{}') as Record<string, string>
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) =>
+        categoryIconOptions.some((option) => option.value === value),
+      ),
+    ) as Record<string, CategoryIconKey>
+  } catch {
+    return {}
+  }
+}
+
+function getCategoryIcon(iconMap: Record<string, CategoryIconKey>, name: string): CategoryIconKey {
+  return iconMap[normalizeCategoryNameKey(name)] ?? inferCategoryIcon(name)
+}
+
+function safeIsoFromEpoch(value: number) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString()
+}
+
+function CategoryIconBadge({ icon }: { icon: CategoryIconKey }) {
+  const label = categoryIconOptions.find((option) => option.value === icon)?.label ?? 'Category'
+  return (
+    <span className={`category-icon-badge category-icon-${icon}`} aria-label={`${label} icon`} role="img">
+      <CategoryIconSvg icon={icon} />
+    </span>
+  )
+}
+
+function CategoryIconSvg({ icon }: { icon: CategoryIconKey }) {
+  if (icon === 'drink') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M7 4h10l-1.1 13.4A2.8 2.8 0 0 1 13.1 20h-2.2a2.8 2.8 0 0 1-2.8-2.6L7 4Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M8 8h8M10 12h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'coffee') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M6 8h10v5a4 4 0 0 1-4 4h-2a4 4 0 0 1-4-4V8Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M16 10h1.4a2 2 0 0 1 0 4H16M8 4v2M12 4v2M4 20h14" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'dessert') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M6 12h12v3a5 5 0 0 1-5 5h-2a5 5 0 0 1-5-5v-3Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M8 12c0-3 2-5 4-5s4 2 4 5M12 4v3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'icecream') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M8 10a4 4 0 0 1 8 0v1H8v-1ZM9 11l3 9 3-9" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M10 15h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'bundle') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M5 8h14v11H5zM8 8V5h8v3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M12 8v11M5 13h14" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'meal') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" strokeWidth="1.7" /><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.7" /></svg>
+  }
+  if (icon === 'plate') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M5 11h14M7 11a5 5 0 0 1 10 0M7 15h10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+  }
+  if (icon === 'burger') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M6 11a6 6 0 0 1 12 0H6ZM5 15h14M7 18h10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /><path d="M10 8h.1M14 8h.1" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'pizza') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M5 5c5 0 10 2 14 6L10 20 5 5Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M8 9h.1M12 11h.1M10 15h.1" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'noodles') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M6 11h12l-1.3 6.2A3.5 3.5 0 0 1 13.3 20h-2.6a3.5 3.5 0 0 1-3.4-2.8L6 11Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M8 5v6M11 4v7M14 5v6M17 4v7" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'rice') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M6 12h12l-2 7H8l-2-7Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M8 12c1-3 7-3 8 0M10 8l2 2 2-2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'chicken') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M8.5 14.5a5 5 0 1 1 7-7l-7 7Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M8.5 14.5 5 18m0 0-2 2m2-2 2 2M15.5 7.5 18 5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'meat') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M7 15c-2-2-2-5 0-7 3-3 8-3 10 0s1 7-2 9c-3 2-6 1-8-2Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><circle cx="10" cy="11" r="1.6" fill="none" stroke="currentColor" strokeWidth="1.7" /></svg>
+  }
+  if (icon === 'seafood') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M4 12c3-4 8-4 12 0-4 4-9 4-12 0Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M16 12 20 8v8l-4-4ZM8 12h.1" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>
+  }
+  if (icon === 'bakery') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M6 13c0-4 3-7 6-7s6 3 6 7v4a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-4Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M9 10c1 1 2 1 3 0s2-1 3 0" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'prep') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M7 7h10v11a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V7ZM9 4h6v3H9z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M10 12h4M10 16h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'sauce') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M9 5h6l1 5v8a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-8l1-5ZM9 10h6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M11 14h2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'snack') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M7 8h10l-1 12H8L7 8ZM9 4h6l2 4H7l2-4Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M10 12h4M10 16h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'salad') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M6 12h12l-1.2 5A4 4 0 0 1 13 20h-2a4 4 0 0 1-3.8-3L6 12Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M8 10c1-3 4-4 6-1 1-2 3-2 4 1" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'soup') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M5 12h14v2a5 5 0 0 1-5 5h-4a5 5 0 0 1-5-5v-2Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" /><path d="M8 8c1 1 2 1 3 0s2-1 3 0M18 12l2-2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  if (icon === 'grill') {
+    return <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true"><path d="M6 10h12v2a6 6 0 0 1-12 0v-2ZM8 20l2-4M16 20l-2-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /><path d="M8 5v2M12 4v3M16 5v2" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
+  }
+  return (
+    <svg viewBox="0 0 24 24" className="category-icon-svg" aria-hidden="true">
+      <path d="M6 6h12v12H6z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+      <path d="M9 10h6M9 14h6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  )
 }
 
 function buildMenuImageFallbackLabel(name: string) {
@@ -622,6 +839,7 @@ const initialCategories: CategoryItem[] = [
     id: 'cat-desserts',
     name: 'Desserts',
     description: 'Cakes, sweets, and after-meal options',
+    icon: 'dessert',
     itemCount: 8,
     orderIndex: 0,
   },
@@ -629,6 +847,7 @@ const initialCategories: CategoryItem[] = [
     id: 'cat-bundles',
     name: 'Bundles',
     description: 'Group meals and shared sets',
+    icon: 'bundle',
     itemCount: 4,
     orderIndex: 1,
   },
@@ -636,6 +855,7 @@ const initialCategories: CategoryItem[] = [
     id: 'cat-dishes',
     name: 'Dishes',
     description: 'Core plated dishes and mains',
+    icon: 'plate',
     itemCount: 14,
     orderIndex: 2,
   },
@@ -643,6 +863,7 @@ const initialCategories: CategoryItem[] = [
     id: 'cat-meals',
     name: 'Meals',
     description: 'Complete meal combinations',
+    icon: 'meal',
     itemCount: 9,
     orderIndex: 3,
   },
@@ -650,6 +871,7 @@ const initialCategories: CategoryItem[] = [
     id: 'cat-beverages',
     name: 'Beverages',
     description: 'Coffee, shakes, and cold drinks',
+    icon: 'drink',
     itemCount: 11,
     orderIndex: 4,
   },
@@ -662,7 +884,7 @@ const initialCashOverview: CashOverviewData = {
   openingCash: 2875.4,
   cashSalesToday: 980.5,
   digitalPayments: 694.9,
-  totalCashOnHand: 4550.8,
+  totalCashOnHand: 1675.4,
 }
 
 const initialCashAccounts: CashAccount[] = [
@@ -923,6 +1145,7 @@ function AdminShell() {
   const [moreRoute, setMoreRoute] = useState<MoreRoute>('home')
   const [menuItems, setMenuItems] = useState<MenuItem[]>([])
   const [categories, setCategories] = useState<CategoryItem[]>([])
+  const [categoryIconMap, setCategoryIconMap] = useState<Record<string, CategoryIconKey>>(() => readStoredCategoryIcons())
   const [menuSearch, setMenuSearch] = useState('')
   const [activeMenuCategory, setActiveMenuCategory] = useState('All')
   const [orderPaymentFilter, setOrderPaymentFilter] = useState('All Methods')
@@ -1029,6 +1252,7 @@ function AdminShell() {
         id: category.id,
         name: category.name,
         description: 'Synced from Android admin baseline',
+        icon: getCategoryIcon(categoryIconMap, category.name),
         itemCount: categoryItemCount.get(category.id) ?? 0,
         orderIndex: category.sortOrder,
       }))
@@ -1050,7 +1274,7 @@ function AdminShell() {
     }))
     setCategories(nextCategories)
     setMenuItems(nextMenuItems)
-  }, [remoteCategories, remoteProducts])
+  }, [categoryIconMap, remoteCategories, remoteProducts])
 
   const filteredIngredients = useMemo(() => {
     if (activeCategory === 'All') {
@@ -1188,24 +1412,23 @@ function AdminShell() {
       return initialCashOverview
     }
     const sourceAccounts = cashAccounts.length > 0 ? cashAccounts : initialCashAccounts
-    const totalCashOnHand = sourceAccounts
-      .filter((account) => account.type !== 'bank')
-      .reduce((sum, account) => sum + account.currentBalance, 0)
     const cashSalesToday = sourceAccounts
-      .filter((account) => account.type === 'tablet' || account.type === 'safe')
+      .filter((account) => account.id === 'tablet-1' || account.id === 'tablet-2')
       .reduce((sum, account) => sum + account.salesToday, 0)
     const digitalPayments = sourceAccounts
       .filter((account) => account.type === 'bank')
       .reduce((sum, account) => sum + account.salesToday, 0)
+    const totalCashOnHand = cashSalesToday + digitalPayments
+    const mainSafeOpeningCash = sourceAccounts.find((account) => account.id === 'main-safe')?.currentBalance ?? 0
     return {
-      openingCash: Math.max(totalCashOnHand - cashSalesToday, 0),
+      openingCash: mainSafeOpeningCash,
       cashSalesToday,
       digitalPayments,
       totalCashOnHand,
     }
   }, [cashAccounts])
   const cashOverviewExpectedTotal = useMemo(
-    () => cashOverview.openingCash + cashOverview.cashSalesToday + cashOverview.digitalPayments,
+    () => cashOverview.cashSalesToday + cashOverview.digitalPayments,
     [cashOverview],
   )
   const cashOverviewDifference = cashOverview.totalCashOnHand - cashOverviewExpectedTotal
@@ -1233,7 +1456,7 @@ function AdminShell() {
         toAccountId: movement.destinationAccountId,
         amount: movement.amount,
         note: movement.note ?? movement.reasonCategory,
-        createdAt: new Date(movement.createdAtEpochMillis).toISOString(),
+        createdAt: safeIsoFromEpoch(movement.createdAtEpochMillis),
         createdBy: movement.createdBy,
         deviceSource: movement.accountId,
         adjustmentDirection: movement.movementKind === 'ADJUSTMENT_MINUS' ? 'remove' : movement.movementKind === 'ADJUSTMENT_PLUS' ? 'add' : undefined,
@@ -1896,6 +2119,7 @@ function AdminShell() {
             id: createRandomId('category'),
             name: normalizedCategory,
             description: '',
+            icon: getCategoryIcon(categoryIconMap, normalizedCategory),
             orderIndex: categories.length,
             itemCount: 0,
           },
@@ -1945,11 +2169,16 @@ function AdminShell() {
     }
   }
 
-  async function handleSaveCategory(input: { id: string | null; name: string; description: string }) {
+  async function handleSaveCategory(input: { id: string | null; name: string; description: string; icon: CategoryIconKey }) {
     const trimmedName = input.name.trim()
     if (!trimmedName) {
       setFlashMessage('Category name is required.')
       return
+    }
+    const nextIcon = categoryIconOptions.some((option) => option.value === input.icon) ? input.icon : inferCategoryIcon(trimmedName)
+    const nextIconMap = {
+      ...categoryIconMap,
+      [normalizeCategoryNameKey(trimmedName)]: nextIcon,
     }
 
     try {
@@ -1957,9 +2186,12 @@ function AdminShell() {
         const previousCategory = categories.find((category) => category.id === input.id)
         const renamedCategories = categories.map((category) =>
           category.id === input.id
-            ? { ...category, name: trimmedName, description: input.description.trim() }
+            ? { ...category, name: trimmedName, description: input.description.trim(), icon: nextIcon }
             : category,
         )
+        if (previousCategory && normalizeCategoryNameKey(previousCategory.name) !== normalizeCategoryNameKey(trimmedName)) {
+          delete nextIconMap[normalizeCategoryNameKey(previousCategory.name)]
+        }
         if (previousCategory && previousCategory.name !== trimmedName) {
           const renamedItems = menuItems.map((item) =>
             item.category === previousCategory.name ? { ...item, category: trimmedName } : item,
@@ -1984,6 +2216,7 @@ function AdminShell() {
             id: nextId,
             name: trimmedName,
             description: input.description.trim(),
+            icon: nextIcon,
             itemCount: 0,
             orderIndex: categories.length,
           },
@@ -1992,6 +2225,10 @@ function AdminShell() {
         await refreshMenuCatalog()
         setCategories(nextCategories)
         setFlashMessage(`${trimmedName} category added.`)
+      }
+      setCategoryIconMap(nextIconMap)
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('admin-web-category-icons', JSON.stringify(nextIconMap))
       }
       setProductModal(null)
     } catch (error) {
@@ -2028,6 +2265,7 @@ function AdminShell() {
           id: remoteCategories.find((entry) => normalizeCategoryNameKey(entry.name) === 'uncategorized')?.id ?? 'cat-uncategorized',
           name: fallbackCategoryName,
           description: 'Fallback category for products moved during category cleanup',
+          icon: 'default',
           itemCount: 0,
           orderIndex: nextCategories.length,
         },
@@ -3185,10 +3423,6 @@ function normalizeUnit(value: string) {
   return value.trim().toLowerCase()
 }
 
-function normalizeCategoryNameKey(value: string) {
-  return value.trim().toLowerCase()
-}
-
 function uniqueNonEmptyValues(values: string[]) {
   const seen = new Set<string>()
   const output: string[] = []
@@ -3638,7 +3872,7 @@ function SettingsMoreScreen({
         <ActionRow
           icon={<FinanceOverviewIcon />}
           title="Cash Overview"
-          subtitle="Current cash, sales, digital payments, and total cash on hand"
+          subtitle="Tablet cash sales, GCash sales, and total sales intake"
           onClick={() => onNavigate('finance-overview')}
         />
         <ActionRow
@@ -4225,7 +4459,7 @@ function OrderHistoryScreen({
             <button key={item.id} type="button" className="record-card-button" onClick={() => onSelectOrder(item.id)}>
               <UnifiedRecordCard
                 media={<OrderHistoryIcon />}
-                title={`Order #${item.id}`}
+                title={`Order #${formatShortOrderNumber(item.id)}`}
                 subtitle={`${item.itemCount} items • ${item.total} • ${item.table}`}
                 status={item.status}
                 sideTop={item.payment}
@@ -4725,19 +4959,19 @@ function CashOverviewScreen({ data, expectedTotal, difference, onBack }: CashOve
       </header>
 
       <section className={`finance-highlight-card ${isBalanced ? 'is-healthy' : 'is-warning'}`}>
-        <p className="finance-highlight-label">Total Cash on Hand</p>
+        <p className="finance-highlight-label">Total Sales Intake</p>
         <strong>{formatPhp(data.totalCashOnHand)}</strong>
         <div className="finance-split-grid">
           <div>
-            <span>Opening</span>
+            <span>Main Safe</span>
             <strong>{formatPhp(data.openingCash)}</strong>
           </div>
           <div>
-            <span>Cash Sales</span>
+            <span>Tablet Cash</span>
             <strong>{formatPhp(data.cashSalesToday)}</strong>
           </div>
           <div>
-            <span>Digital</span>
+            <span>GCash</span>
             <strong>{formatPhp(data.digitalPayments)}</strong>
           </div>
         </div>
@@ -4756,15 +4990,15 @@ function CashOverviewScreen({ data, expectedTotal, difference, onBack }: CashOve
             <strong>{formatPhp(data.openingCash)}</strong>
           </div>
           <div className="finance-row">
-            <span>Cash Sales Today</span>
+            <span>Tablet 1 + Tablet 2 Cash Sales</span>
             <strong>{formatPhp(data.cashSalesToday)}</strong>
           </div>
           <div className="finance-row">
-            <span>Digital Payments</span>
+            <span>GCash</span>
             <strong>{formatPhp(data.digitalPayments)}</strong>
           </div>
           <div className="finance-row total-row">
-            <span>Validated Total</span>
+            <span>Cash + GCash Total</span>
             <strong>{formatPhp(expectedTotal)}</strong>
           </div>
         </article>
@@ -5336,7 +5570,7 @@ function MenuSettingsScreen({
       <button type="button" className="surface-card category-settings-entry" onClick={onOpenCategorySettings}>
         <span className="category-settings-copy">
           <strong>Category Settings</strong>
-          <small>Manage category order, naming, and visibility structure</small>
+          <small>Manage category icons, order, naming, and visibility structure</small>
         </span>
         <span className="action-row-chevron" aria-hidden="true">&gt;</span>
       </button>
@@ -5434,6 +5668,7 @@ function CategoryManagementScreen({
             <span className="drag-handle" aria-hidden="true">
               <DragHandleIcon />
             </span>
+            <CategoryIconBadge icon={category.icon} />
             <div className="category-row-copy">
               <strong>{category.name}</strong>
               <small>{category.itemCount} items</small>
@@ -5460,7 +5695,7 @@ type ProductEditModalProps = {
   onClose: () => void
   onSaveMenuItem: (item: MenuItem) => void
   onRemoveMenuItem: (itemId: string) => void
-  onSaveCategory: (input: { id: string | null; name: string; description: string }) => void
+  onSaveCategory: (input: { id: string | null; name: string; description: string; icon: CategoryIconKey }) => void
   onDeleteCategory: (categoryId: string) => void
 }
 
@@ -5479,6 +5714,7 @@ function ProductEditModal({
     id: category?.id ?? null,
     name: category?.name ?? '',
     description: category?.description ?? '',
+    icon: category?.icon ?? inferCategoryIcon(category?.name ?? ''),
   })
 
   if (modal.type === 'menu-item' && menuDraft) {
@@ -5681,6 +5917,7 @@ function MenuSettingsScreenV2({
   onOpenCategorySettings,
 }: MenuSettingsScreenV2Props) {
   const categoryChips = ['All', ...uniqueNonEmptyValues(categories.map((category) => category.name))]
+  const categoryIconByName = new Map(categories.map((category) => [category.name, category.icon]))
 
   return (
     <div className="product-screen">
@@ -5711,7 +5948,8 @@ function MenuSettingsScreenV2({
             className={`product-chip ${activeCategory === category ? 'is-active' : ''}`}
             onClick={() => onCategoryChange(category)}
           >
-            {category}
+            {category !== 'All' ? <CategoryIconBadge icon={categoryIconByName.get(category) ?? inferCategoryIcon(category)} /> : null}
+            <span>{category}</span>
           </button>
         ))}
       </div>
@@ -5909,7 +6147,7 @@ type ProductEditModalV2Props = {
   onClose: () => void
   onSaveMenuItem: (item: MenuItem) => Promise<void>
   onRemoveMenuItem: (itemId: string) => Promise<void>
-  onSaveCategory: (input: { id: string | null; name: string; description: string }) => void
+  onSaveCategory: (input: { id: string | null; name: string; description: string; icon: CategoryIconKey }) => void
   onDeleteCategory: (categoryId: string) => void
 }
 
@@ -5952,6 +6190,7 @@ function ProductEditModalV2({
     id: category?.id ?? null,
     name: category?.name ?? '',
     description: category?.description ?? '',
+    icon: category?.icon ?? inferCategoryIcon(category?.name ?? ''),
   })
 
   async function submitMenuDraft() {
@@ -6194,6 +6433,25 @@ function ProductEditModalV2({
               <label className="input-field">
                 <span>Description</span>
                 <textarea className="text-area" value={categoryDraft.description} onChange={(event) => setCategoryDraft((current) => ({ ...current, description: event.target.value }))} />
+              </label>
+              <label className="input-field">
+                <span>Category Icon</span>
+                <div className="category-icon-picker" role="radiogroup" aria-label="Category icon">
+                  {categoryIconOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`category-icon-choice ${categoryDraft.icon === option.value ? 'is-selected' : ''}`}
+                      role="radio"
+                      aria-checked={categoryDraft.icon === option.value}
+                      aria-label={option.label}
+                      title={option.label}
+                      onClick={() => setCategoryDraft((current) => ({ ...current, icon: option.value }))}
+                    >
+                      <CategoryIconBadge icon={option.value} />
+                    </button>
+                  ))}
+                </div>
               </label>
             </section>
           </div>
@@ -7011,6 +7269,11 @@ function formatQuantity(value: number, unit: string) {
   return `${normalized} ${unit}`
 }
 
+function formatShortOrderNumber(value: string) {
+  const cleaned = value.trim()
+  return cleaned.length <= 8 ? cleaned : cleaned.slice(-8)
+}
+
 function formatPhp(value: number) {
   return new Intl.NumberFormat('en-PH', {
     style: 'currency',
@@ -7031,16 +7294,21 @@ function formatDueDate(value: string) {
 }
 
 function formatFullDateTime(value: string) {
+  const date = new Date(value)
+  if (!value || Number.isNaN(date.getTime())) {
+    return 'No activity yet'
+  }
   return new Intl.DateTimeFormat('en-PH', {
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
-  }).format(new Date(value))
+  }).format(date)
 }
 
 function formatActivityTime(value: string) {
-  return `Last activity ${formatFullDateTime(value)}`
+  const formatted = formatFullDateTime(value)
+  return formatted === 'No activity yet' ? formatted : `Last activity ${formatted}`
 }
 
 function cashMovementLabel(type: CashMovementType) {

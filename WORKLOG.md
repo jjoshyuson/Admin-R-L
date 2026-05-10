@@ -323,3 +323,43 @@
 - Test result: build passed; Playwright smoke tests passed 4/4 after canonicalizing categories by normalized name, reusing existing cloud category IDs during menu persistence, deduping incoming remote category rows for UI state, and creating/using a real fallback category during delete reassignments.
 - Screenshot filename: existing smoke screenshots regenerated during `npm run test:smoke`
 - Remaining issue if any: this pass repairs the web category identity logic, but any already-created duplicate category rows in Supabase from older buggy sessions may still need one cleanup pass if they remain inactive clutter in the backend.
+
+### Attempt 11
+
+- What was broken: Order History showed full order IDs in the list, Category Settings had no category icon customization, Cash Control could crash with `Invalid time value`, and Cash Overview did not expose the Bank / GCash account balance.
+- Suspected cause: the order list reused the raw `deviceOrderId`, category metadata only tracked name/order/description, Cash Control formatted placeholder activity text as a real date, and the GCash account balance was not separated from daily digital-payment sales in the overview.
+- Files changed: `src/App.tsx`, `src/style.css`, `src/lib/mappers.ts`
+- Command run: `npm run build`; `npm test`; `npm run test:smoke`; targeted Playwright check for Cash Control and Cash Overview
+- Test result: build passed; unit tests passed 3/3; Playwright smoke tests passed 4/4; targeted browser run opened Cash Control without page errors and confirmed Cash Overview shows `GCash Balance`.
+- Screenshot filename: `debug-screenshots/13-cash-control.png`, `debug-screenshots/14-cash-overview-gcash.png`
+- Remaining issue if any: category icon choices are stored locally in admin-web browser storage because the current Supabase category schema does not include an icon column.
+
+### Attempt 12
+
+- What was broken: Cash Overview treated `Digital` and `GCash Balance` as separate visible lines even though the user expects one GCash line, and the headline total still read like physical cash-on-hand instead of cash-plus-GCash sales intake.
+- Suspected cause: the previous repair added a separate GCash balance field instead of renaming the existing digital-payment line and recalculating the overview total around Tablet 1 + Tablet 2 cash sales plus GCash.
+- Files changed: `src/App.tsx`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright check against `http://127.0.0.1:4175/`
+- Test result: build passed; unit tests passed 3/3; targeted browser run confirmed `GCash` is visible, `GCash Balance` is gone, `Cash + GCash Total` is visible, and there were no page or console errors.
+- Screenshot filename: `debug-screenshots/15-cash-overview-gcash-label.png`
+- Remaining issue if any: none for this Cash Overview label/calculation correction.
+
+### Attempt 13
+
+- What was broken: the category icon setting used a native text dropdown, which made the icon customization feel like selecting labels instead of choosing icons.
+- Suspected cause: the first icon pass reused a simple `<select>` for speed instead of a visual icon picker.
+- Files changed: `src/App.tsx`, `src/style.css`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright check against `http://127.0.0.1:4175/`
+- Test result: build passed; unit tests passed 3/3; targeted browser run confirmed the category editor has no native select, shows the icon picker grid, exposes 7 icon choices, and has no page or console errors.
+- Screenshot filename: `debug-screenshots/16-category-icon-picker.png`
+- Remaining issue if any: none for the picker UI shape; the icon choices still persist locally until the Supabase category schema gets an icon column.
+
+### Attempt 14
+
+- What was broken: the visual icon picker still looked too sparse and generic because it only exposed 7 small monochrome choices.
+- Suspected cause: the icon picker was a quick replacement for the dropdown, not a complete category icon tray.
+- Files changed: `src/App.tsx`, `src/style.css`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright check against `http://127.0.0.1:4175/`
+- Test result: build passed; unit tests passed 3/3; targeted browser run confirmed the picker has no native select, shows 22 icon choices, and has no page or console errors.
+- Screenshot filename: `debug-screenshots/17-category-icon-picker-expanded.png`
+- Remaining issue if any: none for the expanded picker; icon values still persist locally until the Supabase category schema gets an icon column.

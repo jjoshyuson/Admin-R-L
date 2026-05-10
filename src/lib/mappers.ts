@@ -364,10 +364,11 @@ export function buildCashAccounts(orders: OrderRecord[], movements: CashMovement
   const orderedIds = ['main-safe', 'tablet-1', 'tablet-2', 'bank-gcash']
   return orderedIds.map((id) => {
     const matchingMovements = movements.filter((movement) => normalizeAccountId(movement.accountId) === id)
-    const currentBalance = matchingMovements.reduce((sum, movement) => sum + movementSignedAmount(movement), 0)
+    const movementBalance = matchingMovements.reduce((sum, movement) => sum + movementSignedAmount(movement), 0)
     const salesToday = orders
       .filter((order) => normalizeAccountId(order.deviceId) === id || (id === 'bank-gcash' && (order.gcashAmount ?? 0) > 0))
       .reduce((sum, order) => sum + (id === 'bank-gcash' ? order.gcashAmount ?? 0 : order.cashAmount ?? order.total), 0)
+    const currentBalance = id === 'bank-gcash' ? movementBalance + salesToday : movementBalance
     const latestMovement = matchingMovements[0]
     return {
       id,

@@ -1778,12 +1778,96 @@ button {
   background: #eef2f7;
   color: #334155;
   font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .product-chip.is-active {
   background: #0f8c95;
   color: #fff;
   box-shadow: 0 12px 22px rgba(15, 140, 149, 0.22);
+}
+
+.category-icon-badge {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  background: linear-gradient(180deg, #f0fdfa 0%, #e6fffb 100%);
+  color: #0f766e;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+}
+
+.product-chip .category-icon-badge {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.product-chip.is-active .category-icon-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.category-icon-svg {
+  width: 21px;
+  height: 21px;
+}
+
+.category-icon-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
+  gap: 10px;
+  align-items: center;
+  max-height: 248px;
+  overflow-y: auto;
+  padding: 10px;
+  border-radius: 16px;
+  border: 1px solid #d7e0e4;
+  background: #f8fafc;
+}
+
+.category-icon-choice {
+  min-width: 52px;
+  height: 52px;
+  border-radius: 15px;
+  display: grid;
+  place-items: center;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  color: #0f766e;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.04);
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.category-icon-choice:hover {
+  transform: translateY(-1px);
+  border-color: rgba(15, 140, 149, 0.38);
+  box-shadow: 0 12px 22px rgba(15, 23, 42, 0.08);
+}
+
+.category-icon-choice .category-icon-badge {
+  width: 40px;
+  height: 40px;
+  border-radius: 13px;
+  background: transparent;
+  border-color: transparent;
+}
+
+.category-icon-choice.is-selected {
+  background: linear-gradient(180deg, #16a3ad 0%, #0f8c95 100%);
+  border-color: #0f8c95;
+  color: #fff;
+  box-shadow: 0 14px 24px rgba(15, 140, 149, 0.28);
+}
+
+.category-icon-choice.is-selected .category-icon-badge {
+  color: #fff;
 }
 
 .category-settings-entry,
@@ -1973,7 +2057,7 @@ button {
 
 .category-row-card {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
+  grid-template-columns: 36px 32px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   padding: 14px;
