@@ -404,3 +404,43 @@
 - Test result: build passed; unit tests passed 4/4; Playwright smoke suite passed 5/5 with explicit product/category deactivation paths.
 - Screenshot filename: existing smoke screenshots regenerated during the smoke suite.
 - Remaining issue if any: half-order pricing still requires running `SUPABASE_MENU_HALF_PRICE.sql` in Supabase SQL editor or applying the equivalent database migration with owner/service-role credentials.
+
+### Attempt 19
+
+- What was broken: Recipes still used the header `+` as the Add Prep Product entry point, while the requested shape was a bell icon in that position and a Menu Settings-style widget for prep creation. The Menu Settings floating `+` also sat slightly too low near the bottom navigation.
+- Suspected cause: the previous Recipes split kept the old header add action and only added a secondary prep button inside the Prep Products section instead of promoting prep creation into its own top widget.
+- Files changed: `src/App.tsx`, `src/style.css`, `WORKLOG.md`
+- Command run: `npm run build`; `npm run test:smoke -- --reporter=line`
+- Test result: build passed; Playwright smoke suite passed 5/5 after replacing the Recipes header `+` with a clickable bell that scrolls to menu recipe links, adding an Add Prep Product widget below the recipe filters, removing the duplicate prep section button, and raising the floating Menu Settings add button.
+- Screenshot filename: `debug-screenshots/07-recipe-tab-load.png`, `debug-screenshots/09-prep-product-modal.png`, `debug-screenshots/11-tablet-menu-settings.png`, `debug-screenshots/12-tablet-recipes.png`
+- Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 20
+
+- What was broken: the sellable menu item recipe-link list still appeared inline on the Recipes page, but the requested layout was for that list to live behind the bell icon.
+- Suspected cause: Attempt 19 changed the header icon but left the existing menu-link section in page flow instead of moving it into the bell interaction.
+- Files changed: `src/App.tsx`, `src/style.css`, `tests/smoke.spec.ts`, `WORKLOG.md`
+- Command run: `npm run build`; `npx playwright test --grep "daily log and recipes" --reporter=line`
+- Test result: build passed; focused Playwright smoke passed after moving the menu recipe-link cards into a bell-opened bottom sheet and updating the recipe smoke test to open the bell before selecting Create Recipe / Manage Recipe.
+- Screenshot filename: `debug-screenshots/07-recipe-tab-load.png`, `debug-screenshots/08-recipe-editor.png`, `debug-screenshots/09-prep-product-modal.png`
+- Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 21
+
+- What was broken: the Recipes bell did not show the pending recipe count, recipe category chips were still static and omitted live categories such as PANSIT, and half-price support could remain hidden after adding the Supabase column.
+- Suspected cause: the bell icon only exposed the count in its aria label, recipe chips used an old hard-coded list, and the half-price schema check inferred support from a sample product row instead of probing the column directly.
+- Files changed: `src/App.tsx`, `src/style.css`, `src/lib/adminApi.ts`, `WORKLOG.md`
+- Command run: `npm run build`; `npx playwright test --grep "daily log and recipes" --reporter=line`
+- Test result: build passed; focused Playwright smoke passed. The recipe screenshot now shows a numeric bell badge, dynamic category chips including PANSIT, and no half-price unavailable warning when the Supabase schema exposes `half_order_price` or `half_price`.
+- Screenshot filename: `debug-screenshots/07-recipe-tab-load.png`
+- Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 22
+
+- What was broken: Daily Log allowed duplicate today drafts, new logs did not copy the previous day, missing dates were invisible, Daily Log categories were not Supabase-backed, and free-text ingredient units made recipe costing impossible to convert reliably.
+- Suspected cause: the Daily Log flow was still app-local and treated ingredient unit text as display data instead of structured costing data.
+- Files changed: `src/App.tsx`, `src/style.css`, `src/lib/adminApi.ts`, `src/lib/adminTypes.ts`, `src/hooks/AdminDataContext.tsx`, `src/hooks/useRecipesAccounting.ts`, `tests/smoke.spec.ts`, `WORKLOG.md`, plus `../SUPABASE_DAILY_LOG_FAILSAFE.sql`.
+- Command run: `npm run build`; `npm test`; `npm run test:smoke -- --reporter=line --workers=1`
+- Test result: build passed; unit tests passed 4/4; Playwright smoke passed 5/5 after adding the duplicate-day shake/highlight guard, previous-log copy behavior, missing-log bell, Daily Log category settings, fixed modal layout, fixed unit dropdowns, and kg/g/lb/oz/L/mL conversion for recipe costing.
+- Screenshot filename: existing smoke screenshots regenerated during the smoke suite.
+- Remaining issue if any: Supabase environments still need `SUPABASE_DAILY_LOG_FAILSAFE.sql` applied before category/settings persistence is fully backed by the database; Gemini screenshot review is still pending because no Gemini review tool was available in this session.

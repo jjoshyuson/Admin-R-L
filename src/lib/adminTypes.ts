@@ -106,6 +106,27 @@ export type IngredientPriceLog = {
   sourceLogTitle: string | null
 }
 
+export type IngredientCategory = {
+  id: string
+  name: string
+  sortOrder: number
+  isActive: boolean
+}
+
+export type IngredientRegistryItem = {
+  id: string
+  name: string
+  categoryId: string | null
+  defaultUnit: string
+  isActive: boolean
+}
+
+export type AdminSetting = {
+  key: string
+  value: Record<string, unknown>
+  updatedAt: string
+}
+
 export type DailyAccountingRecord = {
   businessDate: string
   calculatedAt: string
@@ -321,6 +342,11 @@ export type SaveRecipeSetInput = {
 
 export type SaveIngredientPriceLogInput = {
   logs: IngredientPriceLog[]
+}
+
+export type SaveIngredientRegistryInput = {
+  categories: IngredientCategory[]
+  ingredients: IngredientRegistryItem[]
 }
 
 export type TransferCashInput = {

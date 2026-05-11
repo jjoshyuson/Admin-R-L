@@ -13,7 +13,9 @@ import {
   fetchDailyAccountingRecords,
   loadAdminDataset,
   resetOperationalData,
+  saveDailyLogMissingStartDate,
   saveIngredientPriceLog,
+  saveIngredientRegistry,
   saveMenuCatalog,
   savePayable,
   saveRecipeSet,
@@ -39,7 +41,9 @@ import type {
   CashMovement,
   DailyAccountingRecord,
   DashboardSnapshot,
+  IngredientCategory,
   IngredientPriceLog,
+  IngredientRegistryItem,
   LogRecordView,
   MenuCategory,
   MenuProduct,
@@ -53,6 +57,7 @@ import type {
   RecipeView,
   ResetOperationalDataInput,
   SaveIngredientPriceLogInput,
+  SaveIngredientRegistryInput,
   SaveMenuCatalogInput,
   SavePayableInput,
   SaveRecipeSetInput,
@@ -74,6 +79,9 @@ type AdminState = {
   recipes: Recipe[]
   recipeIngredients: RecipeIngredient[]
   ingredientLogs: IngredientPriceLog[]
+  ingredientCategories: IngredientCategory[]
+  ingredientRegistry: IngredientRegistryItem[]
+  dailyLogMissingStartDate: string | null
   accounting: DailyAccountingRecord[]
   cashMovements: CashMovement[]
   payables: Payable[]
@@ -94,6 +102,8 @@ type AdminContextValue = AdminState & {
   voidOrder: (input: VoidOrderInput) => Promise<void>
   saveRecipes: (input: SaveRecipeSetInput) => Promise<void>
   saveIngredientLogs: (input: SaveIngredientPriceLogInput) => Promise<void>
+  saveIngredientRegistry: (input: SaveIngredientRegistryInput) => Promise<void>
+  saveDailyLogMissingStartDate: (startDate: string) => Promise<void>
   transferCash: (input: TransferCashInput) => Promise<void>
   adjustCash: (input: AdjustCashInput) => Promise<void>
   cashPull: (input: CashPullInput) => Promise<void>
@@ -129,6 +139,9 @@ const initialState: AdminState = {
   recipes: [],
   recipeIngredients: [],
   ingredientLogs: [],
+  ingredientCategories: [],
+  ingredientRegistry: [],
+  dailyLogMissingStartDate: null,
   accounting: [],
   cashMovements: [],
   payables: [],
@@ -208,6 +221,9 @@ export function AdminDataProvider({ children }: PropsWithChildren) {
             recipes: dataset.recipes,
             recipeIngredients: dataset.recipeIngredients,
             ingredientLogs: dataset.ingredientLogs,
+            ingredientCategories: dataset.ingredientCategories,
+            ingredientRegistry: dataset.ingredientRegistry,
+            dailyLogMissingStartDate: dataset.dailyLogMissingStartDate,
             accounting: dataset.accounting,
             cashMovements: dataset.cashMovements,
             payables: dataset.payables,
@@ -298,6 +314,18 @@ export function AdminDataProvider({ children }: PropsWithChildren) {
       if (!mountedRef.current) return
       setState((current) => buildState({ ...current, accounting }, current))
     },
+    async saveIngredientRegistry(input) {
+      await withOptimisticMutation(
+        (draft) => buildState({ ...draft, ingredientCategories: input.categories, ingredientRegistry: input.ingredients }, draft),
+        () => saveIngredientRegistry(input),
+      )
+    },
+    async saveDailyLogMissingStartDate(startDate) {
+      await withOptimisticMutation(
+        (draft) => buildState({ ...draft, dailyLogMissingStartDate: startDate }, draft),
+        () => saveDailyLogMissingStartDate(startDate),
+      )
+    },
     async transferCash(input) {
       await withOptimisticMutation((draft) => draft, () => transferCash(input))
     },
@@ -329,6 +357,9 @@ export function AdminDataProvider({ children }: PropsWithChildren) {
               recipes: [],
               recipeIngredients: [],
               ingredientLogs: [],
+              ingredientCategories: state.ingredientCategories,
+              ingredientRegistry: state.ingredientRegistry,
+              dailyLogMissingStartDate: state.dailyLogMissingStartDate,
               accounting: [],
               cashMovements: [],
               payables: [],

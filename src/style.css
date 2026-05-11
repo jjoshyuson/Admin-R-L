@@ -1924,7 +1924,7 @@ button {
 .floating-add-button {
   position: fixed;
   right: calc(max((100vw - 430px) / 2, 0px) + 16px);
-  bottom: calc(96px + env(safe-area-inset-bottom));
+  bottom: calc(118px + env(safe-area-inset-bottom));
   width: 56px;
   height: 56px;
   border-radius: 999px;
@@ -2061,6 +2061,19 @@ button {
   gap: 12px;
   align-items: center;
   padding: 14px;
+}
+
+.daily-log-category-row {
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+}
+
+.daily-log-category-row .category-row-copy {
+  min-width: 0;
+}
+
+.daily-log-category-row .category-row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .category-row-card.is-dragging {
@@ -2344,6 +2357,107 @@ button {
   box-shadow: 0 12px 24px rgba(148, 163, 184, 0.12);
 }
 
+.recipe-bell-button {
+  position: relative;
+}
+
+.recipe-bell-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #dc2626;
+  color: #fff;
+  border: 2px solid #fff;
+  font-size: 0.62rem;
+  line-height: 1;
+  font-weight: 800;
+  box-shadow: 0 8px 16px rgba(220, 38, 38, 0.22);
+}
+
+.daily-log-bell-button {
+  position: relative;
+}
+
+.daily-log-bell-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #dc2626;
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #fff;
+}
+
+.record-screen.is-shaking {
+  animation: daily-log-shake 420ms ease-in-out;
+}
+
+.record-card-button.is-duplicate-target .shared-record-card {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.16);
+}
+
+@keyframes daily-log-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-8px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(5px); }
+}
+
+.daily-log-missing-list {
+  display: grid;
+  gap: 10px;
+}
+
+.daily-log-missing-row,
+.ingredient-assignment-row {
+  width: 100%;
+  border: 0;
+  text-align: left;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 170px);
+  align-items: center;
+  gap: 12px;
+}
+
+.ingredient-assignment-row > div {
+  min-width: 0;
+}
+
+.daily-log-missing-row span,
+.ingredient-assignment-row strong {
+  color: #111827;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.daily-log-missing-row small,
+.ingredient-assignment-row small {
+  color: #64748b;
+}
+
+.ingredient-assignment-row .cash-select {
+  width: 100%;
+  max-width: 170px;
+  justify-self: end;
+}
+
 .saved-pill {
   display: inline-flex;
   align-items: center;
@@ -2368,6 +2482,71 @@ button {
   display: grid;
   gap: 14px;
   margin-top: 20px;
+}
+
+.recipe-prep-entry {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0 14px;
+  padding: 14px 16px;
+  text-align: left;
+}
+
+.recipe-prep-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: #eef7f8;
+  color: #0b6870;
+}
+
+.recipe-prep-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.recipe-prep-copy strong {
+  font-size: 0.95rem;
+  color: #111827;
+}
+
+.recipe-prep-copy small {
+  margin-top: 4px;
+  font-size: 0.73rem;
+  line-height: 1.4;
+  color: #64748b;
+}
+
+.recipe-link-sheet {
+  max-height: min(82vh, 720px);
+}
+
+.recipe-link-sheet-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  align-items: start;
+  gap: 12px;
+}
+
+.recipe-link-sheet-header h2 {
+  margin: 4px 0 0;
+  font-size: 1rem;
+  color: #111827;
+}
+
+.recipe-link-sheet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 12px calc(14px + env(safe-area-inset-bottom));
 }
 
 .recipe-section-head {

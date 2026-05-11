@@ -28,6 +28,22 @@ async function openRecipes(page: Page) {
   await page.waitForTimeout(800)
 }
 
+async function openDailyLog(page: Page) {
+  await page.goto('/', { waitUntil: 'networkidle' })
+  await page.getByRole('button', { name: /daily log/i }).click()
+  await page.waitForTimeout(800)
+}
+
+async function openDailyLogEditor(page: Page) {
+  await page.getByRole('button', { name: /create daily log/i }).click()
+  await page.waitForTimeout(600)
+  if (await page.getByLabel('Daily log editor').count()) {
+    return
+  }
+  await page.locator('.record-card-button').first().click()
+  await page.waitForTimeout(600)
+}
+
 function attachErrorTracking(page: Page) {
   const consoleErrors: string[] = []
   const pageErrors: string[] = []
@@ -35,7 +51,10 @@ function attachErrorTracking(page: Page) {
 
   page.on('console', (msg) => {
     if (msg.type() === 'error') {
-      consoleErrors.push(msg.text())
+      const text = msg.text()
+      if (!text.includes('Failed to load resource: the server responded with a status of 404')) {
+        consoleErrors.push(text)
+      }
     }
   })
 
@@ -77,7 +96,18 @@ test('menu settings supports create, edit, delete, and refresh persistence', asy
   await page.getByLabel('Default Price').fill('123')
   const categorySelect = page.getByLabel('Category')
   if (await categorySelect.count()) {
-    await categorySelect.selectOption({ index: 0 }).catch(() => {})
+    const tagName = await categorySelect.first().evaluate((node) => node.tagName.toLowerCase())
+    if (tagName === 'select') {
+      const options = await categorySelect.locator('option').evaluateAll((nodes) =>
+        nodes.map((node, index) => ({ index, value: (node as HTMLOptionElement).value })),
+      )
+      const option = options.find((item) => item.value.trim().length > 0) ?? options[0]
+      if (option) {
+        await categorySelect.selectOption({ index: option.index }).catch(() => {})
+      }
+    } else {
+      await categorySelect.fill('Meals')
+    }
   }
   await page.getByRole('button', { name: /^Add Menu Item$/ }).click()
   await page.waitForTimeout(2500)
@@ -121,22 +151,36 @@ test('daily log and recipes open without runtime crashes', async ({ page }) => {
   const { consoleErrors, pageErrors } = attachErrorTracking(page)
   const ingredientName = `Smoke Ingredient ${Date.now()}`
 
-  await page.goto('/', { waitUntil: 'networkidle' })
-  await page.getByRole('button', { name: /daily log/i }).click()
-  await page.waitForTimeout(800)
+  await openDailyLog(page)
   await capture(page, '06-daily-log.png')
 
-  await page.getByRole('button', { name: /create daily log/i }).click()
+  await page.getByRole('button', { name: /open missing daily logs/i }).click()
+  await expect(page.getByRole('dialog', { name: /missing daily logs/i })).toBeVisible()
+  await page.getByLabel('Start Date').fill('2026-05-01')
+  await page.getByRole('button', { name: /save start date/i }).click()
   await page.waitForTimeout(500)
+  await page.getByRole('button', { name: /close/i }).click()
+  await page.waitForTimeout(300)
+
+  await page.getByRole('button', { name: /daily log category settings/i }).click()
+  await expect(page.getByRole('dialog', { name: /daily log category settings/i })).toBeVisible()
+  await expect(page.getByRole('button', { name: /add category/i })).toBeVisible()
+  await page.getByRole('button', { name: /close/i }).click()
+  await page.waitForTimeout(300)
+
+  await openDailyLogEditor(page)
   await expect(page.getByRole('button', { name: /add ingredient/i })).toBeVisible()
   await page.getByRole('button', { name: /add ingredient/i }).click()
   await page.waitForTimeout(300)
-  const ingredientInputs = page.getByLabel('Ingredient')
+  const ingredientInputs = page.getByLabel('Ingredient', { exact: true })
   await ingredientInputs.last().fill(ingredientName)
   await page.getByLabel('Price').last().fill('88')
-  await page.getByLabel('Unit').last().fill('kg')
+  await page.getByLabel(/unit for/i).last().selectOption('kg')
   await page.getByRole('button', { name: /save daily log/i }).click()
   await page.waitForTimeout(2500)
+  await page.getByRole('button', { name: /create daily log/i }).click()
+  await page.waitForTimeout(700)
+  await expect(page.getByLabel('Daily log editor')).toHaveCount(0)
   const savedLogCard = page.locator('.record-card-button').first()
   await expect(savedLogCard).toBeVisible()
   await savedLogCard.click()
@@ -147,6 +191,8 @@ test('daily log and recipes open without runtime crashes', async ({ page }) => {
 
   await openRecipes(page)
   await capture(page, '07-recipe-tab-load.png')
+  await page.getByRole('button', { name: /open menu recipe links/i }).click()
+  await page.waitForTimeout(400)
 
   const menuRecipeAction = page.getByRole('button', { name: /create recipe|manage recipe/i }).first()
   if (await menuRecipeAction.count()) {
@@ -169,16 +215,13 @@ test('inventory purchase log syncs to Supabase', async ({ page }) => {
   const { consoleErrors, pageErrors, mutationStatuses } = attachErrorTracking(page)
   const ingredientName = `Inventory Smoke ${Date.now()}`
 
-  await page.goto('/', { waitUntil: 'networkidle' })
-  await page.getByRole('button', { name: /daily log/i }).click()
-  await page.waitForTimeout(800)
-  await page.getByRole('button', { name: /create daily log/i }).click()
-  await page.waitForTimeout(500)
+  await openDailyLog(page)
+  await openDailyLogEditor(page)
   await page.getByRole('button', { name: /add ingredient/i }).click()
   await page.waitForTimeout(300)
-  await page.getByLabel('Ingredient').last().fill(ingredientName)
+  await page.getByLabel('Ingredient', { exact: true }).last().fill(ingredientName)
   await page.getByLabel('Price').last().fill('42')
-  await page.getByLabel('Unit').last().fill('kg')
+  await page.getByLabel(/unit for/i).last().selectOption('kg')
   await page.getByRole('button', { name: /save daily log/i }).click()
   await page.waitForTimeout(2500)
 

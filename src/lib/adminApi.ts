@@ -5,7 +5,9 @@ import type {
   DailyAccountingRecord,
   InventoryCountRecord,
   InventoryItem,
+  IngredientCategory,
   IngredientPriceLog,
+  IngredientRegistryItem,
   MenuCategory,
   MenuProduct,
   OrderRecord,
@@ -15,6 +17,7 @@ import type {
   RecipeIngredient,
   ResetOperationalDataInput,
   SaveIngredientPriceLogInput,
+  SaveIngredientRegistryInput,
   SaveMenuCatalogInput,
   SavePayableInput,
   SaveRecipeSetInput,
@@ -35,6 +38,9 @@ type AdminDataset = {
   voids: OrderVoidRecord[]
   accounting: DailyAccountingRecord[]
   ingredientLogs: IngredientPriceLog[]
+  ingredientCategories: IngredientCategory[]
+  ingredientRegistry: IngredientRegistryItem[]
+  dailyLogMissingStartDate: string | null
   recipes: Recipe[]
   recipeIngredients: RecipeIngredient[]
   cashMovements: CashMovement[]
@@ -105,25 +111,32 @@ function normalizeImagePathForWrite(rawValue: string | null) {
   return normalized
 }
 
+function isMissingTableError(error: unknown) {
+  if (!error || typeof error !== 'object') return false
+  const message = String(Reflect.get(error, 'message') ?? '').toLowerCase()
+  const code = String(Reflect.get(error, 'code') ?? '')
+  return code === '42P01' || message.includes('could not find the table') || message.includes('does not exist')
+}
+
 async function detectProductHalfPriceColumn() {
   const supabase = requireSupabase()
-  const { data, error } = await supabase.from('products').select('*').limit(1)
-  if (error) throw error
-
-  const sample = data?.[0]
-  if (!sample || typeof sample !== 'object') {
-    return null
-  }
-
-  if ('half_order_price' in sample) {
+  const halfOrderProbe = await supabase.from('products').select('half_order_price').limit(1)
+  if (!halfOrderProbe.error) {
     return 'half_order_price' as const
   }
 
-  if ('half_price' in sample) {
+  const halfPriceProbe = await supabase.from('products').select('half_price').limit(1)
+  if (!halfPriceProbe.error) {
     return 'half_price' as const
   }
 
   return null
+}
+
+async function hasTable(tableName: string) {
+  const supabase = requireSupabase()
+  const { error } = await supabase.from(tableName).select('*').limit(1)
+  return !error
 }
 
 export async function loadAdminDataset(): Promise<AdminDataset> {
@@ -134,6 +147,9 @@ export async function loadAdminDataset(): Promise<AdminDataset> {
     voids,
     accounting,
     ingredientLogs,
+    ingredientCategories,
+    ingredientRegistry,
+    dailyLogMissingStartDate,
     recipes,
     recipeIngredients,
     cashMovements,
@@ -146,6 +162,9 @@ export async function loadAdminDataset(): Promise<AdminDataset> {
     fetchOrderVoids(),
     fetchDailyAccountingRecords(),
     fetchIngredientPriceLogs(),
+    fetchIngredientCategories(),
+    fetchIngredients(),
+    fetchDailyLogMissingStartDate(),
     fetchRecipes(),
     fetchRecipeIngredients(),
     fetchCashMovements(),
@@ -159,6 +178,9 @@ export async function loadAdminDataset(): Promise<AdminDataset> {
     voids,
     accounting,
     ingredientLogs,
+    ingredientCategories,
+    ingredientRegistry,
+    dailyLogMissingStartDate,
     recipes,
     recipeIngredients,
     cashMovements,
@@ -355,6 +377,91 @@ export async function fetchIngredientPriceLogs(): Promise<IngredientPriceLog[]> 
       sourceLogTitle: row.source_log_title ? String(row.source_log_title) : null,
     }))
   })
+}
+
+export async function fetchIngredientCategories(): Promise<IngredientCategory[]> {
+  return maybeConfigured([], async () => {
+    const supabase = requireSupabase()
+    const { data, error } = await supabase
+      .from('ingredient_categories')
+      .select('id,name,sort_order,is_active')
+      .order('sort_order', { ascending: true })
+      .limit(300)
+    if (error) {
+      if (isMissingTableError(error)) return []
+      throw error
+    }
+    return (data ?? []).map((row) => ({
+      id: String(row.id),
+      name: String(row.name ?? 'General'),
+      sortOrder: Number(row.sort_order ?? 0),
+      isActive: row.is_active !== false,
+    }))
+  })
+}
+
+export async function fetchIngredients(): Promise<IngredientRegistryItem[]> {
+  return maybeConfigured([], async () => {
+    const supabase = requireSupabase()
+    const { data, error } = await supabase
+      .from('ingredients')
+      .select('id,name,category_id,default_unit,is_active')
+      .order('name', { ascending: true })
+      .limit(1500)
+    if (error) {
+      if (isMissingTableError(error)) return []
+      throw error
+    }
+    return (data ?? []).map((row) => ({
+      id: String(row.id),
+      name: String(row.name ?? row.id),
+      categoryId: row.category_id == null ? null : String(row.category_id),
+      defaultUnit: String(row.default_unit ?? 'unit'),
+      isActive: row.is_active !== false,
+    }))
+  })
+}
+
+export async function fetchAdminSetting(key: string): Promise<Record<string, unknown> | null> {
+  return maybeConfigured(null, async () => {
+    const supabase = requireSupabase()
+    const { data, error } = await supabase
+      .from('admin_settings')
+      .select('value')
+      .eq('key', key)
+      .maybeSingle()
+    if (error) {
+      if (isMissingTableError(error)) return null
+      throw error
+    }
+    return data?.value && typeof data.value === 'object' ? data.value as Record<string, unknown> : null
+  })
+}
+
+export async function fetchDailyLogMissingStartDate(): Promise<string | null> {
+  const setting = await fetchAdminSetting('daily_log_missing_start_date')
+  const value = setting?.startDate
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+export async function saveAdminSetting(key: string, value: Record<string, unknown>) {
+  return maybeConfigured(undefined, async () => {
+    if (!(await hasTable('admin_settings'))) return
+    const supabase = requireSupabase()
+    const { error } = await supabase.from('admin_settings').upsert({
+      key,
+      value,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'key' })
+    if (error) {
+      if (isMissingTableError(error)) return
+      throw error
+    }
+  })
+}
+
+export async function saveDailyLogMissingStartDate(startDate: string) {
+  return saveAdminSetting('daily_log_missing_start_date', { startDate })
 }
 
 export async function fetchRecipes(): Promise<Recipe[]> {
@@ -624,6 +731,43 @@ export async function saveIngredientPriceLog(input: SaveIngredientPriceLogInput)
       .from('ingredient_price_logs')
       .upsert(payload, { onConflict: 'ingredient_id,business_date' })
     if (result.error) throw result.error
+  })
+}
+
+export async function saveIngredientRegistry(input: SaveIngredientRegistryInput) {
+  return maybeConfigured(undefined, async () => {
+    if (!(await hasTable('ingredient_categories')) || !(await hasTable('ingredients'))) return
+    const supabase = requireSupabase()
+    const now = new Date().toISOString()
+    const categoryPayload = input.categories.map((category, index) => ({
+      id: category.id,
+      name: category.name.trim() || 'General',
+      sort_order: category.sortOrder ?? index,
+      is_active: category.isActive !== false,
+      updated_at: now,
+    }))
+    const ingredientPayload = input.ingredients.map((ingredient) => ({
+      id: ingredient.id,
+      name: ingredient.name.trim(),
+      category_id: ingredient.categoryId,
+      default_unit: ingredient.defaultUnit.trim() || 'unit',
+      is_active: ingredient.isActive !== false,
+      updated_at: now,
+    }))
+    if (categoryPayload.length > 0) {
+      const categoryResult = await supabase.from('ingredient_categories').upsert(categoryPayload, { onConflict: 'id' })
+      if (categoryResult.error) {
+        if (isMissingTableError(categoryResult.error)) return
+        throw categoryResult.error
+      }
+    }
+    if (ingredientPayload.length > 0) {
+      const ingredientResult = await supabase.from('ingredients').upsert(ingredientPayload, { onConflict: 'id' })
+      if (ingredientResult.error) {
+        if (isMissingTableError(ingredientResult.error)) return
+        throw ingredientResult.error
+      }
+    }
   })
 }
 

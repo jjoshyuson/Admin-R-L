@@ -23,7 +23,9 @@ import { createRandomId } from './lib/randomId'
 import { hasSupabaseConfig } from './lib/supabase/client'
 import type {
   DailyAccountingRecord,
+  IngredientCategory,
   IngredientPriceLog,
+  IngredientRegistryItem,
   MenuProduct,
   OrderRecord,
   OrderVoidRecord,
@@ -214,6 +216,7 @@ type LogRecord = {
 type DailyLogEntryDraft = {
   ingredientId: string
   ingredientName: string
+  categoryId: string | null
   price: string
   unit: string
 }
@@ -225,6 +228,11 @@ type DailyLogDraftState = {
   error: string
   saving: boolean
 }
+
+type DailyLogCategoryModalState =
+  | { type: 'settings' }
+  | { type: 'category'; categoryId: string | null }
+  | null
 
 type ResetActionId =
   | 'testing-reset'
@@ -283,6 +291,19 @@ type RecipeDraft = {
   ingredients: RecipeDraftLine[]
   summary: RecipeSummaryMetrics
 }
+
+type UnitFamily = 'weight' | 'volume' | 'count'
+
+const unitOptions: Array<{ value: string; label: string; family: UnitFamily; factor: number }> = [
+  { value: 'kg', label: 'kg', family: 'weight', factor: 1000 },
+  { value: 'g', label: 'g', family: 'weight', factor: 1 },
+  { value: 'lb', label: 'lb', family: 'weight', factor: 453.592 },
+  { value: 'oz', label: 'oz', family: 'weight', factor: 28.3495 },
+  { value: 'l', label: 'L', family: 'volume', factor: 1000 },
+  { value: 'ml', label: 'mL', family: 'volume', factor: 1 },
+  { value: 'pack', label: 'pack', family: 'count', factor: 1 },
+  { value: 'pc', label: 'piece', family: 'count', factor: 1 },
+]
 
 type CashOverviewData = {
   openingCash: number
@@ -380,7 +401,7 @@ const categoryOrder = ['All', 'Meat', 'Beverage', 'Dairy', 'General', 'Produce',
 const dashboardPeriods: DashboardMetricsPeriod[] = ['Today', 'Week to date', 'Month to date']
 const salesRanges: SalesRange[] = ['Today', 'Last 7 Days', 'Week to Date', 'Month to Date', 'All Time']
 const menuFilterChips = ['All']
-const recipeFilterChips = ['All', 'Meals', 'Dishes', 'Drinks', 'Bundles', 'Desserts']
+const defaultRecipeFilterChips = ['All']
 const paymentFilters = ['All Methods', 'GCash', 'Cash', 'Card']
 const deviceFilters = ['All Devices', 'Tablet 1', 'Tablet 2', 'Bank/GCash']
 const categoryIconOptions: Array<{ value: CategoryIconKey; label: string }> = [
@@ -1140,10 +1161,15 @@ function AdminShell() {
     logViews,
     profitData: profitDataView,
     ingredientLogs,
+    ingredientCategories,
+    ingredientRegistry,
+    dailyLogMissingStartDate,
     recipeIngredients,
     refresh: refreshRecipesAccounting,
     saveRecipes: saveRecipesMutation,
     saveIngredientLogs: saveIngredientLogsMutation,
+    saveIngredientRegistry: saveIngredientRegistryMutation,
+    saveDailyLogMissingStartDate: saveDailyLogMissingStartDateMutation,
   } = useRecipesAccounting()
   const {
     cashAccounts: remoteCashAccounts,
@@ -1180,6 +1206,11 @@ function AdminShell() {
   const [dashboardMetricsPeriod, setDashboardMetricsPeriod] = useState<DashboardMetricsPeriod>('Today')
   const [salesRange, setSalesRange] = useState<SalesRange>('Last 7 Days')
   const [dailyLogDraft, setDailyLogDraft] = useState<DailyLogDraftState | null>(null)
+  const [dailyLogCategoryModal, setDailyLogCategoryModal] = useState<DailyLogCategoryModalState>(null)
+  const [dailyLogBellOpen, setDailyLogBellOpen] = useState(false)
+  const [dailyLogStartDateDraft, setDailyLogStartDateDraft] = useState('')
+  const [dailyLogDuplicateDate, setDailyLogDuplicateDate] = useState<string | null>(null)
+  const [dailyLogShakeKey, setDailyLogShakeKey] = useState(0)
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
   const [recipeDraft, setRecipeDraft] = useState<RecipeDraft | null>(null)
   const [recipeDraftError, setRecipeDraftError] = useState('')
@@ -1389,6 +1420,45 @@ function AdminShell() {
     () => buildIngredientCatalog(ingredientLogs, recipes, recipeViews),
     [ingredientLogs, recipeViews, recipes],
   )
+  const dailyLogDates = useMemo(
+    () => Array.from(new Set(ingredientLogs.map((entry) => entry.businessDate).filter(Boolean))).sort(),
+    [ingredientLogs],
+  )
+  const effectiveIngredientCategories = useMemo<IngredientCategory[]>(() => {
+    const activeRemote = ingredientCategories
+      .filter((category) => category.isActive !== false)
+      .sort((left, right) => left.sortOrder - right.sortOrder)
+    return activeRemote.length > 0 ? activeRemote : [defaultIngredientCategory()]
+  }, [ingredientCategories])
+  const effectiveIngredientRegistry = useMemo<IngredientRegistryItem[]>(() => {
+    if (ingredientRegistry.length > 0) {
+      return ingredientRegistry.filter((ingredient) => ingredient.isActive !== false)
+    }
+    const defaultCategory = effectiveIngredientCategories[0] ?? defaultIngredientCategory()
+    return ingredientCatalog
+      .filter((entry) => entry.sourceType === 'ingredient')
+      .map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        categoryId: defaultCategory.id,
+        defaultUnit: entry.unit,
+        isActive: true,
+      }))
+  }, [effectiveIngredientCategories, ingredientCatalog, ingredientRegistry])
+  const categoryByIngredientId = useMemo(
+    () => new Map(effectiveIngredientRegistry.map((ingredient) => [ingredient.id, ingredient.categoryId] as const)),
+    [effectiveIngredientRegistry],
+  )
+  const categoryNameById = useMemo(
+    () => new Map(effectiveIngredientCategories.map((category) => [category.id, category.name] as const)),
+    [effectiveIngredientCategories],
+  )
+  const todayDateKey = manilaDateOffset(0)
+  const missingLogStartDate = dailyLogMissingStartDate ?? dailyLogDates[0] ?? todayDateKey
+  const missingDailyLogDates = useMemo(
+    () => enumerateMissingDateKeys(missingLogStartDate, todayDateKey, new Set(dailyLogDates)),
+    [dailyLogDates, missingLogStartDate, todayDateKey],
+  )
   const menuRecipeEntries = useMemo<MenuRecipeEntry[]>(() => {
     const recipeByMenuItemId = new Map(
       recipes
@@ -1430,6 +1500,17 @@ function AdminShell() {
         }
       }),
     [filteredRecipes, recipes],
+  )
+  const recipeCategoryChips = useMemo(
+    () => [
+      ...defaultRecipeFilterChips,
+      ...uniqueNonEmptyValues([
+        ...remoteCategories.map((category) => category.name),
+        ...menuRecipeEntries.map((item) => item.category),
+        ...prepRecipeEntries.map((item) => item.category),
+      ]),
+    ],
+    [menuRecipeEntries, prepRecipeEntries, remoteCategories],
   )
   const selectedOrder = useMemo(
     () => (selectedOrderId ? orders.find((order) => order.deviceOrderId === selectedOrderId) ?? null : null),
@@ -1620,6 +1701,7 @@ function AdminShell() {
   }
 
   function buildDailyLogDraftEntries(businessDate: string | null) {
+    const fallbackCategoryId = effectiveIngredientCategories[0]?.id ?? defaultIngredientCategory().id
     const sourceEntries = businessDate
       ? ingredientLogs
           .filter((entry) => entry.businessDate === businessDate)
@@ -1629,27 +1711,44 @@ function AdminShell() {
       ? sourceEntries.map((entry) => ({
           ingredientId: entry.ingredientId,
           ingredientName: entry.ingredientName,
+          categoryId: categoryByIngredientId.get(entry.ingredientId) ?? fallbackCategoryId,
           price: entry.price.toFixed(2),
-          unit: entry.unit,
+          unit: normalizeAllowedUnit(entry.unit),
         }))
       : ingredientCatalog.map((entry) => ({
           ingredientId: entry.id,
           ingredientName: entry.name,
+          categoryId: categoryByIngredientId.get(entry.id) ?? fallbackCategoryId,
           price: entry.price > 0 ? entry.price.toFixed(2) : '',
-          unit: entry.unit,
+          unit: normalizeAllowedUnit(entry.unit),
         })))
   }
 
-  function openDailyLogCreator() {
-    const latestBusinessDate = ingredientLogs[0]?.businessDate ?? null
+  function latestDailyLogBefore(targetDate: string) {
+    return dailyLogDates.filter((date) => date < targetDate).sort().at(-1) ?? null
+  }
+
+  function openDailyLogCreatorForDate(targetDate = todayDateKey) {
+    if (dailyLogDates.includes(targetDate)) {
+      setDailyLogDuplicateDate(targetDate)
+      setDailyLogShakeKey((key) => key + 1)
+      setFlashMessage(`Daily log ${targetDate} already exists. Open the existing log and edit it.`)
+      window.setTimeout(() => setDailyLogDuplicateDate(null), 1600)
+      return
+    }
+    const latestBusinessDate = latestDailyLogBefore(targetDate) ?? dailyLogDates.at(-1) ?? null
     const templateEntries = buildDailyLogDraftEntries(latestBusinessDate)
     setDailyLogDraft({
-      businessDate: manilaDateOffset(0),
+      businessDate: targetDate,
       copiedFromLabel: latestBusinessDate,
       entries: templateEntries,
       error: '',
       saving: false,
     })
+  }
+
+  function openDailyLogCreator() {
+    openDailyLogCreatorForDate(todayDateKey)
   }
 
   function openDailyLogRecord(recordId: string) {
@@ -1689,6 +1788,20 @@ function AdminShell() {
     )
   }
 
+  function handleDailyLogEntryCategoryChange(entryIndex: number, categoryId: string) {
+    setDailyLogDraft((current) =>
+      current
+        ? {
+            ...current,
+            error: '',
+            entries: current.entries.map((entry, index) =>
+              index === entryIndex ? { ...entry, categoryId } : entry,
+            ),
+          }
+        : current,
+    )
+  }
+
   function handleAddDailyLogEntry() {
     setDailyLogDraft((current) =>
       current
@@ -1700,8 +1813,9 @@ function AdminShell() {
               {
                 ingredientId: '',
                 ingredientName: '',
+                categoryId: effectiveIngredientCategories[0]?.id ?? defaultIngredientCategory().id,
                 price: '',
-                unit: ingredientCatalog[0]?.unit ?? 'unit',
+                unit: normalizeAllowedUnit(ingredientCatalog[0]?.unit ?? 'pc'),
               },
             ],
           }
@@ -1721,7 +1835,7 @@ function AdminShell() {
       .map((entry) => ({
         ...entry,
         ingredientName: entry.ingredientName.trim(),
-        unit: entry.unit.trim(),
+        unit: normalizeAllowedUnit(entry.unit.trim() || 'pc'),
         numericPrice: Number(entry.price),
       }))
       .filter((entry) => entry.ingredientName && entry.unit)
@@ -1736,6 +1850,23 @@ function AdminShell() {
 
     setDailyLogDraft((current) => (current ? { ...current, saving: true, error: '' } : current))
     try {
+      const existingRegistryById = new Map(effectiveIngredientRegistry.map((ingredient) => [ingredient.id, ingredient]))
+      const nextRegistry = new Map(effectiveIngredientRegistry.map((ingredient) => [ingredient.id, ingredient]))
+      for (const entry of cleanedEntries) {
+        const ingredientId = entry.ingredientId || normalizeLogIngredientId(entry.ingredientName)
+        const existing = existingRegistryById.get(ingredientId)
+        nextRegistry.set(ingredientId, {
+          id: ingredientId,
+          name: entry.ingredientName,
+          categoryId: entry.categoryId ?? effectiveIngredientCategories[0]?.id ?? defaultIngredientCategory().id,
+          defaultUnit: entry.unit,
+          isActive: existing?.isActive ?? true,
+        })
+      }
+      await saveIngredientRegistryMutation({
+        categories: effectiveIngredientCategories,
+        ingredients: Array.from(nextRegistry.values()),
+      })
       await saveIngredientLogsMutation({
         logs: cleanedEntries.map((entry) => ({
           ingredientId: entry.ingredientId || normalizeLogIngredientId(entry.ingredientName),
@@ -1757,6 +1888,92 @@ function AdminShell() {
     } catch (error) {
       setDailyLogDraft((current) => (current ? { ...current, saving: false, error: error instanceof Error ? error.message : 'Failed to save daily log.' } : current))
     }
+  }
+
+  async function persistIngredientSetup(
+    nextCategories: IngredientCategory[],
+    nextIngredients: IngredientRegistryItem[],
+    message: string,
+  ) {
+    await saveIngredientRegistryMutation({
+      categories: nextCategories.map((category, index) => ({ ...category, sortOrder: index })),
+      ingredients: nextIngredients,
+    })
+    setFlashMessage(message)
+  }
+
+  async function handleSaveDailyLogCategory(input: { id: string | null; name: string }) {
+    const name = input.name.trim()
+    if (!name) {
+      setFlashMessage('Ingredient category name is required.')
+      return
+    }
+    const duplicate = effectiveIngredientCategories.some(
+      (category) => category.id !== input.id && normalizeCategoryNameKey(category.name) === normalizeCategoryNameKey(name),
+    )
+    if (duplicate) {
+      setFlashMessage(`${name} already exists in Daily Log categories.`)
+      return
+    }
+    const nextCategories = input.id
+      ? effectiveIngredientCategories.map((category) =>
+          category.id === input.id ? { ...category, name } : category,
+        )
+      : [
+          ...effectiveIngredientCategories,
+          {
+            id: createRandomId('ingredient-category'),
+            name,
+            sortOrder: effectiveIngredientCategories.length,
+            isActive: true,
+          },
+        ]
+    await persistIngredientSetup(nextCategories, effectiveIngredientRegistry, `${name} ingredient category saved.`)
+    setDailyLogCategoryModal({ type: 'settings' })
+  }
+
+  async function handleDeleteDailyLogCategory(categoryId: string) {
+    if (effectiveIngredientCategories.length <= 1) {
+      setFlashMessage('At least one Daily Log category must remain.')
+      return
+    }
+    const category = effectiveIngredientCategories.find((item) => item.id === categoryId)
+    if (!category) return
+    const fallbackCategory = effectiveIngredientCategories.find((item) => item.id !== categoryId) ?? defaultIngredientCategory()
+    const nextCategories = effectiveIngredientCategories.filter((item) => item.id !== categoryId)
+    const nextIngredients = effectiveIngredientRegistry.map((ingredient) =>
+      ingredient.categoryId === categoryId ? { ...ingredient, categoryId: fallbackCategory.id } : ingredient,
+    )
+    await persistIngredientSetup(nextCategories, nextIngredients, `${category.name} category removed from Daily Log.`)
+    setDailyLogCategoryModal({ type: 'settings' })
+  }
+
+  async function handleMoveDailyLogCategory(categoryId: string, direction: -1 | 1) {
+    const index = effectiveIngredientCategories.findIndex((category) => category.id === categoryId)
+    const targetIndex = index + direction
+    if (index < 0 || targetIndex < 0 || targetIndex >= effectiveIngredientCategories.length) return
+    const nextCategories = [...effectiveIngredientCategories]
+    const [category] = nextCategories.splice(index, 1)
+    nextCategories.splice(targetIndex, 0, category)
+    await persistIngredientSetup(nextCategories, effectiveIngredientRegistry, 'Daily Log category order saved.')
+  }
+
+  async function handleIngredientCategoryAssignment(ingredientId: string, categoryId: string) {
+    const ingredient = effectiveIngredientRegistry.find((item) => item.id === ingredientId)
+    if (!ingredient) return
+    const nextIngredients = effectiveIngredientRegistry.map((item) =>
+      item.id === ingredientId ? { ...item, categoryId } : item,
+    )
+    await persistIngredientSetup(effectiveIngredientCategories, nextIngredients, `${ingredient.name} category updated.`)
+  }
+
+  async function handleSaveMissingLogStartDate() {
+    if (!dailyLogStartDateDraft) {
+      setFlashMessage('Missing log start date is required.')
+      return
+    }
+    await saveDailyLogMissingStartDateMutation(dailyLogStartDateDraft)
+    setFlashMessage(`Missing Daily Log tracking starts on ${dailyLogStartDateDraft}.`)
   }
 
   async function handleVoidOrder(orderId: string) {
@@ -1847,7 +2064,7 @@ function AdminShell() {
       servings,
       pricePerServing,
       yieldQuantity,
-      yieldUnit: recipeDraft.yieldUnit.trim() || null,
+      yieldUnit: normalizeAllowedUnit(recipeDraft.yieldUnit.trim() || 'pc'),
       taxRatePercent,
     } as const
     const nextIngredients = recipeDraft.ingredients.map((line, index) => ({
@@ -1857,9 +2074,9 @@ function AdminShell() {
       ingredientRefType: line.ingredientRefType,
       ingredientName: line.ingredientName,
       purchaseQuantity: parseOptionalNumber(line.purchaseQuantity),
-      purchaseUnit: line.purchaseUnit.trim() || 'unit',
+      purchaseUnit: normalizeAllowedUnit(line.purchaseUnit.trim() || 'pc'),
       recipeQuantity: Number(line.recipeQuantity),
-      recipeUnit: line.recipeUnit.trim() || 'unit',
+      recipeUnit: normalizeAllowedUnit(line.recipeUnit.trim() || 'pc'),
       sortOrder: index,
     }))
     const mergedRecipes = [...recipes.filter((item) => item.id !== recipeDraft.id), nextRecipe].sort((left, right) => left.recipeName.localeCompare(right.recipeName))
@@ -2567,8 +2784,16 @@ function AdminShell() {
           {activeTab === 'daily-log' ? (
             <LogsScreen
               records={visibleLogViews}
+              missingCount={missingDailyLogDates.length}
+              duplicateDate={dailyLogDuplicateDate}
+              shakeKey={dailyLogShakeKey}
               onCreateNew={openDailyLogCreator}
               onOpenRecord={openDailyLogRecord}
+              onOpenMissingLogs={() => {
+                setDailyLogStartDateDraft(missingLogStartDate)
+                setDailyLogBellOpen(true)
+              }}
+              onOpenCategorySettings={() => setDailyLogCategoryModal({ type: 'settings' })}
             />
           ) : null}
           {activeTab === 'inventory' ? (
@@ -2671,6 +2896,7 @@ function AdminShell() {
                 menuRecipeEntries={menuRecipeEntries}
                 prepRecipeEntries={prepRecipeEntries}
                 activeRecipeFilter={activeRecipeFilter}
+                recipeCategoryChips={recipeCategoryChips}
                 onRecipeFilterChange={setActiveRecipeFilter}
                 onOpenMenuRecipe={openMenuRecipeEditor}
                 onOpenPrepRecipe={openPrepRecipeEditor}
@@ -2800,12 +3026,53 @@ function AdminShell() {
         {dailyLogDraft ? (
           <DailyLogEditorModal
             draft={dailyLogDraft}
+            categories={effectiveIngredientCategories}
             onClose={() => setDailyLogDraft(null)}
             onDateChange={(value) => setDailyLogDraft((current) => (current ? { ...current, businessDate: value, error: '' } : current))}
             onEntryChange={handleDailyLogEntryChange}
+            onEntryCategoryChange={handleDailyLogEntryCategoryChange}
             onAddEntry={handleAddDailyLogEntry}
             onSave={() => {
               void handleSaveDailyLog()
+            }}
+          />
+        ) : null}
+
+        {dailyLogBellOpen ? (
+          <MissingDailyLogsSheet
+            startDate={dailyLogStartDateDraft}
+            missingDates={missingDailyLogDates}
+            onStartDateChange={setDailyLogStartDateDraft}
+            onSaveStartDate={() => {
+              void handleSaveMissingLogStartDate()
+            }}
+            onCreateDate={(dateKey) => {
+              setDailyLogBellOpen(false)
+              openDailyLogCreatorForDate(dateKey)
+            }}
+            onClose={() => setDailyLogBellOpen(false)}
+          />
+        ) : null}
+
+        {dailyLogCategoryModal ? (
+          <DailyLogCategorySettingsModal
+            modal={dailyLogCategoryModal}
+            categories={effectiveIngredientCategories}
+            ingredients={effectiveIngredientRegistry}
+            categoryNameById={categoryNameById}
+            onClose={() => setDailyLogCategoryModal(null)}
+            onOpenCategory={(categoryId) => setDailyLogCategoryModal({ type: 'category', categoryId })}
+            onAddCategory={() => setDailyLogCategoryModal({ type: 'category', categoryId: null })}
+            onBackToSettings={() => setDailyLogCategoryModal({ type: 'settings' })}
+            onSaveCategory={handleSaveDailyLogCategory}
+            onDeleteCategory={(categoryId) => {
+              void handleDeleteDailyLogCategory(categoryId)
+            }}
+            onMoveCategory={(categoryId, direction) => {
+              void handleMoveDailyLogCategory(categoryId, direction)
+            }}
+            onAssignIngredient={(ingredientId, categoryId) => {
+              void handleIngredientCategoryAssignment(ingredientId, categoryId)
             }}
           />
         ) : null}
@@ -2835,9 +3102,9 @@ function AdminShell() {
                     ingredientRefType: 'ingredient',
                     ingredientName: '',
                     purchaseQuantity: '1',
-                    purchaseUnit: ingredientCatalog[0]?.unit ?? 'unit',
+                    purchaseUnit: normalizeAllowedUnit(ingredientCatalog[0]?.unit ?? 'pc'),
                     recipeQuantity: '',
-                    recipeUnit: ingredientCatalog[0]?.unit ?? 'unit',
+                    recipeUnit: normalizeAllowedUnit(ingredientCatalog[0]?.unit ?? 'pc'),
                   },
                 ],
               }))
@@ -3256,7 +3523,7 @@ function buildIngredientCatalog(
         id: log.ingredientId,
         name: log.ingredientName,
         sourceType: 'ingredient',
-        unit: log.unit || 'unit',
+        unit: normalizeAllowedUnit(log.unit || 'pc'),
         price: log.price,
         purchaseQuantity: 1,
       })
@@ -3277,7 +3544,7 @@ function buildIngredientCatalog(
       id: recipe.id,
       name: recipe.recipeName,
       sourceType: 'recipe',
-      unit: recipe.yieldUnit || 'unit',
+        unit: normalizeAllowedUnit(recipe.yieldUnit || 'pc'),
       price: prepView ? Number(prepView.totalCost.replace(/[^0-9.-]+/g, '')) || 0 : 0,
       purchaseQuantity: recipe.yieldQuantity ?? 1,
     })
@@ -3288,6 +3555,37 @@ function buildIngredientCatalog(
 
 function normalizeLogIngredientId(name: string) {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+function dateKeyToTime(dateKey: string) {
+  const [year, month, day] = dateKey.split('-').map(Number)
+  if (!year || !month || !day) return NaN
+  return Date.UTC(year, month - 1, day)
+}
+
+function addDaysToDateKey(dateKey: string, days: number) {
+  const ts = dateKeyToTime(dateKey)
+  if (!Number.isFinite(ts)) return dateKey
+  return new Date(ts + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+}
+
+function enumerateMissingDateKeys(startDate: string, endDate: string, existingDates: Set<string>) {
+  const start = dateKeyToTime(startDate)
+  const end = dateKeyToTime(endDate)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return []
+  const dates: string[] = []
+  let current = startDate
+  while (dateKeyToTime(current) <= end) {
+    if (!existingDates.has(current)) {
+      dates.push(current)
+    }
+    current = addDaysToDateKey(current, 1)
+  }
+  return dates
+}
+
+function defaultIngredientCategory(): IngredientCategory {
+  return { id: 'ingredient-category-general', name: 'General', sortOrder: 0, isActive: true }
 }
 
 function sanitizeDecimalInput(value: string) {
@@ -3317,7 +3615,7 @@ function createBlankRecipeDraft(
       servings: '1',
       pricePerServing: '',
       yieldQuantity: '1',
-      yieldUnit: ingredientCatalog[0]?.unit ?? 'unit',
+      yieldUnit: normalizeAllowedUnit(ingredientCatalog[0]?.unit ?? 'pc'),
       taxRatePercent: input.taxRatePercent,
       ingredients: [],
       summary: emptyRecipeSummary(),
@@ -3369,7 +3667,7 @@ function buildRecipeDraftFromRemote(
       servings: recipe.servings?.toString() ?? '',
       pricePerServing: recipe.pricePerServing?.toString() ?? '',
       yieldQuantity: recipe.yieldQuantity?.toString() ?? '',
-      yieldUnit: recipe.yieldUnit ?? 'unit',
+      yieldUnit: normalizeAllowedUnit(recipe.yieldUnit ?? 'pc'),
       taxRatePercent: recipe.taxRatePercent.toString(),
       ingredients: recipeIngredients
         .filter((line) => line.recipeId === recipeId)
@@ -3380,9 +3678,9 @@ function buildRecipeDraftFromRemote(
           ingredientRefType: line.ingredientRefType === 'recipe' ? 'recipe' : 'ingredient',
           ingredientName: line.ingredientName,
           purchaseQuantity: (line.purchaseQuantity ?? 1).toString(),
-          purchaseUnit: line.purchaseUnit,
+          purchaseUnit: normalizeAllowedUnit(line.purchaseUnit),
           recipeQuantity: line.recipeQuantity.toString(),
-          recipeUnit: line.recipeUnit,
+          recipeUnit: normalizeAllowedUnit(line.recipeUnit),
         })),
       summary: emptyRecipeSummary(),
     },
@@ -3430,7 +3728,7 @@ function buildRecipeDraftForMenuItem(
       servings: existingDraft?.servings ?? '1',
       pricePerServing: menuItem.price.toString(),
       yieldQuantity: existingDraft?.yieldQuantity ?? '1',
-      yieldUnit: existingDraft?.yieldUnit ?? ingredientCatalog[0]?.unit ?? 'unit',
+      yieldUnit: normalizeAllowedUnit(existingDraft?.yieldUnit ?? ingredientCatalog[0]?.unit ?? 'pc'),
       taxRatePercent: existingDraft?.taxRatePercent ?? '12',
       ingredients: existingDraft?.ingredients ?? [],
       summary: existingDraft?.summary ?? emptyRecipeSummary(),
@@ -3492,14 +3790,88 @@ function computeRecipeLineCost(line: RecipeDraftLine, ingredientCatalog: Ingredi
   if (!line.ingredientRefId || !Number.isFinite(recipeQuantity) || recipeQuantity <= 0 || !Number.isFinite(purchaseQuantity) || purchaseQuantity <= 0) {
     return 0
   }
-  if (normalizeUnit(line.purchaseUnit) !== normalizeUnit(line.recipeUnit)) {
+  const purchaseUnit = unitDefinition(line.purchaseUnit)
+  const recipeUnit = unitDefinition(line.recipeUnit)
+  if (!purchaseUnit || !recipeUnit || purchaseUnit.family !== recipeUnit.family) {
     return null
   }
-  return (recipeQuantity / purchaseQuantity) * referencePrice
+  if (purchaseUnit.family === 'count' && purchaseUnit.value !== recipeUnit.value) {
+    return null
+  }
+  const purchaseBaseQuantity = purchaseQuantity * purchaseUnit.factor
+  const recipeBaseQuantity = recipeQuantity * recipeUnit.factor
+  if (purchaseBaseQuantity <= 0 || recipeBaseQuantity < 0) {
+    return null
+  }
+  return (recipeBaseQuantity / purchaseBaseQuantity) * referencePrice
 }
 
 function normalizeUnit(value: string) {
-  return value.trim().toLowerCase()
+  const normalized = value.trim().toLowerCase()
+  switch (normalized) {
+    case 'kgs':
+    case 'kilogram':
+    case 'kilograms':
+      return 'kg'
+    case 'gram':
+    case 'grams':
+      return 'g'
+    case 'liter':
+    case 'liters':
+    case 'litre':
+    case 'litres':
+      return 'l'
+    case 'milliliter':
+    case 'milliliters':
+    case 'millilitre':
+    case 'millilitres':
+      return 'ml'
+    case 'pound':
+    case 'pounds':
+      return 'lb'
+    case 'ounce':
+    case 'ounces':
+      return 'oz'
+    case 'piece':
+    case 'pieces':
+    case 'pcs':
+    case 'unit':
+    case 'units':
+      return 'pc'
+    case 'packs':
+      return 'pack'
+    default:
+      return normalized
+  }
+}
+
+function unitDefinition(value: string) {
+  const normalized = normalizeUnit(value)
+  return unitOptions.find((unit) => unit.value === normalized) ?? null
+}
+
+function normalizeAllowedUnit(value: string, fallback = 'pc') {
+  return unitDefinition(value)?.value ?? fallback
+}
+
+function UnitSelect({
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  value: string
+  onChange: (value: string) => void
+  ariaLabel?: string
+}) {
+  return (
+    <select className="cash-select" aria-label={ariaLabel} value={normalizeAllowedUnit(value)} onChange={(event) => onChange(event.target.value)}>
+      {unitOptions.map((unit) => (
+        <option key={unit.value} value={unit.value}>
+          {unit.label}
+        </option>
+      ))}
+    </select>
+  )
 }
 
 function uniqueNonEmptyValues(values: string[]) {
@@ -4222,6 +4594,7 @@ type MoreDetailScreenProps = {
   hasDailyLogIngredients: boolean
   halfOrderPriceSupported: boolean
   activeRecipeFilter: string
+  recipeCategoryChips: string[]
   onRecipeFilterChange: (value: string) => void
   onOpenMenuRecipe: (menuItemId: string) => void
   onOpenPrepRecipe: (recipeId: string) => void
@@ -4289,6 +4662,7 @@ function MoreDetailScreen({
   hasDailyLogIngredients,
   halfOrderPriceSupported,
   activeRecipeFilter,
+  recipeCategoryChips,
   onRecipeFilterChange,
   onOpenMenuRecipe,
   onOpenPrepRecipe,
@@ -4383,6 +4757,7 @@ function MoreDetailScreen({
         prepItems={prepRecipeEntries}
         halfOrderPriceSupported={halfOrderPriceSupported}
         activeFilter={activeRecipeFilter}
+        categoryChips={recipeCategoryChips}
         onFilterChange={onRecipeFilterChange}
         onOpenMenuRecipe={onOpenMenuRecipe}
         onOpenPrepRecipe={onOpenPrepRecipe}
@@ -4625,7 +5000,7 @@ function RecipesScreen({ items, activeFilter, onFilterChange, onOpenRecipe, onAd
       </header>
 
       <div className="shared-chip-row" role="tablist" aria-label="Recipe filters">
-        {recipeFilterChips.map((chip) => (
+        {defaultRecipeFilterChips.map((chip) => (
           <button
             key={chip}
             type="button"
@@ -4779,14 +5154,17 @@ function OrderDetailModal({ order, voidRecord, onClose, onVoid }: OrderDetailMod
 
 type DailyLogEditorModalProps = {
   draft: DailyLogDraftState
+  categories: IngredientCategory[]
   onClose: () => void
   onDateChange: (value: string) => void
   onEntryChange: (entryIndex: number, field: 'ingredientName' | 'price' | 'unit', value: string) => void
+  onEntryCategoryChange: (entryIndex: number, categoryId: string) => void
   onAddEntry: () => void
   onSave: () => void
 }
 
-function DailyLogEditorModal({ draft, onClose, onDateChange, onEntryChange, onAddEntry, onSave }: DailyLogEditorModalProps) {
+function DailyLogEditorModal({ draft, categories, onClose, onDateChange, onEntryChange, onEntryCategoryChange, onAddEntry, onSave }: DailyLogEditorModalProps) {
+  const resolvedCategories = categories.length > 0 ? categories : [defaultIngredientCategory()]
   return (
     <div className="modal-overlay" role="presentation">
       <div className="sheet-backdrop" onClick={onClose} />
@@ -4830,6 +5208,20 @@ function DailyLogEditorModal({ draft, onClose, onDateChange, onEntryChange, onAd
                     />
                   </label>
                   <label className="input-field">
+                    <span>Category</span>
+                    <select
+                      className="cash-select"
+                      value={entry.categoryId ?? resolvedCategories[0]?.id ?? ''}
+                      onChange={(event) => onEntryCategoryChange(index, event.target.value)}
+                    >
+                      {resolvedCategories.map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="input-field">
                     <span>Price</span>
                     <input
                       className="text-input"
@@ -4840,7 +5232,7 @@ function DailyLogEditorModal({ draft, onClose, onDateChange, onEntryChange, onAd
                   </label>
                   <label className="input-field">
                     <span>Unit</span>
-                    <input className="text-input" value={entry.unit} onChange={(event) => onEntryChange(index, 'unit', event.target.value)} />
+                    <UnitSelect value={entry.unit} onChange={(value) => onEntryChange(index, 'unit', value)} ariaLabel={`Unit for ${entry.ingredientName || 'ingredient'}`} />
                   </label>
                 </article>
               ))}
@@ -4936,7 +5328,7 @@ function RecipeEditorModal({
               </label>
               <label className="input-field">
                 <span>Yield Unit</span>
-                <input className="text-input" value={draft.yieldUnit} onChange={(event) => onChange((current) => ({ ...current, yieldUnit: event.target.value }))} />
+                <UnitSelect value={draft.yieldUnit} onChange={(value) => onChange((current) => ({ ...current, yieldUnit: value }))} ariaLabel="Yield Unit" />
               </label>
               <label className="input-field">
                 <span>Tax Rate (%)</span>
@@ -4989,8 +5381,8 @@ function RecipeEditorModal({
                                     ingredientRefId: selected?.id ?? '',
                                     ingredientName: selected?.name ?? '',
                                     purchaseQuantity: String(selected?.purchaseQuantity ?? 1),
-                                    purchaseUnit: selected?.unit ?? item.purchaseUnit,
-                                    recipeUnit: selected?.unit ?? item.recipeUnit,
+                                    purchaseUnit: normalizeAllowedUnit(selected?.unit ?? item.purchaseUnit),
+                                    recipeUnit: normalizeAllowedUnit(selected?.unit ?? item.recipeUnit),
                                   }
                                 : item,
                             ),
@@ -5013,7 +5405,7 @@ function RecipeEditorModal({
                     </label>
                     <label className="input-field">
                       <span>Purchase Unit</span>
-                      <input className="text-input" value={line.purchaseUnit} onChange={(event) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, purchaseUnit: event.target.value } : item)) }))} />
+                      <UnitSelect value={line.purchaseUnit} onChange={(value) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, purchaseUnit: value } : item)) }))} ariaLabel={`Purchase unit for ${line.ingredientName || 'ingredient'}`} />
                     </label>
                     <label className="input-field">
                       <span>Recipe Qty</span>
@@ -5021,7 +5413,7 @@ function RecipeEditorModal({
                     </label>
                     <label className="input-field">
                       <span>Recipe Unit</span>
-                      <input className="text-input" value={line.recipeUnit} onChange={(event) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, recipeUnit: event.target.value } : item)) }))} />
+                      <UnitSelect value={line.recipeUnit} onChange={(value) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, recipeUnit: value } : item)) }))} ariaLabel={`Recipe unit for ${line.ingredientName || 'ingredient'}`} />
                     </label>
                   </div>
                   <div className="sheet-footer">
@@ -6228,6 +6620,7 @@ type RecipesManagementScreenProps = {
   prepItems: PrepRecipeEntry[]
   halfOrderPriceSupported: boolean
   activeFilter: string
+  categoryChips: string[]
   onFilterChange: (value: string) => void
   onOpenMenuRecipe: (menuItemId: string) => void
   onOpenPrepRecipe: (recipeId: string) => void
@@ -6241,6 +6634,7 @@ function RecipesManagementScreen({
   prepItems,
   halfOrderPriceSupported,
   activeFilter,
+  categoryChips,
   onFilterChange,
   onOpenMenuRecipe,
   onOpenPrepRecipe,
@@ -6248,6 +6642,9 @@ function RecipesManagementScreen({
   hasDailyLogIngredients,
   onBack,
 }: RecipesManagementScreenProps) {
+  const unlinkedMenuCount = menuItems.filter((item) => !item.recipeId).length
+  const [isMenuRecipePanelOpen, setIsMenuRecipePanelOpen] = useState(false)
+
   return (
     <div className="record-screen">
       <header className="record-header">
@@ -6255,13 +6652,23 @@ function RecipesManagementScreen({
           <span aria-hidden="true">&lt;</span>
         </button>
         <h1>Recipes</h1>
-        <button type="button" className="record-icon-button" aria-label="Add prep product" onClick={onAddPrepRecipe}>
-          <PlusIcon />
+        <button
+          type="button"
+          className="record-icon-button recipe-bell-button"
+          aria-label={`Open menu recipe links, ${unlinkedMenuCount} menu items need recipe costing`}
+          onClick={() => setIsMenuRecipePanelOpen(true)}
+        >
+          <BellIcon />
+          {unlinkedMenuCount > 0 ? (
+            <span className="recipe-bell-badge" aria-hidden="true">
+              {unlinkedMenuCount > 99 ? '99+' : unlinkedMenuCount}
+            </span>
+          ) : null}
         </button>
       </header>
 
       <div className="shared-chip-row" role="tablist" aria-label="Recipe filters">
-        {recipeFilterChips.map((chip) => (
+        {categoryChips.map((chip) => (
           <button
             key={chip}
             type="button"
@@ -6272,6 +6679,17 @@ function RecipesManagementScreen({
           </button>
         ))}
       </div>
+
+      <button type="button" className="surface-card recipe-prep-entry" onClick={onAddPrepRecipe}>
+        <span className="recipe-prep-icon" aria-hidden="true">
+          <RecipeBookIcon />
+        </span>
+        <span className="recipe-prep-copy">
+          <strong>Add Prep Product</strong>
+          <small>Create sauces, mixes, batches, and other prep items used by recipes</small>
+        </span>
+        <span className="action-row-chevron" aria-hidden="true">&gt;</span>
+      </button>
 
       {!hasDailyLogIngredients ? (
         <div className="sync-empty-state">
@@ -6286,48 +6704,13 @@ function RecipesManagementScreen({
           <p>Recipe links still work, but the current Supabase products schema does not store half-price values.</p>
         </div>
       ) : null}
-
-      <section className="recipe-section">
-        <div className="recipe-section-head">
-          <div>
-            <p className="section-kicker">SELLABLE MENU ITEMS</p>
-            <h2>Link Recipe to Menu Item</h2>
-            <p>Create or manage recipe costing for products created in Menu Settings.</p>
-          </div>
-        </div>
-        <div className="shared-card-list">
-          {menuItems.length > 0 ? (
-            menuItems.map((item) => (
-              <article key={item.menuItemId} className="surface-card recipe-link-card">
-                <SafeMenuImage className="shared-thumb-image" imagePath={item.imagePath} name={item.name} />
-                <div className="recipe-link-copy">
-                  <strong>{item.name}</strong>
-                  <small>{item.category} • {formatPhp(item.price)} default • {item.halfPrice > 0 ? `${formatPhp(item.halfPrice)} half` : 'No half-order price'}</small>
-                </div>
-                <button type="button" className="recipe-link-action" onClick={() => onOpenMenuRecipe(item.menuItemId)}>
-                  {item.recipeStatusLabel}
-                </button>
-              </article>
-            ))
-          ) : (
-            <div className="sync-empty-state">
-              <strong>No menu items found.</strong>
-              <p>Create products in Menu Settings first, then attach recipes here.</p>
-            </div>
-          )}
-        </div>
-      </section>
-
       <section className="recipe-section">
         <div className="recipe-section-head">
           <div>
             <p className="section-kicker">PREP PRODUCTS</p>
-            <h2>Add Prep Product</h2>
+            <h2>Prep Products</h2>
             <p>Use prep products for batches and costing inputs that feed other recipes.</p>
           </div>
-          <button type="button" className="ghost-pill" onClick={onAddPrepRecipe}>
-            Add Prep Product
-          </button>
         </div>
         <div className="shared-card-list">
           {prepItems.length > 0 ? (
@@ -6346,11 +6729,58 @@ function RecipesManagementScreen({
           ) : (
             <div className="sync-empty-state">
               <strong>No prep products yet.</strong>
-              <p>Use the plus button here to create sauces, mixes, and other advance-made items.</p>
+              <p>Use the Add Prep Product widget above to create sauces, mixes, and other advance-made items.</p>
             </div>
           )}
         </div>
       </section>
+
+      {isMenuRecipePanelOpen ? (
+        <div className="modal-overlay" role="presentation">
+          <button type="button" className="sheet-backdrop" aria-label="Close menu recipe links" onClick={() => setIsMenuRecipePanelOpen(false)} />
+          <section className="bottom-sheet recipe-link-sheet" role="dialog" aria-modal="true" aria-label="Menu recipe links">
+            <div className="sheet-handle" aria-hidden="true" />
+            <header className="sheet-header recipe-link-sheet-header">
+              <div>
+                <p className="section-kicker">SELLABLE MENU ITEMS</p>
+                <h2>Link Recipe to Menu Item</h2>
+                <p>Create or manage recipe costing for products created in Menu Settings.</p>
+              </div>
+              <button type="button" className="record-icon-button" aria-label="Close" onClick={() => setIsMenuRecipePanelOpen(false)}>
+                <CloseIcon />
+              </button>
+            </header>
+            <div className="recipe-link-sheet-list">
+              {menuItems.length > 0 ? (
+                menuItems.map((item) => (
+                  <article key={item.menuItemId} className="surface-card recipe-link-card">
+                    <SafeMenuImage className="shared-thumb-image" imagePath={item.imagePath} name={item.name} />
+                    <div className="recipe-link-copy">
+                      <strong>{item.name}</strong>
+                      <small>{item.category} - {formatPhp(item.price)} default - {item.halfPrice > 0 ? `${formatPhp(item.halfPrice)} half` : 'No half-order price'}</small>
+                    </div>
+                    <button
+                      type="button"
+                      className="recipe-link-action"
+                      onClick={() => {
+                        setIsMenuRecipePanelOpen(false)
+                        onOpenMenuRecipe(item.menuItemId)
+                      }}
+                    >
+                      {item.recipeStatusLabel}
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <div className="sync-empty-state">
+                  <strong>No menu items found.</strong>
+                  <p>Create products in Menu Settings first, then attach recipes here.</p>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -6770,7 +7200,7 @@ function RecipeEditorModalV2({
                 <label className="input-field">
                   <span>{draft.recipeType === 'PREP' ? 'Yield Unit' : 'Default Price'}</span>
                   {draft.recipeType === 'PREP' ? (
-                    <input className="text-input" value={draft.yieldUnit} onChange={(event) => onChange((current) => ({ ...current, yieldUnit: event.target.value }))} />
+                    <UnitSelect value={draft.yieldUnit} onChange={(value) => onChange((current) => ({ ...current, yieldUnit: value }))} ariaLabel="Yield Unit" />
                   ) : (
                     <div className="currency-input">
                       <em>PHP</em>
@@ -6850,8 +7280,8 @@ function RecipeEditorModalV2({
                                       ingredientRefType: selected?.sourceType ?? 'ingredient',
                                       ingredientName: selected?.name ?? '',
                                       purchaseQuantity: String(selected?.purchaseQuantity ?? 1),
-                                      purchaseUnit: selected?.unit ?? item.purchaseUnit,
-                                      recipeUnit: selected?.unit ?? item.recipeUnit,
+                                      purchaseUnit: normalizeAllowedUnit(selected?.unit ?? item.purchaseUnit),
+                                      recipeUnit: normalizeAllowedUnit(selected?.unit ?? item.recipeUnit),
                                     }
                                   : item,
                               ),
@@ -6874,7 +7304,7 @@ function RecipeEditorModalV2({
                       </label>
                       <label className="input-field">
                         <span>Unit</span>
-                        <input className="text-input" value={line.purchaseUnit} onChange={(event) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, purchaseUnit: event.target.value } : item)) }))} />
+                        <UnitSelect value={line.purchaseUnit} onChange={(value) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, purchaseUnit: value } : item)) }))} ariaLabel={`Purchase unit for ${line.ingredientName || 'ingredient'}`} />
                       </label>
                       <label className="input-field">
                         <span>Quantity Used</span>
@@ -6882,7 +7312,7 @@ function RecipeEditorModalV2({
                       </label>
                       <label className="input-field">
                         <span>Recipe Unit</span>
-                        <input className="text-input" value={line.recipeUnit} onChange={(event) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, recipeUnit: event.target.value } : item)) }))} />
+                        <UnitSelect value={line.recipeUnit} onChange={(value) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, recipeUnit: value } : item)) }))} ariaLabel={`Recipe unit for ${line.ingredientName || 'ingredient'}`} />
                       </label>
                     </div>
                     <div className="finance-row">
@@ -7351,19 +7781,260 @@ function SummaryCounter({ label, value, helper, tone }: SummaryCounterProps) {
   )
 }
 
-type LogsScreenProps = {
-  records: LogRecord[]
-  onCreateNew: () => void
-  onOpenRecord: (recordId: string) => void
+type MissingDailyLogsSheetProps = {
+  startDate: string
+  missingDates: string[]
+  onStartDateChange: (value: string) => void
+  onSaveStartDate: () => void
+  onCreateDate: (dateKey: string) => void
+  onClose: () => void
 }
 
-function LogsScreen({ records, onCreateNew, onOpenRecord }: LogsScreenProps) {
+function MissingDailyLogsSheet({
+  startDate,
+  missingDates,
+  onStartDateChange,
+  onSaveStartDate,
+  onCreateDate,
+  onClose,
+}: MissingDailyLogsSheetProps) {
   return (
-    <div className="record-screen">
+    <div className="modal-overlay" role="presentation">
+      <div className="sheet-backdrop" onClick={onClose} />
+      <section className="bottom-sheet product-edit-sheet" role="dialog" aria-modal="true" aria-label="Missing daily logs">
+        <div className="sheet-handle" />
+        <header className="product-modal-header">
+          <h2>Missing Daily Logs</h2>
+          <button type="button" className="sheet-close-button" onClick={onClose} aria-label="Close">
+            <CloseIcon />
+          </button>
+        </header>
+        <div className="product-modal-scroll">
+          <section className="product-modal-section">
+            <label className="input-field">
+              <span>Start Date</span>
+              <input className="text-input" type="date" value={startDate} onChange={(event) => onStartDateChange(event.target.value)} />
+            </label>
+            <button type="button" className="ghost-pill" onClick={onSaveStartDate}>
+              Save Start Date
+            </button>
+          </section>
+          <section className="product-modal-section">
+            <div className="section-head">
+              <h3>Missing Dates</h3>
+              <span className="saved-pill">{missingDates.length} missing</span>
+            </div>
+            <div className="daily-log-missing-list">
+              {missingDates.length > 0 ? (
+                missingDates.map((dateKey) => (
+                  <button key={dateKey} type="button" className="surface-card daily-log-missing-row" onClick={() => onCreateDate(dateKey)}>
+                    <span>{dateKey}</span>
+                    <small>Create from previous log</small>
+                  </button>
+                ))
+              ) : (
+                <div className="sync-empty-state">
+                  <strong>No missing logs.</strong>
+                  <p>Every date in the selected range already has a Daily Log.</p>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+type DailyLogCategorySettingsModalProps = {
+  modal: NonNullable<DailyLogCategoryModalState>
+  categories: IngredientCategory[]
+  ingredients: IngredientRegistryItem[]
+  categoryNameById: Map<string, string>
+  onClose: () => void
+  onOpenCategory: (categoryId: string) => void
+  onAddCategory: () => void
+  onBackToSettings: () => void
+  onSaveCategory: (input: { id: string | null; name: string }) => void
+  onDeleteCategory: (categoryId: string) => void
+  onMoveCategory: (categoryId: string, direction: -1 | 1) => void
+  onAssignIngredient: (ingredientId: string, categoryId: string) => void
+}
+
+function DailyLogCategorySettingsModal({
+  modal,
+  categories,
+  ingredients,
+  categoryNameById,
+  onClose,
+  onOpenCategory,
+  onAddCategory,
+  onBackToSettings,
+  onSaveCategory,
+  onDeleteCategory,
+  onMoveCategory,
+  onAssignIngredient,
+}: DailyLogCategorySettingsModalProps) {
+  const activeCategories = categories.length > 0 ? categories : [defaultIngredientCategory()]
+  const activeCategory = modal.type === 'category'
+    ? activeCategories.find((category) => category.id === modal.categoryId) ?? null
+    : null
+  const [categoryName, setCategoryName] = useState(activeCategory?.name ?? '')
+
+  useEffect(() => {
+    setCategoryName(activeCategory?.name ?? '')
+  }, [activeCategory?.id, activeCategory?.name])
+
+  if (modal.type === 'category') {
+    return (
+      <div className="modal-overlay" role="presentation">
+        <div className="sheet-backdrop" onClick={onClose} />
+        <section className="bottom-sheet product-edit-sheet" role="dialog" aria-modal="true" aria-label="Daily log category editor">
+          <div className="sheet-handle" />
+          <header className="product-modal-header">
+            <h2>{activeCategory ? 'Edit Ingredient Category' : 'Add Ingredient Category'}</h2>
+            <button type="button" className="sheet-close-button" onClick={onClose} aria-label="Close">
+              <CloseIcon />
+            </button>
+          </header>
+          <div className="product-modal-scroll">
+            <section className="product-modal-section">
+              <label className="input-field">
+                <span>Category Name</span>
+                <input className="text-input" value={categoryName} onChange={(event) => setCategoryName(event.target.value)} />
+              </label>
+            </section>
+          </div>
+          <div className="sheet-footer split-footer">
+            <button type="button" className="ghost-pill" onClick={onBackToSettings}>
+              Back
+            </button>
+            <button type="button" className="save-changes-button" onClick={() => onSaveCategory({ id: activeCategory?.id ?? null, name: categoryName })}>
+              Save Category
+            </button>
+            {activeCategory ? (
+              <button type="button" className="text-danger-button" onClick={() => onDeleteCategory(activeCategory.id)}>
+                Delete Category
+              </button>
+            ) : null}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
+  return (
+    <div className="modal-overlay" role="presentation">
+      <div className="sheet-backdrop" onClick={onClose} />
+      <section className="bottom-sheet product-edit-sheet" role="dialog" aria-modal="true" aria-label="Daily log category settings">
+        <div className="sheet-handle" />
+        <header className="product-modal-header">
+          <h2>Daily Log Category Settings</h2>
+          <button type="button" className="sheet-close-button" onClick={onClose} aria-label="Close">
+            <CloseIcon />
+          </button>
+        </header>
+        <div className="product-modal-scroll">
+          <section className="product-modal-section">
+            <div className="section-head">
+              <h3>Categories</h3>
+              <button type="button" className="ghost-pill" onClick={onAddCategory}>
+                Add Category
+              </button>
+            </div>
+            <div className="category-management-list">
+              {activeCategories.map((category, index) => (
+                <article key={category.id} className="category-row-card daily-log-category-row">
+                  <span className="drag-handle" aria-hidden="true"><DragHandleIcon /></span>
+                  <button type="button" className="category-row-copy" onClick={() => onOpenCategory(category.id)}>
+                    <strong>{category.name}</strong>
+                    <small>{ingredients.filter((ingredient) => ingredient.categoryId === category.id).length} ingredients</small>
+                  </button>
+                  <div className="category-row-actions">
+                    <button type="button" className="icon-button" aria-label={`Move ${category.name} up`} disabled={index === 0} onClick={() => onMoveCategory(category.id, -1)}>
+                      ^
+                    </button>
+                    <button type="button" className="icon-button" aria-label={`Move ${category.name} down`} disabled={index === activeCategories.length - 1} onClick={() => onMoveCategory(category.id, 1)}>
+                      v
+                    </button>
+                    <button type="button" className="icon-button" aria-label={`Edit ${category.name}`} onClick={() => onOpenCategory(category.id)}>
+                      <PencilIcon />
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+          <section className="product-modal-section">
+            <div className="section-head">
+              <h3>Ingredient Assignments</h3>
+              <span className="saved-pill">{ingredients.length} ingredients</span>
+            </div>
+            <div className="cash-form-stack">
+              {ingredients.length > 0 ? (
+                ingredients.map((ingredient) => (
+                  <article key={ingredient.id} className="surface-card ingredient-assignment-row">
+                    <div>
+                      <strong>{ingredient.name}</strong>
+                      <small>{categoryNameById.get(ingredient.categoryId ?? '') ?? 'General'} • {ingredient.defaultUnit}</small>
+                    </div>
+                    <select className="cash-select" value={ingredient.categoryId ?? activeCategories[0]?.id ?? ''} onChange={(event) => onAssignIngredient(ingredient.id, event.target.value)}>
+                      {activeCategories.map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </select>
+                  </article>
+                ))
+              ) : (
+                <div className="sync-empty-state">
+                  <strong>No ingredients yet.</strong>
+                  <p>Save a Daily Log first so ingredients can be assigned to categories.</p>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+type LogsScreenProps = {
+  records: LogRecord[]
+  missingCount: number
+  duplicateDate: string | null
+  shakeKey: number
+  onCreateNew: () => void
+  onOpenRecord: (recordId: string) => void
+  onOpenMissingLogs: () => void
+  onOpenCategorySettings: () => void
+}
+
+function LogsScreen({
+  records,
+  missingCount,
+  duplicateDate,
+  shakeKey,
+  onCreateNew,
+  onOpenRecord,
+  onOpenMissingLogs,
+  onOpenCategorySettings,
+}: LogsScreenProps) {
+  return (
+    <div key={shakeKey} className={`record-screen ${duplicateDate ? 'is-shaking' : ''}`}>
       <header className="record-header record-header-leading">
         <h1>Logs</h1>
         <div className="record-header-actions">
           <span className="saved-pill">{records.length} saved</span>
+          <button type="button" className="record-icon-button daily-log-bell-button" aria-label="Open missing daily logs" onClick={onOpenMissingLogs}>
+            <BellIcon />
+            {missingCount > 0 ? <span className="daily-log-bell-badge">{missingCount}</span> : null}
+          </button>
+          <button type="button" className="record-icon-button" aria-label="Daily log category settings" onClick={onOpenCategorySettings}>
+            <GearIcon />
+          </button>
           <button type="button" className="record-icon-button" aria-label="Create daily log" onClick={onCreateNew}>
             <PlusIcon />
           </button>
@@ -7373,7 +8044,12 @@ function LogsScreen({ records, onCreateNew, onOpenRecord }: LogsScreenProps) {
       <div className="shared-card-list">
         {records.length > 0 ? (
           records.map((record) => (
-            <button key={record.id} type="button" className="record-card-button" onClick={() => onOpenRecord(record.id)}>
+            <button
+              key={record.id}
+              type="button"
+              className={`record-card-button ${duplicateDate === record.id ? 'is-duplicate-target' : ''}`}
+              onClick={() => onOpenRecord(record.id)}
+            >
               <UnifiedRecordCard
                 media={<ClipboardIcon />}
                 title={record.title}
@@ -7756,6 +8432,15 @@ function PlusIcon() {
   return (
     <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
       <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function BellIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
+      <path d="M18 9a6 6 0 0 0-12 0c0 6-2 7-2 7h16s-2-1-2-7Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M10 20a2.2 2.2 0 0 0 4 0" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
     </svg>
   )
 }

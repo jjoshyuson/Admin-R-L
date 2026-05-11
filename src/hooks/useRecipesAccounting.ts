@@ -5,6 +5,9 @@ export function useRecipesAccounting() {
     recipes,
     recipeIngredients,
     ingredientLogs,
+    ingredientCategories,
+    ingredientRegistry,
+    dailyLogMissingStartDate,
     accounting,
     recipeViews,
     logViews,
@@ -14,11 +17,16 @@ export function useRecipesAccounting() {
     refresh,
     saveRecipes,
     saveIngredientLogs,
+    saveIngredientRegistry,
+    saveDailyLogMissingStartDate,
   } = useAdminDataContext()
   return {
     recipes,
     recipeIngredients,
     ingredientLogs,
+    ingredientCategories,
+    ingredientRegistry,
+    dailyLogMissingStartDate,
     accounting,
     recipeViews,
     logViews,
@@ -28,5 +36,7 @@ export function useRecipesAccounting() {
     refresh,
     saveRecipes,
     saveIngredientLogs,
+    saveIngredientRegistry,
+    saveDailyLogMissingStartDate,
   }
 }
