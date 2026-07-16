@@ -70,11 +70,18 @@ export function parseOrderItems(rawItems: unknown): OrderItemRecord[] {
     .map((raw) => {
       const row = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : null
       if (!row) return null
-      return {
+      const item: OrderItemRecord = {
         name: String(row.name ?? '').trim(),
         quantity: safeNumber(row.quantity),
         lineTotal: safeNumber(row.lineTotal ?? row.line_total),
       }
+      if (row.productId != null) item.productId = String(row.productId)
+      if (row.serviceMode != null) item.serviceMode = String(row.serviceMode)
+      if (row.isHalfOrder != null) item.isHalfOrder = Boolean(row.isHalfOrder)
+      if (row.price != null) item.price = safeNumber(row.price)
+      if (row.kitchenStatus != null) item.kitchenStatus = String(row.kitchenStatus)
+      if (row.isChecked != null) item.isChecked = Boolean(row.isChecked)
+      return item
     })
     .filter((item): item is OrderItemRecord => Boolean(item && item.name))
 }
@@ -173,11 +180,40 @@ export function buildOrderHistoryViews(orders: OrderRecord[], voids: OrderVoidRe
         total: formatPhp(resolveOrderSalesAmount(order)),
         table: order.deviceOrderId.slice(-4).padStart(4, '0'),
         payment: order.paymentMethod || 'Unknown',
+        displayStatus: formatOrderDisplayStatus(order),
         device: accountLabel(order.deviceId),
         time: new Date(order.createdAt).toLocaleString(),
         status: voidRecord ? 'voided' : 'synced',
       }
     })
+}
+
+function formatOrderDisplayStatus(order: OrderRecord) {
+  const paymentStatus = normalizeStatusToken(order.paymentStatus)
+  if (paymentStatus === 'PAID') return 'Paid'
+  if (paymentStatus === 'PARTIAL') return 'Partial Payment'
+  if (isPendingPaymentStatus(paymentStatus)) return 'Pending Payment'
+
+  const workflowStatus = normalizeStatusToken(order.workflowStatus)
+  if (isPendingPaymentStatus(workflowStatus)) return 'Pending Payment'
+  if (workflowStatus === 'PAID') return 'Paid'
+  return 'Preparing'
+}
+
+function normalizeStatusToken(value: string | null | undefined) {
+  return String(value ?? '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+}
+
+function isPendingPaymentStatus(status: string) {
+  return [
+    'SERVED',
+    'READY',
+    'READY_TO_SERVE',
+    'WAITING_PAYMENT',
+    'WAITING_FOR_PAYMENT',
+    'PENDING_PAYMENT',
+    'AWAITING_PAYMENT',
+  ].includes(status)
 }
 
 export function buildRecipeViews(

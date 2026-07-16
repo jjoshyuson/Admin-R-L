@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:pos": "vite --open /pos.html",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
@@ -12,6 +13,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.53.0",
+    "lucide-react": "^1.24.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

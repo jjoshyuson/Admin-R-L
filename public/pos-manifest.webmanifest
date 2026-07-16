@@ -1,0 +1,27 @@
+{
+  "name": "OOH POS Web",
+  "short_name": "OOH POS",
+  "description": "Tablet-first OOH point of sale web application.",
+  "id": "/pos.html",
+  "display": "standalone",
+  "display_override": ["standalone", "fullscreen"],
+  "orientation": "landscape",
+  "start_url": "/pos.html",
+  "scope": "/",
+  "background_color": "#f6f3ef",
+  "theme_color": "#1f3d2b",
+  "icons": [
+    {
+      "src": "/app-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/app-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

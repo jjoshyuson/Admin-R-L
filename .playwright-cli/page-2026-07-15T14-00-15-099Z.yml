@@ -1,0 +1,165 @@
+- main [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: OOH POS
+      - strong [ref=e7]: Finish Orders
+      - generic [ref=e8]: 1 active orders synced from Supabase.
+    - navigation "POS sections" [ref=e9]:
+      - button "POS" [ref=e10] [cursor=pointer]
+      - button "Ongoing Orders" [ref=e11] [cursor=pointer]
+      - button "Finish Orders 1" [active] [ref=e65] [cursor=pointer]:
+        - text: Finish Orders
+        - generic [ref=e13]: "1"
+      - button "Sale Tracker" [ref=e14] [cursor=pointer]
+      - button "Settings" [ref=e15] [cursor=pointer]
+    - generic [ref=e16]:
+      - generic [ref=e17]: 0 ongoing
+      - generic [ref=e18]: 1 closed
+  - generic [ref=e79]:
+    - generic [ref=e80]:
+      - generic [ref=e81]:
+        - generic [ref=e82]:
+          - paragraph [ref=e83]: Finish Orders
+          - generic [ref=e84]:
+            - button "All (1)" [ref=e85] [cursor=pointer]
+            - button "Waiting Payment (1)" [ref=e86] [cursor=pointer]
+            - button "Partial Payment (0)" [ref=e87] [cursor=pointer]
+            - button "Paid (0)" [ref=e88] [cursor=pointer]
+        - generic [ref=e89]:
+          - button "New Order" [ref=e90] [cursor=pointer]
+          - generic [ref=e91]: "Sort by:"
+          - button "Oldest First v" [ref=e92] [cursor=pointer]
+          - button "Grid view" [ref=e93] [cursor=pointer]: Grid
+          - button "List view" [ref=e94] [cursor=pointer]: List
+      - article [ref=e96]:
+        - generic [ref=e97]:
+          - strong [ref=e98]: TABLET-1-20260715133124-0001
+          - time [ref=e99]: 9:31 PM
+        - generic [ref=e100]:
+          - generic [ref=e101]: Table 5
+          - generic [ref=e102]: Dine In
+          - generic [ref=e103]: Waiting Payment
+        - generic [ref=e104]:
+          - generic [ref=e105]:
+            - checkbox "1 BEEF STEAK ₱100.00" [checked] [ref=e106]
+            - generic [ref=e107]: "1"
+            - strong [ref=e108]:
+              - text: BEEF STEAK
+              - generic [ref=e109]: ₱100.00
+          - generic [ref=e110]:
+            - checkbox "1 BEEF KALDERETA ₱100.00" [checked] [ref=e111]
+            - generic [ref=e112]: "1"
+            - strong [ref=e113]:
+              - text: BEEF KALDERETA
+              - generic [ref=e114]: ₱100.00
+        - generic [ref=e116]:
+          - generic [ref=e117]: Total
+          - strong [ref=e118]: ₱200.00
+        - generic [ref=e119]: 29 mins ago
+      - paragraph [ref=e121]: Showing 1 of 1 ongoing orders
+    - complementary [ref=e122]:
+      - generic [ref=e123]:
+        - generic [ref=e124]:
+          - paragraph [ref=e125]: Order TABLET-1-20260715133124-0001
+          - generic [ref=e126]: Table 5 - Dine In
+          - generic [ref=e127]: Waiting Payment
+        - generic [ref=e128]:
+          - time [ref=e129]: 9:31 PM
+          - generic [ref=e130]: 29 mins ago
+      - generic [ref=e131]:
+        - generic [ref=e132]: Total Amount
+        - strong [ref=e133]: ₱200.00
+      - generic [ref=e134]:
+        - generic [ref=e135]:
+          - strong [ref=e136]: Order Items
+          - generic [ref=e137]: 2 items
+        - generic [ref=e138]:
+          - generic [ref=e139]:
+            - checkbox "1 BEEF STEAK Main Dish - Dine In" [checked] [ref=e140]
+            - generic [ref=e141]: "1"
+            - generic [ref=e142]:
+              - strong [ref=e143]: BEEF STEAK
+              - generic [ref=e144]: Main Dish - Dine In
+          - generic [ref=e145]:
+            - checkbox "1 BEEF KALDERETA Main Dish - Dine In" [checked] [ref=e146]
+            - generic [ref=e147]: "1"
+            - generic [ref=e148]:
+              - strong [ref=e149]: BEEF KALDERETA
+              - generic [ref=e150]: Main Dish - Dine In
+      - generic [ref=e151]:
+        - strong [ref=e152]: Notes
+        - paragraph [ref=e153]: "Customer: Green shirt"
+      - generic [ref=e154]:
+        - strong [ref=e155]: Payment Mode
+        - generic [ref=e156]:
+          - button "$ Full Payment Pay full amount" [ref=e157] [cursor=pointer]:
+            - generic [ref=e158]: $
+            - generic [ref=e159]: Full Payment
+            - generic [ref=e160]: Pay full amount
+          - button "1/2 Split by Items Share items" [ref=e161] [cursor=pointer]:
+            - generic [ref=e162]: 1/2
+            - generic [ref=e163]: Split by Items
+            - generic [ref=e164]: Share items
+          - button "PPL Split by People Per person" [ref=e165] [cursor=pointer]:
+            - generic [ref=e166]: PPL
+            - generic [ref=e167]: Split by People
+            - generic [ref=e168]: Per person
+          - button "AMT Custom Amount Any amount" [ref=e169] [cursor=pointer]:
+            - generic [ref=e170]: AMT
+            - generic [ref=e171]: Custom Amount
+            - generic [ref=e172]: Any amount
+          - button "DEP Deposit / Partial Pay partial now" [ref=e173] [cursor=pointer]:
+            - generic [ref=e174]: DEP
+            - generic [ref=e175]: Deposit / Partial
+            - generic [ref=e176]: Pay partial now
+          - button "COM Combine Orders Pay multiple" [ref=e177] [cursor=pointer]:
+            - generic [ref=e178]: COM
+            - generic [ref=e179]: Combine Orders
+            - generic [ref=e180]: Pay multiple
+          - button "TAB Credit / Tab Pay later" [ref=e181] [cursor=pointer]:
+            - generic [ref=e182]: TAB
+            - generic [ref=e183]: Credit / Tab
+            - generic [ref=e184]: Pay later
+          - button "... Other Other options" [ref=e185] [cursor=pointer]:
+            - generic [ref=e186]: ...
+            - generic [ref=e187]: Other
+            - generic [ref=e188]: Other options
+        - generic [ref=e189]:
+          - paragraph [ref=e190]: Collect the full remaining balance in one transaction.
+          - generic [ref=e191]:
+            - generic [ref=e192]: Amount to pay
+            - strong [ref=e193]: ₱200.00
+        - strong [ref=e194]: Payment Method
+        - generic [ref=e195]:
+          - button "Cash" [ref=e196] [cursor=pointer]
+          - button "GCash" [ref=e197] [cursor=pointer]
+          - button "Split" [ref=e198] [cursor=pointer]
+        - generic [ref=e199]:
+          - generic [ref=e200]:
+            - generic [ref=e201]: Cash Received
+            - textbox "Cash Received" [ref=e202]:
+              - /placeholder: Enter cash received
+          - generic [ref=e203]:
+            - generic [ref=e204]: Change
+            - strong [ref=e205]: ₱0.00
+        - generic "Payment number pad" [ref=e206]:
+          - button "1" [ref=e207] [cursor=pointer]
+          - button "2" [ref=e208] [cursor=pointer]
+          - button "3" [ref=e209] [cursor=pointer]
+          - button "4" [ref=e210] [cursor=pointer]
+          - button "5" [ref=e211] [cursor=pointer]
+          - button "6" [ref=e212] [cursor=pointer]
+          - button "7" [ref=e213] [cursor=pointer]
+          - button "8" [ref=e214] [cursor=pointer]
+          - button "9" [ref=e215] [cursor=pointer]
+          - button "." [ref=e216] [cursor=pointer]
+          - button "0" [ref=e217] [cursor=pointer]
+          - button "Back" [ref=e218] [cursor=pointer]
+          - button "Exact" [ref=e219] [cursor=pointer]
+          - button "+ P1" [ref=e220] [cursor=pointer]
+          - button "Clear" [ref=e221] [cursor=pointer]
+        - generic [ref=e222]:
+          - generic [ref=e223]: Order Notes (Optional)
+          - textbox "Order Notes (Optional)" [ref=e224]:
+            - /placeholder: Add payment note...
+      - button "Confirm Payment ₱200.00" [disabled] [ref=e226]

@@ -1,0 +1,61 @@
+- main [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: OOH POS
+      - strong [ref=e7]: Meals
+      - generic [ref=e8]: Loading menu...
+    - navigation "POS sections" [ref=e9]:
+      - button "POS" [ref=e10] [cursor=pointer]
+      - button "Ongoing Orders" [ref=e11] [cursor=pointer]
+      - button "Finish Orders 0" [ref=e12] [cursor=pointer]:
+        - text: Finish Orders
+        - generic [ref=e13]: "0"
+      - button "Sale Tracker" [ref=e14] [cursor=pointer]
+      - button "Settings" [ref=e15] [cursor=pointer]
+    - generic [ref=e16]:
+      - generic [ref=e17]: 0 ongoing
+      - generic [ref=e18]: 0 closed
+  - generic [ref=e19]:
+    - generic [ref=e20]:
+      - generic [ref=e21]:
+        - strong [ref=e22]: OOH POS
+        - generic [ref=e23]: John Dela Cruz • Tablet 1
+      - generic [ref=e24]:
+        - heading "Meals" [level=1] [ref=e25]
+        - textbox "Search products" [ref=e26]:
+          - /placeholder: Search products...
+      - generic [ref=e27]:
+        - generic "Order type" [ref=e28]:
+          - button "Dine In" [ref=e29] [cursor=pointer]
+          - button "Takeout" [ref=e30] [cursor=pointer]
+        - button "Half" [ref=e31] [cursor=pointer]
+    - navigation "Categories" [ref=e32]:
+      - button "Meals 0" [ref=e33] [cursor=pointer]:
+        - generic [ref=e34]: Meals
+        - emphasis [ref=e35]: "0"
+      - button "Drinks 0" [ref=e36] [cursor=pointer]:
+        - generic [ref=e37]: Drinks
+        - emphasis [ref=e38]: "0"
+      - button "Add-ons 0" [ref=e39] [cursor=pointer]:
+        - generic [ref=e40]: Add-ons
+        - emphasis [ref=e41]: "0"
+      - button "Others 0" [ref=e42] [cursor=pointer]:
+        - generic [ref=e43]: Others
+        - emphasis [ref=e44]: "0"
+    - button "+ Add Custom Item" [ref=e46] [cursor=pointer]:
+      - generic [ref=e47]: +
+      - strong [ref=e48]: Add Custom Item
+  - complementary [ref=e49]:
+    - generic [ref=e50]:
+      - generic [ref=e51]:
+        - paragraph [ref=e52]: "Order #0001"
+        - heading "0 items" [level=2] [ref=e53]
+      - button "Clear Order" [disabled] [ref=e54]
+    - paragraph [ref=e56]: Tap menu items to build an order.
+    - generic [ref=e58]:
+      - generic [ref=e59]: Total
+      - strong [ref=e60]: ₱0.00
+    - generic [ref=e61]:
+      - button "Send To Kitchen" [disabled] [ref=e62]
+      - button "Charge / Pay" [disabled] [ref=e63]
+      - button "Clear Order" [disabled] [ref=e64]

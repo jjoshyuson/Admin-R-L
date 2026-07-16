@@ -47,6 +47,28 @@ describe('buildOrderHistoryViews', () => {
     expect(result).toHaveLength(1)
     expect(result[0].status).toBe('voided')
   })
+
+  it('shows workflow status until the order is served, then payment status', () => {
+    const baseOrder: OrderRecord = {
+      deviceOrderId: 'A-100',
+      deviceId: 'tablet-1',
+      paymentMethod: 'UNPAID',
+      paymentReference: null,
+      cashAmount: null,
+      gcashAmount: null,
+      subtotal: 195,
+      tax: 0,
+      total: 195,
+      createdAt: '2026-05-02T10:00:00.000Z',
+      items: [{ name: 'Lomi', quantity: 1, lineTotal: 65 }],
+    }
+
+    expect(buildOrderHistoryViews([{ ...baseOrder, workflowStatus: 'PREPARING', paymentStatus: 'UNPAID' }], [])[0].displayStatus).toBe('Preparing')
+    expect(buildOrderHistoryViews([{ ...baseOrder, workflowStatus: 'SERVED', paymentStatus: 'UNPAID' }], [])[0].displayStatus).toBe('Pending Payment')
+    expect(buildOrderHistoryViews([{ ...baseOrder, workflowStatus: 'PENDING_PAYMENT', paymentStatus: 'UNPAID' }], [])[0].displayStatus).toBe('Pending Payment')
+    expect(buildOrderHistoryViews([{ ...baseOrder, workflowStatus: 'SERVED', paymentStatus: 'PARTIAL' }], [])[0].displayStatus).toBe('Partial Payment')
+    expect(buildOrderHistoryViews([{ ...baseOrder, workflowStatus: 'PAID', paymentStatus: 'PAID' }], [])[0].displayStatus).toBe('Paid')
+  })
 })
 
 describe('buildDashboardSnapshot', () => {

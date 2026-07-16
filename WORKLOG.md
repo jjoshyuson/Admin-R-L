@@ -444,3 +444,23 @@
 - Test result: build passed; unit tests passed 4/4; Playwright smoke passed 5/5 after adding the duplicate-day shake/highlight guard, previous-log copy behavior, missing-log bell, Daily Log category settings, fixed modal layout, fixed unit dropdowns, and kg/g/lb/oz/L/mL conversion for recipe costing.
 - Screenshot filename: existing smoke screenshots regenerated during the smoke suite.
 - Remaining issue if any: Supabase environments still need `SUPABASE_DAILY_LOG_FAILSAFE.sql` applied before category/settings persistence is fully backed by the database; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 23
+
+- What was broken: Reset Data > Clear Inventory deleted Supabase inventory rows and counts, but then immediately rewrote the existing ingredient list with zero on-hand values. The inventory screen also fell back to seeded/sample ingredients whenever the list became empty, so inventory never looked truly cleared.
+- Suspected cause: the reset handler used a zero-count local map after deletion, and `useInventoryState` could not distinguish an intentionally empty inventory from a first-run workspace that should be derived from Daily Log / Recipes.
+- Files changed: `src/App.tsx`, `src/hooks/useInventoryState.ts`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; `npx playwright test --grep "reset data modal" --reporter=line`
+- Test result: build passed; unit tests passed 4/4; focused reset modal smoke passed after Clear Inventory was changed to empty the inventory list, preserve that cleared state locally, and render an explicit empty inventory state instead of zeroed ingredient cards.
+- Screenshot filename: none
+- Remaining issue if any: the smoke suite still does not execute destructive reset actions against the live Supabase dataset; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 24
+
+- What was broken: the app shell and shared UI surfaces still felt cramped and phone-emulator-like on larger screens, with inconsistent card/control polish across the admin tabs.
+- Suspected cause: the UI was still using a narrow fixed mobile shell and older per-component visual styles instead of a shared production polish layer for cards, inputs, navigation, focus states, desktop width, and mobile wrapping.
+- Files changed: `src/style.css`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; `npm run test:smoke -- --reporter=line --workers=1`; targeted Playwright browser pass against `http://127.0.0.1:5173/`
+- Test result: build passed; unit tests passed 4/4; Playwright smoke suite passed 5/5; targeted browser pass opened Dashboard, Inventory, Daily Log, More, Sync Data & Logs, Order History, Sales Range, Menu Settings, Recipes & Cost Management, Cash Overview, Cash Control, Bills & Payables, and Profit Insights with no console or page errors.
+- Screenshot filename: `debug-screenshots/ui-polish-before-dashboard.png`, `debug-screenshots/ui-polish-before-inventory.png`, `debug-screenshots/ui-polish-before-daily-log.png`, `debug-screenshots/ui-polish-before-more.png`, `debug-screenshots/ui-polish-after-dashboard.png`, `debug-screenshots/ui-polish-after-inventory.png`, `debug-screenshots/ui-polish-after-daily-log.png`, `debug-screenshots/ui-polish-after-more.png`, `debug-screenshots/ui-polish-after-order-history.png`, `debug-screenshots/ui-polish-after-sales-range.png`, `debug-screenshots/ui-polish-after-menu-settings.png`, `debug-screenshots/ui-polish-after-recipes-cost-management.png`, `debug-screenshots/ui-polish-after-cash-overview.png`, `debug-screenshots/ui-polish-after-cash-control.png`, `debug-screenshots/ui-polish-after-bills-payables.png`, `debug-screenshots/ui-polish-after-profit-insights.png`, `debug-screenshots/ui-polish-after-desktop-dashboard.png`, `debug-screenshots/ui-polish-after-desktop-more.png`
+- Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session; destructive reset actions were intentionally not executed during UI validation.

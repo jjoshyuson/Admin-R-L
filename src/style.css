@@ -1,7 +1,26 @@
 :root {
-  color: #111827;
+  color: #0f172a;
   background:
-    radial-gradient(circle at top, #f6efe0 0%, #ebe4d6 34%, #d8d2c6 100%);
+    linear-gradient(180deg, #f8fafc 0%, #eef4f6 48%, #e8eef2 100%);
+  --app-bg: #f4f7f8;
+  --surface: #ffffff;
+  --surface-soft: #f8fafc;
+  --surface-tint: #eef7f8;
+  --border: #dbe4ea;
+  --border-strong: #cbd5e1;
+  --ink: #0f172a;
+  --ink-soft: #334155;
+  --ink-muted: #64748b;
+  --brand: #0f766e;
+  --brand-strong: #0b6861;
+  --brand-blue: #2563eb;
+  --danger: #dc2626;
+  --warning: #b45309;
+  --success: #15803d;
+  --radius-card: 12px;
+  --radius-control: 10px;
+  --shadow-card: 0 10px 22px rgba(15, 23, 42, 0.07);
+  --shadow-float: 0 18px 34px rgba(15, 23, 42, 0.14);
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -33,6 +52,13 @@ select {
 
 button {
   border: 0;
+}
+
+button,
+select,
+input,
+textarea {
+  -webkit-tap-highlight-color: transparent;
 }
 
 .app-shell {
@@ -2407,6 +2433,82 @@ button {
   animation: daily-log-shake 420ms ease-in-out;
 }
 
+.expense-settings-screen {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.expense-admin-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 18px;
+}
+
+.expense-admin-grid .category-row-card {
+  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 12px;
+  min-width: 0;
+}
+
+.expense-admin-grid .category-row-copy {
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: inherit;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
+.expense-admin-grid .category-row-copy strong,
+.expense-admin-grid .category-row-copy small {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.expense-admin-grid .category-row-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  justify-content: flex-end;
+  min-width: max-content;
+}
+
+.expense-admin-grid .category-row-actions .ghost-pill,
+.expense-admin-grid .category-row-actions .text-danger-button {
+  min-height: 36px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .expense-admin-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .expense-admin-grid {
+    padding: 12px;
+  }
+
+  .expense-admin-grid .category-row-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .expense-admin-grid .category-row-actions {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+}
+
 .record-card-button.is-duplicate-target .shared-record-card {
   border-color: #dc2626;
   box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.16);
@@ -3372,4 +3474,524 @@ button {
   color: inherit;
   font: inherit;
   cursor: pointer;
+}
+
+/* Production UI polish layer: keep behavior intact while tightening the visual system. */
+* {
+  letter-spacing: 0;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.26);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+.app-shell {
+  max-width: 980px;
+  background: var(--app-bg);
+}
+
+.screen-body,
+.dashboard-panel,
+.inventory-panel,
+.more-panel,
+.product-screen,
+.finance-screen,
+.placeholder-screen {
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(241, 245, 249, 0.98) 100%);
+}
+
+.dashboard-panel,
+.inventory-panel,
+.more-panel,
+.product-screen,
+.finance-screen {
+  padding-left: clamp(14px, 3vw, 28px);
+  padding-right: clamp(14px, 3vw, 28px);
+}
+
+.dashboard-header,
+.product-header,
+.more-header {
+  padding-top: 8px;
+}
+
+.dashboard-header h1,
+.product-header h1,
+.configuration-header h1,
+.section-head h1 {
+  color: var(--ink);
+  font-weight: 760;
+}
+
+.surface-card,
+.alert-card,
+.mode-card,
+.placeholder-card,
+.menu-item-card,
+.category-row-card,
+.category-settings-entry,
+.shared-record-card,
+.recipe-prep-entry,
+.recipe-link-card,
+.finance-highlight-card,
+.finance-detail-card,
+.finance-table-card,
+.cash-account-card,
+.cash-control-summary,
+.cash-log-card,
+.cash-log-detail-card,
+.empty-state-card {
+  border-radius: var(--radius-card);
+  border-color: var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.metric-card,
+.summary-card,
+.compact-card,
+.section-card,
+.mode-card,
+.finance-detail-card,
+.finance-table-card,
+.cash-account-card,
+.cash-control-summary,
+.cash-log-card,
+.cash-log-detail-card {
+  padding: 14px;
+}
+
+.section-card,
+.section-stack,
+.inventory-summary,
+.live-ingredients-section,
+.configuration-card,
+.more-section,
+.mode-card {
+  margin-top: 12px;
+}
+
+.metric-value,
+.summary-value,
+.financial-item strong,
+.finance-highlight-card > strong,
+.cash-account-balance,
+.shared-record-side strong.is-emphasis {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.eyebrow,
+.summary-card p,
+.metric-hint,
+.section-head-column p,
+.action-row-copy small,
+.category-settings-copy small,
+.menu-item-copy small,
+.category-row-copy small,
+.item-preview-copy small,
+.shared-record-copy small,
+.shared-record-side span,
+.shared-record-side small,
+.finance-row span,
+.finance-table-row span,
+.cash-account-head small,
+.cash-account-foot small,
+.cash-account-foot span,
+.cash-log-card small,
+.field-helper {
+  color: var(--ink-muted);
+}
+
+.section-kicker,
+.danger-kicker,
+.placeholder-label,
+.finance-highlight-label {
+  letter-spacing: 0;
+}
+
+.inventory-periods,
+.period-switch,
+.search-shell,
+.date-input-shell,
+.control-field select,
+.date-filter-button,
+.cash-select,
+.currency-input,
+.text-input,
+.text-area,
+.purchase-input-group,
+.frequency-select,
+.ghost-select,
+.ghost-pill {
+  border-color: var(--border);
+  background: var(--surface);
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.04);
+}
+
+.inventory-pill,
+.dashboard-pill,
+.category-chip,
+.product-chip,
+.shared-chip,
+.ghost-pill,
+.ghost-select,
+.status-choice {
+  min-height: 40px;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.inventory-pill.is-active,
+.dashboard-pill.is-active,
+.category-chip.is-active,
+.product-chip.is-active,
+.shared-chip.is-active,
+.mode-option.is-active {
+  box-shadow: 0 10px 20px rgba(15, 118, 110, 0.14);
+}
+
+.dashboard-pill.is-active,
+.shared-chip.is-active {
+  background: var(--ink);
+}
+
+.category-chip.is-active,
+.sync-badge.is-synced,
+.switch input:checked + .switch-track {
+  background: var(--brand);
+}
+
+.product-chip.is-active,
+.floating-add-button {
+  background: linear-gradient(180deg, #0f8c95 0%, #0b6870 100%);
+}
+
+.submit-button,
+.add-category-button,
+.save-changes-button,
+.finance-primary-button {
+  min-height: 48px;
+  border-radius: var(--radius-control);
+  font-weight: 750;
+  box-shadow: 0 12px 22px rgba(15, 118, 110, 0.18);
+}
+
+.secondary-button,
+.back-button,
+.finance-secondary-button,
+.edit-icon-button,
+.row-icon-button,
+.sheet-close-button,
+.icon-button {
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink-soft);
+  box-shadow: 0 8px 16px rgba(15, 23, 42, 0.05);
+}
+
+.icon-button {
+  border-radius: 999px;
+}
+
+.action-row-card,
+.configuration-row,
+.purchase-row,
+.finance-row,
+.finance-table-row {
+  border-color: rgba(203, 213, 225, 0.72);
+}
+
+.action-row-card {
+  min-height: 72px;
+  transition: background 160ms ease, transform 160ms ease;
+}
+
+.action-row-card:active,
+.menu-item-card:active,
+.shared-record-card:active,
+.category-settings-entry:active,
+.category-row-card:active,
+.recipe-link-card:active,
+.recipe-prep-entry:active {
+  transform: scale(0.992);
+}
+
+.action-row-icon,
+.mode-card-icon,
+.shared-record-media-shell,
+.drag-handle {
+  background: #eef3f7;
+  color: var(--ink-soft);
+}
+
+.more-sync-banner,
+.sync-banner,
+.finance-notice-banner {
+  border-color: rgba(37, 99, 235, 0.16);
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.empty-state-card,
+.sync-empty-state {
+  border-style: dashed;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.bottom-nav {
+  width: min(100%, 980px);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 78px minmax(0, 1fr) minmax(0, 1fr);
+  padding-left: clamp(10px, 3vw, 24px);
+  padding-right: clamp(10px, 3vw, 24px);
+  background: rgba(255, 255, 255, 0.9);
+  border-top-color: rgba(203, 213, 225, 0.86);
+  box-shadow: 0 -14px 34px rgba(15, 23, 42, 0.1);
+}
+
+.bottom-nav-item {
+  min-width: 0;
+  min-height: 60px;
+  color: var(--ink-muted);
+}
+
+.bottom-nav-item.is-active {
+  color: var(--brand-blue);
+  background: #eaf2ff;
+}
+
+.bottom-nav-sync {
+  width: 68px;
+  height: 68px;
+  border-color: #ffffff;
+  background: linear-gradient(180deg, #35a06b 0%, #217a51 100%);
+  box-shadow: 0 16px 30px rgba(33, 122, 81, 0.25);
+}
+
+.floating-add-button {
+  right: calc(max((100vw - 980px) / 2, 0px) + clamp(16px, 3vw, 28px));
+  box-shadow: var(--shadow-float);
+}
+
+.bottom-sheet,
+.dialog-card,
+.product-edit-sheet,
+.cash-sheet {
+  border-radius: 18px;
+  border: 1px solid rgba(203, 213, 225, 0.72);
+}
+
+.sheet-backdrop {
+  background: rgba(15, 23, 42, 0.38);
+  backdrop-filter: blur(5px);
+}
+
+.product-header,
+.more-header {
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(248, 250, 252, 0.9) 74%, rgba(248, 250, 252, 0) 100%);
+}
+
+.menu-item-copy strong,
+.category-settings-copy strong,
+.category-row-copy strong,
+.shared-record-head strong,
+.shared-record-side strong,
+.ingredient-name,
+.action-row-copy strong {
+  overflow-wrap: anywhere;
+}
+
+.record-header-actions,
+.section-head,
+.more-section-head,
+.product-header-row,
+.cash-account-head,
+.cash-account-foot {
+  flex-wrap: wrap;
+}
+
+.finance-highlight-card > strong {
+  font-size: clamp(1.7rem, 7vw, 2.25rem);
+}
+
+.shared-record-card,
+.menu-item-card,
+.recipe-link-card {
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+}
+
+.menu-item-thumb,
+.item-preview-thumb,
+.shared-thumb-image {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-card);
+}
+
+@media (hover: hover) {
+  .action-row-card:hover,
+  .menu-item-card:hover,
+  .category-row-card:hover,
+  .category-settings-entry:hover,
+  .shared-record-card:hover,
+  .recipe-link-card:hover,
+  .recipe-prep-entry:hover,
+  .mode-option:hover,
+  .bottom-nav-item:hover,
+  .secondary-button:hover,
+  .back-button:hover,
+  .finance-secondary-button:hover,
+  .edit-icon-button:hover,
+  .row-icon-button:hover,
+  .sheet-close-button:hover,
+  .icon-button:hover {
+    border-color: var(--border-strong);
+    background-color: #f8fafc;
+  }
+
+  .submit-button:hover,
+  .finance-primary-button:hover,
+  .floating-add-button:hover,
+  .bottom-nav-sync:hover {
+    transform: translateY(-1px);
+  }
+}
+
+@media (min-width: 720px) {
+  .screen-body {
+    min-height: 100dvh;
+  }
+
+  .dashboard-panel,
+  .inventory-panel,
+  .more-panel,
+  .product-screen,
+  .finance-screen {
+    padding-bottom: calc(124px + env(safe-area-inset-bottom));
+  }
+
+  .metrics-grid,
+  .key-metrics-grid,
+  .financial-grid,
+  .breakdown-grid,
+  .sync-status-grid,
+  .cash-action-grid,
+  .date-range-input-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summary-grid,
+  .finance-split-grid,
+  .cash-account-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .menu-card-list,
+  .category-management-list,
+  .shared-card-list,
+  .record-card-stack,
+  .cash-account-stack {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+
+  .more-section .action-card-group,
+  .more-section .action-card {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .more-section .action-row-card {
+    border-top: 0;
+    border-left: 1px solid rgba(203, 213, 225, 0.72);
+  }
+
+  .more-section .action-row-card:nth-child(odd) {
+    border-left: 0;
+  }
+}
+
+@media (max-width: 520px) {
+  .dashboard-panel,
+  .inventory-panel,
+  .more-panel,
+  .product-screen,
+  .finance-screen {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .metric-card,
+  .summary-card,
+  .compact-card,
+  .section-card,
+  .mode-card,
+  .finance-detail-card,
+  .finance-table-card,
+  .cash-account-card,
+  .cash-control-summary,
+  .cash-log-card,
+  .cash-log-detail-card {
+    padding: 12px;
+  }
+
+  .mode-options,
+  .summary-grid {
+    gap: 8px;
+  }
+
+  .bottom-nav {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 68px minmax(0, 1fr) minmax(0, 1fr);
+    padding-top: 10px;
+  }
+
+  .bottom-nav-sync {
+    width: 62px;
+    height: 62px;
+  }
+
+  .bottom-nav-item {
+    font-size: 0.7rem;
+    gap: 5px;
+    padding-left: 2px;
+    padding-right: 2px;
+  }
+
+  .shared-record-card,
+  .menu-item-card,
+  .recipe-link-card {
+    grid-template-columns: 1fr;
+  }
+
+  .menu-item-thumb,
+  .item-preview-thumb,
+  .shared-thumb-image,
+  .shared-record-media-shell {
+    width: 58px;
+    height: 58px;
+  }
 }

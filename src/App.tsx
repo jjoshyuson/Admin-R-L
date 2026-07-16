@@ -16,8 +16,10 @@ import {
   clearRecipesData,
   deactivateMenuCategory,
   deactivateMenuProduct,
+  fetchAdminSetting,
   recordInventoryCount,
   seedTroubleshootingData,
+  saveAdminSetting,
 } from './lib/adminApi'
 import { createRandomId } from './lib/randomId'
 import { hasSupabaseConfig } from './lib/supabase/client'
@@ -49,6 +51,7 @@ type MoreRoute =
   | 'recipes'
   | 'finance-overview'
   | 'cash-drawer'
+  | 'expense-categories'
   | 'payables'
   | 'profit'
 type MenuItemStatus = 'available' | 'unavailable' | 'hidden'
@@ -85,6 +88,15 @@ type MenuItem = {
   status: MenuItemStatus
   price: number
   halfPrice: number
+}
+
+type AdminExpenseCategory = {
+  id: string
+  name: string
+  subcategories: Array<{
+    id: string
+    name: string
+  }>
 }
 
 type CategoryItem = {
@@ -167,6 +179,7 @@ type OrderHistoryItem = {
   total: string
   table: string
   payment: string
+  displayStatus: string
   device: string
   time: string
   status?: SyncStatus
@@ -429,87 +442,6 @@ const categoryIconOptions: Array<{ value: CategoryIconKey; label: string }> = [
   { value: 'grill', label: 'Grill' },
 ]
 const financeBusinessDate = new Date('2026-05-02T09:00:00+08:00')
-
-const initialIngredients: Ingredient[] = [
-  {
-    id: 'ing-ribeye',
-    name: 'Ribeye Steak',
-    category: 'Meat',
-    unit: 'KG',
-    estimatedOnHand: 15.2,
-    reorderLevel: 5,
-    status: 'low',
-    countingEnabled: true,
-    countingFrequency: 'Daily',
-    overdue: false,
-    usedByPeriod: { Daily: 2.1, Weekly: 9.4, Monthly: 32.2 },
-  },
-  {
-    id: 'ing-brew',
-    name: 'Cold Brew Base',
-    category: 'Beverage',
-    unit: 'L',
-    estimatedOnHand: 2.3,
-    reorderLevel: 5,
-    status: 'critical',
-    countingEnabled: true,
-    countingFrequency: 'Daily',
-    overdue: true,
-    usedByPeriod: { Daily: 2.1, Weekly: 8.6, Monthly: 27.8 },
-  },
-  {
-    id: 'ing-milk',
-    name: 'Fresh Milk',
-    category: 'Dairy',
-    unit: 'L',
-    estimatedOnHand: 11.4,
-    reorderLevel: 4,
-    status: 'healthy',
-    countingEnabled: false,
-    countingFrequency: 'Weekly',
-    overdue: false,
-    usedByPeriod: { Daily: 1.2, Weekly: 5.8, Monthly: 18.4 },
-  },
-  {
-    id: 'ing-pom',
-    name: 'Pomfret Fillet',
-    category: 'Produce',
-    unit: 'KG',
-    estimatedOnHand: 4.8,
-    reorderLevel: 4,
-    status: 'low',
-    countingEnabled: true,
-    countingFrequency: 'Weekly',
-    overdue: true,
-    usedByPeriod: { Daily: 0.8, Weekly: 4.1, Monthly: 12.6 },
-  },
-  {
-    id: 'ing-cups',
-    name: 'Soup Cups',
-    category: 'General',
-    unit: 'Units',
-    estimatedOnHand: 88,
-    reorderLevel: 20,
-    status: 'healthy',
-    countingEnabled: true,
-    countingFrequency: 'Monthly',
-    overdue: false,
-    usedByPeriod: { Daily: 12, Weekly: 44, Monthly: 180 },
-  },
-  {
-    id: 'ing-tuna',
-    name: 'Tuna Loin',
-    category: 'Seafood',
-    unit: 'KG',
-    estimatedOnHand: 3.1,
-    reorderLevel: 4.5,
-    status: 'critical',
-    countingEnabled: true,
-    countingFrequency: 'Daily',
-    overdue: false,
-    usedByPeriod: { Daily: 1.4, Weekly: 6.1, Monthly: 19.5 },
-  },
-]
 
 function buildMenuArt(title: string, topColor: string, bottomColor: string) {
   const initials = title
@@ -1183,7 +1115,7 @@ function AdminShell() {
     resetOperationalData: resetOperationalDataMutation,
     zeroSellableStock: zeroSellableStockMutation,
   } = useFinanceData()
-  const { ingredients, setIngredients, persistIngredients } = useInventoryState(ingredientLogs, recipeIngredients)
+  const { ingredients, setIngredients, persistIngredients, clearIngredients } = useInventoryState(ingredientLogs, recipeIngredients)
   const [activeTab, setActiveTab] = useState<AppTab>('more')
   const [inventoryRoute, setInventoryRoute] = useState<InventoryRoute>('overview')
   const [moreRoute, setMoreRoute] = useState<MoreRoute>('home')
@@ -1261,7 +1193,7 @@ function AdminShell() {
   const [resetWorkingAction, setResetWorkingAction] = useState<ResetActionId | null>(null)
   const [resetStatusMessage, setResetStatusMessage] = useState('')
   const [resetErrorMessage, setResetErrorMessage] = useState('')
-  const inventoryItems = ingredients.length > 0 ? ingredients : initialIngredients
+  const inventoryItems = ingredients
 
   useEffect(() => {
     if (appMode !== 'pos-only') {
@@ -2336,16 +2268,9 @@ function AdminShell() {
       async () => {
         await clearInventoryData()
         await zeroSellableStockMutation()
-        setIngredients((current) =>
-          current.map((ingredient) => ({
-            ...ingredient,
-            estimatedOnHand: 0,
-            status: 'critical',
-            overdue: false,
-          })),
-        )
+        clearIngredients()
       },
-      'Inventory counts were cleared locally and active sellable stock was zeroed in Supabase.',
+      'Inventory was emptied and active sellable stock was zeroed in Supabase.',
     )
   }
 
@@ -3493,6 +3418,40 @@ function friendlyDeviceLabel(value: string) {
   }
 }
 
+function formatOrderWorkflowStatus(order: OrderRecord) {
+  const paymentStatus = (order.paymentStatus || '').trim().toUpperCase()
+  if (paymentStatus === 'PAID') {
+    return 'Paid'
+  }
+  if (paymentStatus === 'PARTIAL') {
+    return 'Partial Payment'
+  }
+
+  const rawStatus = (order.workflowStatus || '').trim().toUpperCase()
+  switch (rawStatus) {
+    case 'PREPARING':
+      return 'Preparing'
+    case 'SERVED':
+      return paymentStatus === 'UNPAID' ? 'Waiting Payment' : 'Served'
+    case 'PAID':
+      return 'Paid'
+    default:
+      return order.paymentMethod?.toUpperCase() === 'UNPAID' ? 'Preparing' : 'Paid'
+  }
+}
+
+function resolveOrderAmountPaid(order: OrderRecord) {
+  const paymentStatus = (order.paymentStatus || '').trim().toUpperCase()
+  if (paymentStatus === 'UNPAID' || order.paymentMethod?.toUpperCase() === 'UNPAID') {
+    return 0
+  }
+  const paidAmount = (order.cashAmount ?? 0) + (order.gcashAmount ?? 0)
+  if (paidAmount > 0) {
+    return paidAmount
+  }
+  return paymentStatus === 'PAID' ? order.total : 0
+}
+
 function trimCount(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1)
 }
@@ -4291,6 +4250,12 @@ function SettingsMoreScreen({
 
       <MoreSection title="OPERATIONS">
         <ActionRow
+          icon={<CartIcon />}
+          title="Open POS Web"
+          subtitle="Launch the browser cashier app connected to the same Supabase project"
+          onClick={() => window.open('/pos.html', '_blank', 'noopener,noreferrer')}
+        />
+        <ActionRow
           icon={<SyncLogsIcon />}
           title="Sync Data & Logs"
           subtitle="Trigger updates and view synchronization logs"
@@ -4337,6 +4302,12 @@ function SettingsMoreScreen({
           title="Cash Control"
           subtitle="Opening balance, cash flow, counted cash, and discrepancies"
           onClick={() => onNavigate('cash-drawer')}
+        />
+        <ActionRow
+          icon={<FinanceOverviewIcon />}
+          title="Expense Categories"
+          subtitle="Categories and subcategories used by POS expense logging"
+          onClick={() => onNavigate('expense-categories')}
         />
         {appMode === 'full-admin' ? (
           <>
@@ -4805,6 +4776,10 @@ function MoreDetailScreen({
     )
   }
 
+  if (route === 'expense-categories') {
+    return <ExpenseCategorySettingsScreen onBack={onBack} />
+  }
+
   if (route === 'payables') {
     return (
       <BillsPayablesScreen
@@ -4866,6 +4841,204 @@ function MoreDetailScreen({
       </div>
     </div>
   )
+}
+
+function ExpenseCategorySettingsScreen({ onBack }: { onBack: () => void }) {
+  const [categories, setCategories] = useState<AdminExpenseCategory[]>([])
+  const [status, setStatus] = useState('Loading expense categories...')
+  const [categoryName, setCategoryName] = useState('')
+  const [selectedCategoryId, setSelectedCategoryId] = useState('')
+  const [subcategoryName, setSubcategoryName] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    fetchAdminSetting('expense_categories')
+      .then((setting) => {
+        if (!active) return
+        const nextCategories = normalizeAdminExpenseCategories(setting)
+        setCategories(nextCategories)
+        setSelectedCategoryId(nextCategories[0]?.id ?? '')
+        setStatus(nextCategories.length > 0 ? 'Expense categories loaded.' : 'No expense categories configured yet.')
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        setStatus(error instanceof Error ? error.message : 'Could not load expense categories.')
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const selectedCategory = categories.find((category) => category.id === selectedCategoryId) ?? categories[0] ?? null
+
+  async function persist(nextCategories: AdminExpenseCategory[], message: string) {
+    setSaving(true)
+    try {
+      await saveAdminSetting('expense_categories', { categories: nextCategories })
+      setCategories(nextCategories)
+      if (!nextCategories.some((category) => category.id === selectedCategoryId)) {
+        setSelectedCategoryId(nextCategories[0]?.id ?? '')
+      }
+      setStatus(message)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Could not save expense categories.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function addCategory() {
+    const name = categoryName.trim()
+    if (!name) {
+      setStatus('Enter a category name.')
+      return
+    }
+    const nextCategory: AdminExpenseCategory = {
+      id: createRandomId('expense-category'),
+      name,
+      subcategories: [],
+    }
+    void persist([...categories, nextCategory], `${name} added for POS expense logging.`)
+    setCategoryName('')
+    setSelectedCategoryId(nextCategory.id)
+  }
+
+  function deleteCategory(categoryId: string) {
+    const category = categories.find((item) => item.id === categoryId)
+    void persist(categories.filter((item) => item.id !== categoryId), `${category?.name ?? 'Category'} deleted.`)
+  }
+
+  function addSubcategory() {
+    const name = subcategoryName.trim()
+    if (!selectedCategory || !name) {
+      setStatus('Select a category and enter a subcategory name.')
+      return
+    }
+    const nextCategories = categories.map((category) => category.id === selectedCategory.id
+      ? {
+          ...category,
+          subcategories: [...category.subcategories, { id: createRandomId('expense-subcategory'), name }],
+        }
+      : category)
+    void persist(nextCategories, `${name} added under ${selectedCategory.name}.`)
+    setSubcategoryName('')
+  }
+
+  function deleteSubcategory(subcategoryId: string) {
+    if (!selectedCategory) return
+    const nextCategories = categories.map((category) => category.id === selectedCategory.id
+      ? { ...category, subcategories: category.subcategories.filter((subcategory) => subcategory.id !== subcategoryId) }
+      : category)
+    void persist(nextCategories, 'Subcategory deleted.')
+  }
+
+  return (
+    <div className="record-screen expense-settings-screen">
+      <header className="record-header">
+        <button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back">
+          <span aria-hidden="true">&lt;</span>
+        </button>
+        <div>
+          <p className="section-kicker">Finance Settings</p>
+          <h1>Expense Categories</h1>
+          <p>Controls the category buttons used by POS Log Expense.</p>
+        </div>
+      </header>
+
+      <div className="finance-notice-banner">{status}</div>
+
+      <section className="surface-card expense-admin-grid">
+        <div className="product-modal-section">
+          <div className="section-head">
+            <h3>Categories</h3>
+            <span className="saved-pill">{categories.length} configured</span>
+          </div>
+          <div className="cash-form-stack">
+            <label className="input-field">
+              <span>New Category</span>
+              <input className="text-input" value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="COGS, Payables, Salary, OPEX" />
+            </label>
+            <button type="button" className="save-changes-button" disabled={saving} onClick={addCategory}>Add Category</button>
+          </div>
+          <div className="category-management-list">
+            {categories.map((category) => (
+              <article key={category.id} className="category-row-card">
+                <button type="button" className="category-row-copy" onClick={() => setSelectedCategoryId(category.id)}>
+                  <strong>{category.name}</strong>
+                  <small>{category.subcategories.length} subcategories</small>
+                </button>
+                <div className="category-row-actions">
+                  <button type="button" className="ghost-pill" onClick={() => setSelectedCategoryId(category.id)}>Open</button>
+                  <button type="button" className="text-danger-button" disabled={saving} onClick={() => deleteCategory(category.id)}>Delete</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+
+        <div className="product-modal-section">
+          <div className="section-head">
+            <h3>{selectedCategory ? `${selectedCategory.name} Subcategories` : 'Subcategories'}</h3>
+            <span className="saved-pill">{selectedCategory?.subcategories.length ?? 0} linked</span>
+          </div>
+          <div className="cash-form-stack">
+            <label className="input-field">
+              <span>New Subcategory</span>
+              <input className="text-input" value={subcategoryName} onChange={(event) => setSubcategoryName(event.target.value)} placeholder="Supplier, rent, payroll, utilities" />
+            </label>
+            <button type="button" className="save-changes-button" disabled={saving || !selectedCategory} onClick={addSubcategory}>Add Subcategory</button>
+          </div>
+          <div className="category-management-list">
+            {selectedCategory?.subcategories.map((subcategory) => (
+              <article key={subcategory.id} className="category-row-card">
+                <div className="category-row-copy">
+                  <strong>{subcategory.name}</strong>
+                  <small>{selectedCategory.name}</small>
+                </div>
+                <div className="category-row-actions">
+                  <button type="button" className="text-danger-button" disabled={saving} onClick={() => deleteSubcategory(subcategory.id)}>Delete</button>
+                </div>
+              </article>
+            ))}
+            {!selectedCategory ? (
+              <div className="sync-empty-state">
+                <strong>No category selected.</strong>
+                <p>Add a category first, then create its subcategories.</p>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function normalizeAdminExpenseCategories(setting: Record<string, unknown> | null): AdminExpenseCategory[] {
+  const rawCategories = Array.isArray(setting?.categories) ? setting.categories : []
+  return rawCategories
+    .map((rawCategory, index) => {
+      const category = typeof rawCategory === 'object' && rawCategory !== null ? rawCategory as Record<string, unknown> : {}
+      const name = String(category.name ?? '').trim()
+      if (!name) return null
+      const rawSubcategories = Array.isArray(category.subcategories) ? category.subcategories : []
+      return {
+        id: String(category.id ?? createRandomId(`expense-category-${index}`)),
+        name,
+        subcategories: rawSubcategories
+          .map((rawSubcategory, subIndex) => {
+            const subcategory = typeof rawSubcategory === 'object' && rawSubcategory !== null ? rawSubcategory as Record<string, unknown> : {}
+            const subcategoryName = String(subcategory.name ?? '').trim()
+            if (!subcategoryName) return null
+            return {
+              id: String(subcategory.id ?? createRandomId(`expense-subcategory-${subIndex}`)),
+              name: subcategoryName,
+            }
+          })
+          .filter((subcategory): subcategory is { id: string; name: string } => Boolean(subcategory)),
+      }
+    })
+    .filter((category): category is AdminExpenseCategory => Boolean(category))
 }
 
 type OrderHistoryScreenProps = {
@@ -4946,7 +5119,7 @@ function OrderHistoryScreen({
                 title={`Order #${formatShortOrderNumber(item.id)}`}
                 subtitle={`${item.itemCount} items • ${item.total} • ${item.table}`}
                 status={item.status}
-                sideTop={item.payment}
+                sideTop={item.displayStatus}
                 sideMiddle={item.device}
                 sideBottom={item.time}
               />
@@ -5046,7 +5219,7 @@ type OrderDetailModalProps = {
 }
 
 function OrderDetailModal({ order, voidRecord, onClose, onVoid }: OrderDetailModalProps) {
-  const amountPaid = order.paymentMethod.toLowerCase().includes('cash') ? order.cashAmount ?? order.total : order.gcashAmount ?? order.total
+  const amountPaid = resolveOrderAmountPaid(order)
 
   return (
     <div className="modal-overlay" role="presentation">
@@ -5079,6 +5252,10 @@ function OrderDetailModal({ order, voidRecord, onClose, onVoid }: OrderDetailMod
             <div className="finance-row">
               <span>Payment Method</span>
               <strong>{order.paymentMethod || 'Unknown'}</strong>
+            </div>
+            <div className="finance-row">
+              <span>Status</span>
+              <strong>{formatOrderWorkflowStatus(order)}</strong>
             </div>
             <div className="finance-row">
               <span>Amount Paid</span>
@@ -7437,7 +7614,7 @@ function ResetOptionsModal({
           {renderResetAction('clear-menu', 'Menu', 'Clear categories and menu products.', 'Clear Menu', onClearMenu, true)}
           {renderResetAction('clear-recipes', 'Recipes', 'Clear recipes and recipe ingredient links.', 'Clear Recipes', onClearRecipes)}
           {renderResetAction('clear-daily-logs', 'Daily Logs', 'Clear ingredient price logs and saved accounting logs.', 'Clear Logs', onClearDailyLogs)}
-          {renderResetAction('clear-inventory', 'Inventory', 'Zero active sellable stock in Supabase and clear local count overrides.', 'Clear Inventory', onClearInventory)}
+          {renderResetAction('clear-inventory', 'Inventory', 'Delete inventory items and count history, then zero active sellable stock in Supabase.', 'Clear Inventory', onClearInventory)}
         </div>
 
         {statusMessage ? <p className="reset-status-message">{statusMessage}</p> : null}
@@ -7528,31 +7705,38 @@ function InventoryOverviewScreen({
         </div>
 
         <div className="ingredient-card-list">
-          {ingredients.map((ingredient) => (
-            <article key={ingredient.id} className={`surface-card ingredient-card status-${ingredient.status}`}>
-              <div className="ingredient-status-edge" />
-              <div className="ingredient-card-body">
-                <div className="ingredient-card-top">
-                  <div>
-                    <p className="ingredient-name">{ingredient.name}</p>
-                    <p className="ingredient-status-text">{statusLabel(ingredient.status)}</p>
+          {ingredients.length > 0 ? (
+            ingredients.map((ingredient) => (
+              <article key={ingredient.id} className={`surface-card ingredient-card status-${ingredient.status}`}>
+                <div className="ingredient-status-edge" />
+                <div className="ingredient-card-body">
+                  <div className="ingredient-card-top">
+                    <div>
+                      <p className="ingredient-name">{ingredient.name}</p>
+                      <p className="ingredient-status-text">{statusLabel(ingredient.status)}</p>
+                    </div>
+                    <button type="button" className="ghost-pill fix-count-button" onClick={() => onOpenFixCount(ingredient.id)}>
+                      Fix Count
+                    </button>
                   </div>
-                  <button type="button" className="ghost-pill fix-count-button" onClick={() => onOpenFixCount(ingredient.id)}>
-                    Fix Count
-                  </button>
-                </div>
 
-                <p className="ingredient-primary-metric">
-                  Est. On-Hand: <strong>{formatQuantity(ingredient.estimatedOnHand, ingredient.unit)}</strong>
-                </p>
+                  <p className="ingredient-primary-metric">
+                    Est. On-Hand: <strong>{formatQuantity(ingredient.estimatedOnHand, ingredient.unit)}</strong>
+                  </p>
 
-                <div className="ingredient-secondary-metrics">
-                  <span>Used {period}: {formatQuantity(ingredient.usedByPeriod[period], ingredient.unit)}</span>
-                  <span>Reorder Level: {formatQuantity(ingredient.reorderLevel, ingredient.unit)}</span>
+                  <div className="ingredient-secondary-metrics">
+                    <span>Used {period}: {formatQuantity(ingredient.usedByPeriod[period], ingredient.unit)}</span>
+                    <span>Reorder Level: {formatQuantity(ingredient.reorderLevel, ingredient.unit)}</span>
+                  </div>
                 </div>
-              </div>
-            </article>
-          ))}
+              </article>
+            ))
+          ) : (
+            <div className="sync-empty-state">
+              <strong>No inventory items.</strong>
+              <p>Clear Inventory removed the tracked inventory list. Add Daily Log ingredients when inventory tracking should be rebuilt.</p>
+            </div>
+          )}
         </div>
       </section>
     </div>
@@ -7608,38 +7792,45 @@ function InventoryConfigurationScreen({
         </div>
 
         <div className="configuration-list">
-          {ingredients.map((ingredient) => (
-            <div key={ingredient.id} className="configuration-row">
-              <div className="configuration-copy">
-                <strong>{ingredient.name}</strong>
-                <small>{ingredient.category}</small>
-              </div>
+          {ingredients.length > 0 ? (
+            ingredients.map((ingredient) => (
+              <div key={ingredient.id} className="configuration-row">
+                <div className="configuration-copy">
+                  <strong>{ingredient.name}</strong>
+                  <small>{ingredient.category}</small>
+                </div>
 
-              <div className="configuration-controls">
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={ingredient.countingEnabled}
-                    onChange={() => onCountingToggle(ingredient.id)}
-                  />
-                  <span className="switch-track" />
-                </label>
+                <div className="configuration-controls">
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={ingredient.countingEnabled}
+                      onChange={() => onCountingToggle(ingredient.id)}
+                    />
+                    <span className="switch-track" />
+                  </label>
 
-                <select
-                  className="frequency-select"
-                  value={ingredient.countingFrequency}
-                  disabled={!ingredient.countingEnabled}
-                  onChange={(event) => onFrequencyChange(ingredient.id, event.target.value as Frequency)}
-                >
-                  {periods.map((frequency) => (
-                    <option key={frequency} value={frequency}>
-                      {frequency}
-                    </option>
-                  ))}
-                </select>
+                  <select
+                    className="frequency-select"
+                    value={ingredient.countingFrequency}
+                    disabled={!ingredient.countingEnabled}
+                    onChange={(event) => onFrequencyChange(ingredient.id, event.target.value as Frequency)}
+                  >
+                    {periods.map((frequency) => (
+                      <option key={frequency} value={frequency}>
+                        {frequency}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
+            ))
+          ) : (
+            <div className="sync-empty-state">
+              <strong>No inventory items.</strong>
+              <p>The inventory list is empty after reset.</p>
             </div>
-          ))}
+          )}
         </div>
       </section>
     </div>

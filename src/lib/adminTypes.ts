@@ -25,18 +25,29 @@ export type SyncMeta = {
 }
 
 export type OrderItemRecord = {
+  productId?: string
   name: string
+  serviceMode?: string
+  isHalfOrder?: boolean
   quantity: number
+  price?: number
   lineTotal: number
+  kitchenStatus?: string
+  isChecked?: boolean
 }
 
 export type OrderRecord = {
   deviceOrderId: string
   deviceId: string
+  serviceMode?: string
   paymentMethod: string
   paymentReference: string | null
   cashAmount: number | null
   gcashAmount: number | null
+  gcashReferenceLast4?: string | null
+  paymentStatus?: string
+  workflowStatus?: string
+  orderNote?: string | null
   subtotal: number
   tax: number
   total: number
@@ -266,6 +277,7 @@ export type OrderHistoryView = {
   total: string
   table: string
   payment: string
+  displayStatus: string
   device: string
   time: string
   status: 'completed' | 'voided' | 'synced'

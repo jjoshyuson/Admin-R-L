@@ -221,12 +221,7 @@ export async function fetchMenuProducts(): Promise<MenuProduct[]> {
       categoryId: String(row.category_id),
       name: String(row.name),
       price: Number(row.price ?? 0),
-      halfOrderPrice:
-        row.half_order_price == null
-          ? row.half_price == null
-            ? null
-          : Number(row.half_price)
-          : Number(row.half_order_price),
+      halfOrderPrice: normalizeHalfOrderPrice(row.half_order_price ?? row.half_price),
       status: String(row.status ?? 'AVAILABLE').toUpperCase() as MenuProduct['status'],
       imagePath: normalizeImagePathValue(row.image_path),
       stockCount: Number(row.stock_count ?? 0),
@@ -241,30 +236,55 @@ export async function fetchOrders(): Promise<OrderRecord[]> {
     const supabase = requireSupabase()
     const { data, error } = await supabase
       .from('orders')
-      .select('device_order_id,device_id,payment_method,payment_reference,cash_amount,gcash_amount,subtotal,tax,total,created_at,items_json')
+      .select('*')
       .order('created_at', { ascending: false })
       .limit(800)
+
     if (error) throw error
-    return (data ?? []).map((row) => ({
-      deviceOrderId: String(row.device_order_id),
-      deviceId: String(row.device_id),
-      paymentMethod: String(row.payment_method ?? ''),
-      paymentReference: row.payment_reference ? String(row.payment_reference) : null,
-      cashAmount: row.cash_amount == null ? null : Number(row.cash_amount),
-      gcashAmount: row.gcash_amount == null ? null : Number(row.gcash_amount),
-      subtotal: Number(row.subtotal ?? 0),
-      tax: Number(row.tax ?? 0),
-      total: Number(row.total ?? 0),
-      createdAt: String(row.created_at ?? ''),
-      items: Array.isArray(row.items_json)
-        ? row.items_json.map((item: Record<string, unknown>) => ({
-            name: String(item.name ?? ''),
-            quantity: Number(item.quantity ?? 0),
-            lineTotal: Number(item.lineTotal ?? item.line_total ?? 0),
-          }))
-        : [],
-    }))
+    return ((data ?? []) as Array<Record<string, unknown>>).map((row) => {
+      const order: OrderRecord = {
+        deviceOrderId: String(row.device_order_id),
+        deviceId: String(row.device_id),
+        paymentMethod: String(row.payment_method ?? ''),
+        paymentReference: row.payment_reference ? String(row.payment_reference) : null,
+        cashAmount: row.cash_amount == null ? null : Number(row.cash_amount),
+        gcashAmount: row.gcash_amount == null ? null : Number(row.gcash_amount),
+        subtotal: Number(row.subtotal ?? 0),
+        tax: Number(row.tax ?? 0),
+        total: Number(row.total ?? 0),
+        createdAt: String(row.created_at ?? ''),
+        items: Array.isArray(row.items_json)
+          ? row.items_json.map((rawItem: unknown) => {
+              const item = typeof rawItem === 'object' && rawItem !== null ? rawItem as Record<string, unknown> : {}
+              const mapped: OrderRecord['items'][number] = {
+                name: String(item.name ?? ''),
+                quantity: Number(item.quantity ?? 0),
+                lineTotal: Number(item.lineTotal ?? item.line_total ?? 0),
+              }
+              if (item.productId != null) mapped.productId = String(item.productId)
+              if (item.serviceMode != null) mapped.serviceMode = String(item.serviceMode)
+              if (item.isHalfOrder != null) mapped.isHalfOrder = Boolean(item.isHalfOrder)
+              if (item.price != null) mapped.price = Number(item.price)
+              if (item.kitchenStatus != null) mapped.kitchenStatus = String(item.kitchenStatus)
+              if (item.isChecked != null) mapped.isChecked = Boolean(item.isChecked)
+              return mapped
+            })
+          : [],
+      }
+      if (row.service_mode != null) order.serviceMode = String(row.service_mode)
+      if (row.gcash_reference_last4 != null) order.gcashReferenceLast4 = String(row.gcash_reference_last4)
+      if (row.payment_status != null) order.paymentStatus = String(row.payment_status)
+      if (row.workflow_status != null) order.workflowStatus = String(row.workflow_status)
+      if (row.order_note != null) order.orderNote = String(row.order_note)
+      return order
+    })
   })
+}
+
+function normalizeHalfOrderPrice(value: unknown) {
+  if (value == null || value === '') return null
+  const amount = Number(value)
+  return Number.isFinite(amount) && amount > 0 ? amount : null
 }
 
 export async function fetchOrderVoids(): Promise<OrderVoidRecord[]> {

@@ -21,6 +21,7 @@ export type InventoryIngredient = {
 }
 
 const STORAGE_KEY = 'admin-web-inventory-overrides-v1'
+const CLEARED_KEY = 'admin-web-inventory-cleared-v1'
 
 function titleCase(value: string) {
   return value
@@ -101,6 +102,28 @@ function readPersistedOverrides() {
   }
 }
 
+function readClearedInventoryIds(seedIngredients: InventoryIngredient[]) {
+  if (typeof window === 'undefined') return new Set<string>()
+  const raw = window.localStorage.getItem(CLEARED_KEY)
+  if (!raw) return new Set<string>()
+  if (raw === 'true') return new Set(seedIngredients.map((ingredient) => ingredient.id))
+  try {
+    const parsed = JSON.parse(raw) as { ids?: string[] }
+    return new Set(parsed.ids ?? [])
+  } catch {
+    return new Set<string>()
+  }
+}
+
+function writeClearedInventoryIds(ids: string[]) {
+  if (typeof window === 'undefined') return
+  if (ids.length > 0) {
+    window.localStorage.setItem(CLEARED_KEY, JSON.stringify({ ids }))
+    return
+  }
+  window.localStorage.removeItem(CLEARED_KEY)
+}
+
 function mergeRemoteItems(seedIngredients: InventoryIngredient[], remoteItems: InventoryItem[]) {
   const remoteById = new Map(remoteItems.map((item) => [item.id, item]))
   const merged = seedIngredients.map((ingredient) => {
@@ -162,6 +185,10 @@ function toInventoryItems(ingredients: InventoryIngredient[]): InventoryItem[] {
 
 function writePersistedOverrides(ingredients: InventoryIngredient[]) {
   if (typeof window === 'undefined') return
+  if (ingredients.length === 0) {
+    window.localStorage.removeItem(STORAGE_KEY)
+    return
+  }
   const payload = Object.fromEntries(
     ingredients.map((ingredient) => [
       ingredient.id,
@@ -193,6 +220,7 @@ export function useInventoryState(logs: IngredientPriceLog[], recipeIngredients:
         const remoteItems = await fetchInventoryItems()
         if (cancelled) return
         if (remoteItems.length > 0) {
+          writeClearedInventoryIds([])
           setIngredients(mergeRemoteItems(seedIngredients, remoteItems))
           setHydrated(true)
           return
@@ -201,8 +229,10 @@ export function useInventoryState(logs: IngredientPriceLog[], recipeIngredients:
         if (cancelled) return
       }
 
+      const clearedIds = readClearedInventoryIds(seedIngredients)
+      const availableSeedIngredients = seedIngredients.filter((ingredient) => !clearedIds.has(ingredient.id))
       const overrides = readPersistedOverrides()
-      const next = seedIngredients.map((ingredient) => {
+      const next = availableSeedIngredients.map((ingredient) => {
         const override = overrides.get(ingredient.id)
         if (!override) return ingredient
         const estimatedOnHand = override.estimatedOnHand ?? ingredient.estimatedOnHand
@@ -236,13 +266,22 @@ export function useInventoryState(logs: IngredientPriceLog[], recipeIngredients:
   }, [hydrated, ingredients])
 
   async function persistIngredients(nextIngredients: InventoryIngredient[]) {
+    writeClearedInventoryIds([])
     writePersistedOverrides(nextIngredients)
     await upsertInventoryItems(toInventoryItems(nextIngredients))
+  }
+
+  function clearIngredients() {
+    writeClearedInventoryIds(ingredients.map((ingredient) => ingredient.id))
+    writePersistedOverrides([])
+    setHydrated(true)
+    setIngredients([])
   }
 
   return {
     ingredients,
     setIngredients,
     persistIngredients,
+    clearIngredients,
   }
 }

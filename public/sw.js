@@ -1,8 +1,10 @@
-const SHELL_CACHE = 'ooh-admin-shell-v1';
-const RUNTIME_CACHE = 'ooh-admin-runtime-v1';
+const SHELL_CACHE = 'ooh-web-shell-v2';
+const RUNTIME_CACHE = 'ooh-web-runtime-v2';
 const APP_SHELL = [
   '/',
+  '/pos.html',
   '/manifest.webmanifest',
+  '/pos-manifest.webmanifest',
   '/app-192x192.png',
   '/app-512x512.png',
   '/apple-touch-icon.png',
@@ -39,8 +41,9 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (request.mode === 'navigate') {
+    const fallbackPath = url.pathname === '/pos.html' ? '/pos.html' : '/';
     event.respondWith(
-      fetch(request).catch(() => caches.match('/')),
+      fetch(request).catch(() => caches.match(fallbackPath)),
     );
     return;
   }
