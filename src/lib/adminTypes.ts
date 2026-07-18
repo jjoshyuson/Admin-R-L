@@ -62,6 +62,21 @@ export type OrderVoidRecord = {
   voidedAt: string
 }
 
+export type OrderEditRequestStatus = 'pending' | 'approved' | 'cancelled' | 'expired'
+
+export type OrderEditRequestRecord = {
+  id: string
+  deviceOrderId: string
+  displayOrderId: string
+  deviceId: string
+  requestedBy: string
+  requestedAt: string
+  status: OrderEditRequestStatus
+  approvedBy: string | null
+  approvedAt: string | null
+  cancelledAt: string | null
+}
+
 export type MenuCategory = {
   id: string
   name: string

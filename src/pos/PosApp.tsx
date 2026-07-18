@@ -5,22 +5,38 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleCheckBig,
+  CircleAlert,
   Clock3,
+  ChefHat,
   Eye,
+  Glasses,
   LayoutGrid,
   List,
   LogOut,
+  MapPin,
   Pencil,
   Plus,
   Settings,
+  Shirt,
   ShoppingCart,
+  Table as TableIcon,
+  Tag,
   Utensils,
+  User,
   WalletCards,
+  X,
 } from 'lucide-react'
-import { fetchCashMovements, fetchOrders, upsertCashMovements } from '../lib/adminApi'
+import { fetchAdminSetting, fetchCashMovements, fetchOrders, upsertCashMovements } from '../lib/adminApi'
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
 import { fetchPosMenu, getPreviewPosMenu } from '../lib/pos/menuService'
-import type { PosMenuCategory, PosMenuProduct, ServiceMode } from '../lib/pos/posTypes'
+import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ServiceMode } from '../lib/pos/posTypes'
+import { printPosDocument, type PrintDocumentType } from '../lib/pos/printService'
+import {
+  cancelOrderEditRequest,
+  createOrderEditRequest,
+  describeOrderEditRequestError,
+  subscribeToOrderEditRequest,
+} from '../lib/orderEditRequests'
 import { hasSupabaseConfig, requireSupabase } from '../lib/supabase/client'
 
 type MainTab = 'new-order' | 'ongoing' | 'kitchen' | 'sale-tracker' | 'settings'
@@ -32,10 +48,16 @@ type OrderSort = 'oldest' | 'newest'
 type PaymentMethod = 'cash' | 'gcash' | 'split'
 type CheckoutTarget = { type: 'ticket' } | { type: 'order'; orderId: string }
 type KitchenNoteTarget = { orderNumber: string; itemCount: number; appendToOrderId?: string; editOrderId?: string }
-type SettingsSection = 'menu' | 'history' | 'money' | 'printing' | 'profile'
+type SettingsSection = 'menu' | 'history' | 'money' | 'printing'
 type MoneyAccount = 'cash' | 'gcash'
 type MovementDirection = 'in' | 'out'
 type ExpensePaymentMethod = 'cash' | 'gcash'
+type EditApprovalRequest = {
+  requestId: string | null
+  orderId: string
+  status: 'creating' | 'pending' | 'approved' | 'error'
+  message: string
+}
 
 type ExpenseCategorySetting = {
   id: string
@@ -44,6 +66,14 @@ type ExpenseCategorySetting = {
     id: string
     name: string
   }>
+}
+
+type PosEmployee = {
+  id: string
+  name: string
+  dailyRate: number
+  isCashier: boolean
+  isActive: boolean
 }
 
 type SalePayment = {
@@ -119,12 +149,14 @@ export function PosApp() {
   const [selectedCategory, setSelectedCategory] = useState('Meals')
   const [orderType, setOrderType] = useState<OrderType>('DINE IN')
   const [halfOrderEnabled, setHalfOrderEnabled] = useState(false)
-  const [deviceId, setDeviceId] = useState(readDeviceId)
+  const [deviceId] = useState(readDeviceId)
   const [ticketItems, setTicketItems] = useState<TicketItem[]>([])
   const [orders, setOrders] = useState<RestaurantOrder[]>([])
   const [history, setHistory] = useState<RestaurantOrder[]>([])
   const [activeTab, setActiveTab] = useState<MainTab>('new-order')
   const [primaryNavCollapsed, setPrimaryNavCollapsed] = useState(readPrimaryNavCollapsed)
+  const [employees, setEmployees] = useState<PosEmployee[]>(readLocalPosEmployees)
+  const [activeEmployeeId, setActiveEmployeeId] = useState(readActiveEmployeeId)
   const [statusMessage, setStatusMessage] = useState('Loading menu...')
   const [nextOrderNumber, setNextOrderNumber] = useState(1)
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
@@ -132,7 +164,8 @@ export function PosApp() {
   const [kitchenNoteTarget, setKitchenNoteTarget] = useState<KitchenNoteTarget | null>(null)
   const [appendOrderId, setAppendOrderId] = useState<string | null>(null)
   const [editOrderId, setEditOrderId] = useState<string | null>(null)
-  const [editApprovalOrderId, setEditApprovalOrderId] = useState<string | null>(null)
+  const [editApprovalRequest, setEditApprovalRequest] = useState<EditApprovalRequest | null>(null)
+  const [autoPrintReceipt, setAutoPrintReceipt] = useState(readAutoPrintReceipt)
   const [menuCategoriesEnabled, setMenuCategoriesEnabled] = useState<Record<string, boolean>>({
     Meals: true,
     Drinks: true,
@@ -168,6 +201,39 @@ export function PosApp() {
   useEffect(() => {
     window.localStorage.setItem('pos-web-primary-nav-collapsed', primaryNavCollapsed ? '1' : '0')
   }, [primaryNavCollapsed])
+
+  useEffect(() => {
+    let active = true
+    fetchAdminSetting('employees')
+      .then((setting) => {
+        if (!active) return
+        const nextEmployees = normalizePosEmployees(setting)
+        if (nextEmployees.length > 0) {
+          setEmployees(nextEmployees)
+          writeLocalPosEmployees(nextEmployees)
+          setActiveEmployeeId((current) => {
+            if (nextEmployees.some((employee) => employee.id === current && employee.isActive && employee.isCashier)) return current
+            return ''
+          })
+        }
+      })
+      .catch(() => {
+        if (!active) return
+        const fallbackEmployees = readLocalPosEmployees()
+        setEmployees(fallbackEmployees)
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem('pos-web-active-employee-id', activeEmployeeId)
+  }, [activeEmployeeId])
+
+  useEffect(() => {
+    window.localStorage.setItem('pos-web-auto-print-receipt', autoPrintReceipt ? '1' : '0')
+  }, [autoPrintReceipt])
 
   useEffect(() => {
     let active = true
@@ -257,6 +323,9 @@ export function PosApp() {
   const ongoingOrders = orders.filter((order) => !order.readyForPayment && !(order.paid && order.readyForPayment))
   const finishOrders = orders.filter((order) => order.readyForPayment && !order.paid)
   const completedToday = history.length
+  const cashierEmployees = employees.filter((employee) => employee.isActive && employee.isCashier)
+  const activeEmployee = cashierEmployees.find((employee) => employee.id === activeEmployeeId) ?? null
+  const activeEmployeeName = activeEmployee?.name ?? 'Select cashier'
   const selectedOrder = selectedOrderId
     ? ongoingOrders.find((order) => order.id === selectedOrderId) ?? ongoingOrders[0] ?? null
     : ongoingOrders[0] ?? null
@@ -270,6 +339,18 @@ export function PosApp() {
     : appendOrderId
       ? formatPosOrderRef(appendOrderId)
       : `#${String(nextOrderNumber).padStart(4, '0')}`
+
+  useEffect(() => {
+    if (!editApprovalRequest?.requestId || editApprovalRequest.status !== 'pending') return undefined
+    return subscribeToOrderEditRequest(editApprovalRequest.requestId, (request) => {
+      if (request.status === 'approved') {
+        beginApprovedEditOrder(editApprovalRequest.orderId, request.approvedBy ?? 'Admin Web')
+      } else if (request.status === 'cancelled' || request.status === 'expired') {
+        setStatusMessage(`Edit request for ${formatPosOrderRef(editApprovalRequest.orderId)} was ${request.status}.`)
+        setEditApprovalRequest(null)
+      }
+    })
+  }, [editApprovalRequest?.requestId, editApprovalRequest?.status, editApprovalRequest?.orderId, orders])
 
   function addProduct(product: PosMenuProduct) {
     if (product.status !== 'AVAILABLE') return
@@ -449,25 +530,75 @@ export function PosApp() {
     setActiveTab('new-order')
   }
 
-  function requestEditOrder(orderId: string) {
-    setEditApprovalOrderId(orderId)
+  async function requestEditOrder(orderId: string) {
+    const order = orders.find((item) => item.id === orderId)
+    if (!order) {
+      setStatusMessage(`${formatPosOrderRef(orderId)} could not be found for editing.`)
+      return
+    }
+    if (!hasSupabaseConfig) {
+      setStatusMessage('Edit order approval requires online Supabase sync. Connect first, then ask admin to approve.')
+      setEditApprovalRequest({
+        requestId: null,
+        orderId,
+        status: 'error',
+        message: 'Online admin approval is required. This POS cannot approve its own edit request.',
+      })
+      return
+    }
+    setEditApprovalRequest({
+      requestId: null,
+      orderId,
+      status: 'creating',
+      message: 'Sending approval request to Admin Web...',
+    })
+    try {
+      const request = await createOrderEditRequest({
+        deviceOrderId: order.deviceOrderId,
+        displayOrderId: order.id,
+        deviceId,
+        requestedBy: activeEmployeeName,
+      })
+      setStatusMessage(`Edit request sent for ${formatPosOrderRef(order.id)}. Waiting for Admin Web approval.`)
+      setEditApprovalRequest({
+        requestId: request.id,
+        orderId,
+        status: 'pending',
+        message: 'Waiting for the admin app to approve. Keep this POS online.',
+      })
+    } catch (error) {
+      const message = describeOrderEditRequestError(error)
+      setStatusMessage(message)
+      setEditApprovalRequest({
+        requestId: null,
+        orderId,
+        status: 'error',
+        message,
+      })
+    }
   }
 
-  function approveEditOrder() {
-    if (!editApprovalOrderId) return
-    const order = orders.find((item) => item.id === editApprovalOrderId)
+  function beginApprovedEditOrder(orderId: string, approvedBy: string) {
+    const order = orders.find((item) => item.id === orderId)
     if (!order) {
-      setStatusMessage(`${formatPosOrderRef(editApprovalOrderId)} could not be found for editing.`)
-      setEditApprovalOrderId(null)
+      setStatusMessage(`${formatPosOrderRef(orderId)} could not be found for editing.`)
+      setEditApprovalRequest(null)
       return
     }
     setAppendOrderId(null)
     setEditOrderId(order.id)
     setSelectedOrderId(order.id)
     setTicketItems(order.items.map(orderItemToTicketItem))
-    setStatusMessage(`Admin approved edit access for ${formatPosOrderRef(order.id)}.`)
-    setEditApprovalOrderId(null)
+    setStatusMessage(`${approvedBy} approved edit access for ${formatPosOrderRef(order.id)}.`)
+    setEditApprovalRequest(null)
     setActiveTab('new-order')
+  }
+
+  function closeEditApprovalRequest() {
+    if (editApprovalRequest?.requestId && editApprovalRequest.status === 'pending') {
+      void cancelOrderEditRequest(editApprovalRequest.requestId).catch(() => {})
+    }
+    setEditApprovalRequest(null)
   }
 
   function chargeCurrentTicket() {
@@ -506,6 +637,7 @@ export function PosApp() {
     setTicketItems([])
     setCheckoutTarget(null)
     setStatusMessage(`${order.id} paid and closed.`)
+    if (autoPrintReceipt) printOrderDocument(order, 'customer-receipt', setStatusMessage)
     void syncOrderSnapshot(order, setStatusMessage)
     void syncPaymentSnapshot(order, setStatusMessage)
   }
@@ -558,6 +690,7 @@ export function PosApp() {
     }))
     setCheckoutTarget(null)
     setStatusMessage(`${orderId} marked paid.`)
+    if (updatedOrder && autoPrintReceipt) printOrderDocument(updatedOrder, 'customer-receipt', setStatusMessage)
     if (updatedOrder) void syncOrderSnapshot(updatedOrder, setStatusMessage)
     if (updatedOrder) void syncPaymentSnapshot(updatedOrder, setStatusMessage)
     window.setTimeout(closeCompletedOrders, 0)
@@ -589,8 +722,10 @@ export function PosApp() {
       return updatedOrder
     }))
     setStatusMessage(`${orderId} payment recorded.`)
-    if (updatedOrder) void syncOrderSnapshot(updatedOrder, setStatusMessage)
-    if (updatedOrder) void syncPaymentSnapshot(updatedOrder, setStatusMessage, payment)
+    const paymentOrder = updatedOrder as RestaurantOrder | null
+    if (paymentOrder?.paid && autoPrintReceipt) printOrderDocument(paymentOrder, 'customer-receipt', setStatusMessage)
+    if (paymentOrder) void syncOrderSnapshot(paymentOrder, setStatusMessage)
+    if (paymentOrder) void syncPaymentSnapshot(paymentOrder, setStatusMessage, payment)
     window.setTimeout(closeCompletedOrders, 0)
   }
 
@@ -632,9 +767,24 @@ export function PosApp() {
 
         <div className="sidebar-status">
           <span className="online-dot">Online</span>
-          <strong>John Dela Cruz</strong>
-          <small>Cashier</small>
-          <button type="button"><LogOut size={16} aria-hidden="true" /> Log Out</button>
+          <strong>{activeEmployeeName}</strong>
+          <small>{activeEmployee ? `Cashier - ${formatPhp(activeEmployee.dailyRate)} / day` : 'Choose person on shift'}</small>
+          {activeEmployee ? (
+            <button type="button" onClick={() => setActiveEmployeeId('')}><LogOut size={16} aria-hidden="true" /> Log Out</button>
+          ) : null}
+          {!activeEmployee ? (
+            <select
+              className="sidebar-employee-select"
+              value={activeEmployeeId}
+              onChange={(event) => setActiveEmployeeId(event.target.value)}
+              aria-label="Select cashier on shift"
+            >
+              <option value="">Select cashier</option>
+              {cashierEmployees.map((employee) => (
+                <option key={employee.id} value={employee.id}>{employee.name}</option>
+              ))}
+            </select>
+          ) : null}
           <span>{ongoingOrders.length} ongoing</span>
           <span>{completedToday} closed</span>
         </div>
@@ -758,6 +908,7 @@ export function PosApp() {
         <section className="pos-workspace">
           <SaleTrackerPage
             deviceId={deviceId}
+            staffName={activeEmployeeName}
             orderType={orderType}
             halfOrderEnabled={halfOrderEnabled}
             onOrderTypeChange={setOrderType}
@@ -774,7 +925,8 @@ export function PosApp() {
             categories={visibleCategories.map((category) => category.name)}
             menuCategoriesEnabled={menuCategoriesEnabled}
             deviceId={deviceId}
-            onDeviceIdChange={setDeviceId}
+            autoPrintReceipt={autoPrintReceipt}
+            onAutoPrintReceiptChange={setAutoPrintReceipt}
             onToggleMenuCategory={(category) => setMenuCategoriesEnabled((current) => ({
               ...current,
               [category]: !(current[category] ?? false),
@@ -808,11 +960,12 @@ export function PosApp() {
           }}
         />
       ) : null}
-      {editApprovalOrderId ? (
+      {editApprovalRequest ? (
         <AdminApprovalModal
-          orderId={editApprovalOrderId}
-          onCancel={() => setEditApprovalOrderId(null)}
-          onApprove={approveEditOrder}
+          orderId={editApprovalRequest.orderId}
+          status={editApprovalRequest.status}
+          message={editApprovalRequest.message}
+          onCancel={closeEditApprovalRequest}
         />
       ) : null}
     </main>
@@ -908,23 +1061,28 @@ function SendToKitchenModal({
       <section className="kitchen-note-modal" role="dialog" aria-modal="true" aria-labelledby="send-kitchen-title">
         <header>
           <div className="kitchen-note-title">
-            <span className="kitchen-note-icon"><Utensils size={20} aria-hidden="true" /></span>
+            <span className="kitchen-note-icon"><Utensils size={22} strokeWidth={1.8} aria-hidden="true" /></span>
             <div>
               <h2 id="send-kitchen-title">Send to Kitchen</h2>
               <span>Order {formatPosOrderRef(target.orderNumber)} - {target.itemCount} items</span>
             </div>
           </div>
-          <button type="button" className="modal-close kitchen-note-close" onClick={onCancel} aria-label="Close">x</button>
+          <button type="button" className="modal-close kitchen-note-close" onClick={onCancel} aria-label="Close Send to Kitchen modal">
+            <X size={18} strokeWidth={1.8} aria-hidden="true" />
+          </button>
         </header>
 
         <div className="kitchen-note-body">
           <div className="kitchen-note-warning">
-            <span>!</span>
+            <CircleAlert className="send-kitchen-modal__warning-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
             <p>Please add a note before sending to the kitchen.</p>
           </div>
 
           <div className="kitchen-note-section">
-            <strong>Table <span>(Location)</span></strong>
+            <strong className="send-kitchen-modal__section-label">
+              <MapPin className="send-kitchen-modal__section-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>Table <em>(Location)</em></span>
+            </strong>
             <div className="kitchen-option-grid table-grid" aria-label="Table location">
               {kitchenTableTags.map((tag) => (
                 <button
@@ -933,7 +1091,7 @@ function SendToKitchenModal({
                   className={selectedTable === tag ? 'is-selected' : ''}
                   onClick={() => setSelectedTable((current) => current === tag ? '' : tag)}
                 >
-                  <i><List size={18} aria-hidden="true" /></i>
+                  <TableIcon className="send-kitchen-modal__option-icon" size={22} strokeWidth={1.8} aria-hidden="true" />
                   <span>{tag}</span>
                 </button>
               ))}
@@ -941,7 +1099,10 @@ function SendToKitchenModal({
           </div>
 
           <div className="kitchen-note-section">
-            <strong>Customer Clothes <span>(Color)</span></strong>
+            <strong className="send-kitchen-modal__section-label">
+              <Shirt className="send-kitchen-modal__section-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>Customer Clothes <em>(Color)</em></span>
+            </strong>
             <div className="kitchen-option-grid color-grid" aria-label="Customer clothes color">
               {kitchenColorTags.map((tag) => (
                 <button
@@ -950,7 +1111,7 @@ function SendToKitchenModal({
                   className={`${selectedColor === tag.label ? 'is-selected' : ''} ${tag.className}`}
                   onClick={() => setSelectedColor((current) => current === tag.label ? '' : tag.label)}
                 >
-                  <i />
+                  <Shirt className="send-kitchen-modal__option-icon send-kitchen-modal__shirt-icon" size={22} strokeWidth={1.8} aria-hidden="true" />
                   <span>{tag.label}</span>
                 </button>
               ))}
@@ -958,7 +1119,10 @@ function SendToKitchenModal({
           </div>
 
           <div className="kitchen-note-section">
-            <strong>Other Identifiers</strong>
+            <strong className="send-kitchen-modal__section-label">
+              <Eye className="send-kitchen-modal__section-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>Other Identifiers</span>
+            </strong>
             <div className="kitchen-option-grid identifier-grid" aria-label="Other identifiers">
               {kitchenIdentifierTags.map((tag) => (
                 <button
@@ -967,7 +1131,7 @@ function SendToKitchenModal({
                   className={selectedIdentifier === tag ? 'is-selected' : ''}
                   onClick={() => setSelectedIdentifier((current) => current === tag ? '' : tag)}
                 >
-                  <i><Eye size={18} aria-hidden="true" /></i>
+                  <Glasses className="send-kitchen-modal__option-icon" size={22} strokeWidth={1.8} aria-hidden="true" />
                   <span>{tag}</span>
                 </button>
               ))}
@@ -975,7 +1139,10 @@ function SendToKitchenModal({
           </div>
 
           <div className="kitchen-note-section">
-            <strong>Your Tags <span>(Add your own)</span></strong>
+            <strong className="send-kitchen-modal__section-label">
+              <Tag className="send-kitchen-modal__section-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>Your Tags <em>(Add your own)</em></span>
+            </strong>
             <div className="kitchen-custom-tag-entry">
               <input
                 maxLength={24}
@@ -999,7 +1166,8 @@ function SendToKitchenModal({
                     type="button"
                     onClick={() => setCustomElements((current) => current.filter((item) => item !== tag))}
                   >
-                    {tag} x
+                    <span>{tag}</span>
+                    <X size={12} strokeWidth={1.8} aria-hidden="true" />
                   </button>
                 ))}
               </div>
@@ -1007,7 +1175,10 @@ function SendToKitchenModal({
           </div>
 
           <label className="kitchen-note-field">
-            <span>Customer Note <em>(Optional)</em></span>
+            <span className="send-kitchen-modal__field-label">
+              <User className="send-kitchen-modal__section-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>Customer Note <em>(Optional)</em></span>
+            </span>
             <input
               maxLength={100}
               value={customNote}
@@ -1018,7 +1189,10 @@ function SendToKitchenModal({
           </label>
 
           <label className="kitchen-note-field kitchen-note-prep-field">
-            <span>Kitchen Notes <em>(Optional)</em></span>
+            <span className="send-kitchen-modal__field-label">
+              <ChefHat className="send-kitchen-modal__section-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>Kitchen Notes <em>(Optional)</em></span>
+            </span>
             <input
               maxLength={120}
               value={kitchenNote}
@@ -1032,7 +1206,7 @@ function SendToKitchenModal({
         <footer>
           <button type="button" className="modal-secondary" onClick={onCancel}>Cancel</button>
           <button type="button" className="modal-primary" disabled={!canSend} onClick={() => onSend(note)}>
-            <span><Utensils size={16} aria-hidden="true" /></span>
+            <Utensils className="send-kitchen-modal__footer-icon" size={18} strokeWidth={1.8} aria-hidden="true" />
             Send to Kitchen
           </button>
         </footer>
@@ -1043,34 +1217,38 @@ function SendToKitchenModal({
 
 function AdminApprovalModal({
   orderId,
+  status,
+  message,
   onCancel,
-  onApprove,
 }: {
   orderId: string
+  status: EditApprovalRequest['status']
+  message: string
   onCancel: () => void
-  onApprove: () => void
 }) {
+  const isPending = status === 'creating' || status === 'pending'
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="admin-approval-modal" role="dialog" aria-modal="true" aria-labelledby="admin-approval-title">
         <header>
           <div>
             <span>Admin Access</span>
-            <h2 id="admin-approval-title">Edit Order Approval</h2>
+            <h2 id="admin-approval-title">Edit Request Pending</h2>
           </div>
           <button type="button" className="modal-close" onClick={onCancel} aria-label="Close">x</button>
         </header>
         <div className="admin-approval-body">
           <strong>{formatPosOrderRef(orderId)}</strong>
-          <p>Editing an existing order can change kitchen and payment records. Ask an admin to approve before continuing.</p>
+          <p>Editing an existing order can change kitchen and payment records. Approval must come from Admin Web while both apps are online.</p>
           <div className="admin-approval-card">
-            <span>Admin confirmation required</span>
-            <small>Click Yes only when the admin has reviewed this order.</small>
+            <span>{isPending ? 'Waiting for admin confirmation' : 'Request not sent'}</span>
+            <small>{message}</small>
           </div>
         </div>
         <footer>
-          <button type="button" className="modal-secondary" onClick={onCancel}>Cancel</button>
-          <button type="button" className="modal-primary" onClick={onApprove}>Yes, Approve Edit</button>
+          <button type="button" className="modal-secondary" onClick={onCancel}>
+            {isPending ? 'Cancel Request' : 'Close'}
+          </button>
         </footer>
       </section>
     </div>
@@ -1629,7 +1807,6 @@ function OngoingTrackingDetailPanel({
           <span>Table {tableNumber(order.id)} - {formatOrderType(order.orderType)}</span>
           <span className={`status-pill status-${order.status}`}>{statusLabel(order.status)}</span>
         </div>
-        <button type="button" className="detail-edit-button" onClick={() => onViewDetails(order.id)}><Pencil size={16} /> Edit</button>
         <div className="detail-time">
           <time>{formatOrderTime(order.createdAt)}</time>
           <span>{minutesAgo(order.createdAt)} mins ago</span>
@@ -1663,6 +1840,7 @@ function OngoingTrackingDetailPanel({
         </button>
         <button type="button"><Eye size={16} /> View Details</button>
         <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
+        <button type="button" className="edit-order-action" onClick={() => onViewDetails(order.id)}><Pencil size={16} /> Edit Order</button>
       </section>
     </aside>
   )
@@ -2421,12 +2599,14 @@ function OrderDetailPanel({
 
 function SaleTrackerPage({
   deviceId,
+  staffName,
   orderType,
   halfOrderEnabled,
   onOrderTypeChange,
   onHalfOrderToggle,
 }: {
   deviceId: string
+  staffName: string
   orderType: OrderType
   halfOrderEnabled: boolean
   onOrderTypeChange: (orderType: OrderType) => void
@@ -2519,7 +2699,7 @@ function SaleTrackerPage({
       <header className="sale-tracker-header">
         <div className="left-header">
           <strong className="app-title">OOH POS</strong>
-          <span className="staff-subtitle">John Dela Cruz • {deviceId}</span>
+          <span className="staff-subtitle">{staffName} • {deviceId}</span>
         </div>
         <div className="sale-tracker-title">
           <h1>Sale Tracker</h1>
@@ -2905,15 +3085,17 @@ function SettingsPage({
   categories,
   menuCategoriesEnabled,
   deviceId,
-  onDeviceIdChange,
   onToggleMenuCategory,
+  autoPrintReceipt,
+  onAutoPrintReceiptChange,
 }: {
   history: RestaurantOrder[]
   products: PosMenuProduct[]
   categories: string[]
   menuCategoriesEnabled: Record<string, boolean>
   deviceId: string
-  onDeviceIdChange: (deviceId: string) => void
+  autoPrintReceipt: boolean
+  onAutoPrintReceiptChange: (enabled: boolean) => void
   onToggleMenuCategory: (category: string) => void
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('menu')
@@ -2924,7 +3106,6 @@ function SettingsPage({
   const [movementAmount, setMovementAmount] = useState('')
   const [movementNote, setMovementNote] = useState('')
   const [receiptCopies, setReceiptCopies] = useState('1')
-  const [autoPrintReceipt, setAutoPrintReceipt] = useState(false)
   const [activeMenuListCategory, setActiveMenuListCategory] = useState('All Items')
 
   useEffect(() => {
@@ -2990,7 +3171,6 @@ function SettingsPage({
     { id: 'history', title: 'Order History', subtitle: `${history.length} closed today` },
     { id: 'money', title: 'Money Movements', subtitle: hasSupabaseConfig ? 'Supabase connected' : 'Needs Supabase env' },
     { id: 'printing', title: 'Printing', subtitle: 'Receipt print setup' },
-    { id: 'profile', title: 'Profile', subtitle: deviceId },
   ]
 
   return (
@@ -3170,10 +3350,10 @@ function SettingsPage({
 
         {activeSection === 'printing' ? (
           <section className="settings-panel">
-            <SettingsPanelHeader title="Printing" subtitle="Browser print setup for receipts." />
+            <SettingsPanelHeader title="Printing" subtitle="Bluetooth receipt printing with browser fallback." />
             <div className="settings-card">
               <h3>Receipt Printing</h3>
-              <SettingsToggle label="Auto print after payment" checked={autoPrintReceipt} onChange={setAutoPrintReceipt} />
+              <SettingsToggle label="Auto print after payment" checked={autoPrintReceipt} onChange={onAutoPrintReceiptChange} />
               <label>
                 <span>Receipt copies</span>
                 <input inputMode="numeric" value={receiptCopies} onChange={(event) => setReceiptCopies(event.target.value.replace(/\D/g, '').slice(0, 2))} />
@@ -3181,31 +3361,11 @@ function SettingsPage({
             </div>
             <div className="settings-card">
               <h3>Printer Support</h3>
-              <p>Direct Bluetooth/WebUSB printer support is still deferred. This screen is prepared for browser receipt print views.</p>
+              <p>When this POS runs inside the Android shell, receipts print silently through the paired Bluetooth ESC/POS printer. Browsers still use the normal print window.</p>
             </div>
           </section>
         ) : null}
 
-        {activeSection === 'profile' ? (
-          <section className="settings-panel">
-            <SettingsPanelHeader title="Profile" subtitle="Terminal identity and cashier session." />
-            <div className="settings-card">
-              <h3>Device Profile</h3>
-              <label>
-                <span>Device Name</span>
-                <input value={deviceId} onChange={(event) => onDeviceIdChange(event.target.value)} />
-              </label>
-              <label>
-                <span>Cashier</span>
-                <input value="John Dela Cruz" readOnly />
-              </label>
-              <label>
-                <span>Role</span>
-                <input value="Admin" readOnly />
-              </label>
-            </div>
-          </section>
-        ) : null}
       </div>
     </section>
   )
@@ -3330,9 +3490,9 @@ function HistoryPage({ orders }: { orders: RestaurantOrder[] }) {
               ))}
             </div>
             <div className="history-actions">
-              <button type="button" className="settings-primary-button" onClick={() => window.print()}>Print Receipt</button>
-              <button type="button" onClick={() => window.print()}>Print Kitchen Ticket</button>
-              <button type="button" onClick={() => window.print()}>Reprint Summary</button>
+              <button type="button" className="settings-primary-button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus)}>Print Receipt</button>
+              <button type="button" onClick={() => printOrderDocument(selectedOrder, 'kitchen-ticket', setHistoryStatus)}>Print Kitchen Ticket</button>
+              <button type="button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus)}>Reprint Summary</button>
             </div>
           </>
         ) : (
@@ -3403,6 +3563,44 @@ function readDeviceId() {
 
 function readPrimaryNavCollapsed() {
   return window.localStorage.getItem('pos-web-primary-nav-collapsed') === '1'
+}
+
+function readActiveEmployeeId() {
+  return window.localStorage.getItem('pos-web-active-employee-id') ?? ''
+}
+
+function readLocalPosEmployees(): PosEmployee[] {
+  try {
+    return normalizePosEmployees(JSON.parse(window.localStorage.getItem('admin-web-employees') ?? '{}') as Record<string, unknown>)
+  } catch {
+    return []
+  }
+}
+
+function writeLocalPosEmployees(employees: PosEmployee[]) {
+  window.localStorage.setItem('admin-web-employees', JSON.stringify({ employees }))
+}
+
+function normalizePosEmployees(setting: Record<string, unknown> | null): PosEmployee[] {
+  const rawEmployees = Array.isArray(setting?.employees) ? setting.employees : []
+  return rawEmployees
+    .map((rawEmployee, index) => {
+      const employee = typeof rawEmployee === 'object' && rawEmployee !== null ? rawEmployee as Record<string, unknown> : {}
+      const name = String(employee.name ?? '').trim()
+      if (!name) return null
+      return {
+        id: String(employee.id ?? `employee-${index}`),
+        name,
+        dailyRate: Math.max(0, Number(employee.dailyRate ?? employee.daily_rate ?? 0) || 0),
+        isCashier: employee.isCashier !== false && employee.is_cashier !== false,
+        isActive: employee.isActive !== false && employee.is_active !== false,
+      }
+    })
+    .filter((employee): employee is PosEmployee => Boolean(employee))
+}
+
+function readAutoPrintReceipt() {
+  return window.localStorage.getItem('pos-web-auto-print-receipt') === '1'
 }
 
 function formatPhp(value: number) {
@@ -3651,6 +3849,54 @@ function ticketOrderType(items: TicketItem[]): OrderType | 'MIXED' {
   const first = items[0]?.orderType
   if (!first) return 'DINE IN'
   return items.every((item) => item.orderType === first) ? first : 'MIXED'
+}
+
+function printOrderDocument(
+  order: RestaurantOrder,
+  documentType: PrintDocumentType,
+  setStatusMessage: (message: string) => void,
+) {
+  try {
+    printPosDocument(toCompletedPrintOrder(order), documentType)
+    setStatusMessage(`${formatPosOrderRef(order.id)} ${documentType === 'kitchen-ticket' ? 'kitchen ticket' : 'receipt'} sent to printer.`)
+  } catch (error) {
+    setStatusMessage(error instanceof Error ? error.message : 'Could not print order.')
+  }
+}
+
+function toCompletedPrintOrder(order: RestaurantOrder): CompletedOrder {
+  const subtotal = order.items.reduce((sum, item) => sum + item.price * item.quantity, 0)
+  const tax = roundCurrency(subtotal * taxRate)
+  const total = roundCurrency(subtotal + tax)
+  const paymentMethod = (order.paymentMethod ?? 'cash').toUpperCase() as CompletedOrder['payment']['method']
+  return {
+    deviceOrderId: order.deviceOrderId || order.id,
+    deviceId: orderDeviceLabel(order),
+    createdAt: new Date(order.createdAt).toISOString(),
+    serviceMode: order.orderType,
+    payment: {
+      method: paymentMethod,
+      paymentReference: order.paymentReference || null,
+      cashAmount: order.paymentMethod === 'cash' || order.paymentMethod === 'split' ? order.paymentReceived : null,
+      gcashAmount: order.paymentMethod === 'gcash' ? order.paymentReceived : null,
+      gcashReferenceLast4: order.paymentReference.replace(/\D/g, '').slice(-4) || null,
+      amountReceived: order.paymentReceived || total,
+      changeAmount: Math.max(0, roundCurrency((order.paymentReceived || total) - total)),
+    },
+    orderNote: order.paymentNotes || null,
+    totals: { subtotal: roundCurrency(subtotal), tax, total },
+    items: order.items.map((item) => ({
+      productId: item.productId,
+      name: item.name,
+      serviceMode: item.orderType,
+      isHalfOrder: item.isHalfOrder,
+      quantity: item.quantity,
+      price: item.price,
+      lineTotal: roundCurrency(item.price * item.quantity),
+      kitchenStatus: 'PENDING',
+      isChecked: item.served,
+    })),
+  }
 }
 
 function orderItemToTicketItem(item: OrderItem): TicketItem {

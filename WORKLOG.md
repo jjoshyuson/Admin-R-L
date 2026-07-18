@@ -464,3 +464,73 @@
 - Test result: build passed; unit tests passed 4/4; Playwright smoke suite passed 5/5; targeted browser pass opened Dashboard, Inventory, Daily Log, More, Sync Data & Logs, Order History, Sales Range, Menu Settings, Recipes & Cost Management, Cash Overview, Cash Control, Bills & Payables, and Profit Insights with no console or page errors.
 - Screenshot filename: `debug-screenshots/ui-polish-before-dashboard.png`, `debug-screenshots/ui-polish-before-inventory.png`, `debug-screenshots/ui-polish-before-daily-log.png`, `debug-screenshots/ui-polish-before-more.png`, `debug-screenshots/ui-polish-after-dashboard.png`, `debug-screenshots/ui-polish-after-inventory.png`, `debug-screenshots/ui-polish-after-daily-log.png`, `debug-screenshots/ui-polish-after-more.png`, `debug-screenshots/ui-polish-after-order-history.png`, `debug-screenshots/ui-polish-after-sales-range.png`, `debug-screenshots/ui-polish-after-menu-settings.png`, `debug-screenshots/ui-polish-after-recipes-cost-management.png`, `debug-screenshots/ui-polish-after-cash-overview.png`, `debug-screenshots/ui-polish-after-cash-control.png`, `debug-screenshots/ui-polish-after-bills-payables.png`, `debug-screenshots/ui-polish-after-profit-insights.png`, `debug-screenshots/ui-polish-after-desktop-dashboard.png`, `debug-screenshots/ui-polish-after-desktop-more.png`
 - Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session; destructive reset actions were intentionally not executed during UI validation.
+
+### Attempt 25
+
+- What was broken: POS Settings still had a Profile tab with a hard-coded cashier, and Admin Web had no place to manage employees, daily rates, or which employees can work as cashiers.
+- Suspected cause: cashier identity was static UI text in POS instead of being driven by an admin-managed employee setting.
+- Files changed: `src/App.tsx`, `src/style.css`, `src/pos/PosApp.tsx`, `src/pos/pos.css`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; `npm run test:smoke -- --reporter=line --workers=1`; targeted Playwright browser flow against `http://127.0.0.1:5173/` and `/pos.html`
+- Test result: build passed; unit tests passed 13/13; Playwright smoke suite passed 5/5; targeted browser flow added an employee from Admin Employee Management, verified the employee setting was stored, opened POS Web with an empty shift, selected the cashier, and confirmed the POS Settings Profile tab is removed with no page or console errors.
+- Screenshot filename: `debug-screenshots/admin-employee-management-empty.png`, `debug-screenshots/admin-employee-management-added.png`, `debug-screenshots/pos-employee-select-empty-shift.png`, `debug-screenshots/pos-employee-selected-shift.png`, `debug-screenshots/pos-settings-profile-removed.png`
+- Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 26
+
+- What was broken: the POS Edit Order approval modal still let the POS approve its own edit request, which defeated the admin-control requirement.
+- Suspected cause: the approval was implemented as local component state instead of a cloud-backed request that Admin Web must approve.
+- Files changed: `src/App.tsx`, `src/style.css`, `src/pos/PosApp.tsx`, `src/lib/adminTypes.ts`, `src/lib/orderEditRequests.ts`, `GITHUB_SUPABASE_SETUP.md`, `WORKLOG.md`, plus `..\SUPABASE_ORDER_EDIT_REQUESTS.sql`.
+- Command run: `npm run build`; `npm test`; targeted Playwright browser checks against `http://127.0.0.1:5174/pos.html` and `http://127.0.0.1:5174/`.
+- Test result: build passed; unit tests passed 13/13; POS edit request modal showed no local approve button and stated that Admin Web approval is required. The live Supabase project reported the missing `order_edit_requests` table as expected until the new SQL patch is applied.
+- Screenshot filename: `output/playwright/pos-edit-request-pending.png`, `output/playwright/pos-edit-request-after-sync.png`, `output/playwright/admin-no-edit-request-popup.png`.
+- Remaining issue if any: run `SUPABASE_ORDER_EDIT_REQUESTS.sql` in the live Supabase project before the cross-device Admin Web popup can be verified end to end; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 27
+
+- What was broken: after the SQL patch was applied, pending edit-order request rows existed in Supabase but Admin Web still did not show an obvious approval surface.
+- Suspected cause: relying only on a floating toast made the approval too easy to miss and the initial render path was not surfacing it in the normal More screen content.
+- Files changed: `src/App.tsx`, `src/style.css`, `WORKLOG.md`
+- Command run: direct Supabase pending-row check; `npm run build`; `npm test`; targeted Playwright check against `http://127.0.0.1:5174/`.
+- Test result: build passed; unit tests passed 13/13; browser check confirmed `PENDING ADMIN REQUESTS` is visible on Admin Web Settings / More, the live pending order ID appears, and `Yes, Approve` buttons render with no console or page errors.
+- Screenshot filename: `output/playwright/admin-pending-requests-section.png`
+- Remaining issue if any: deploy/reload the Admin Web bundle the user is viewing so the new visible More-screen approval section is available there; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 28
+
+- What was broken: the Admin Web approval UI looked like a page widget/toast and showed the full cloud device order ID instead of the simplified POS-style order reference.
+- Suspected cause: the approval surface was rendered both inline and as a bottom toast, and Admin Web used a generic last-characters formatter instead of the POS order reference formatter.
+- Files changed: `src/App.tsx`, `src/style.css`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright check against `http://127.0.0.1:5174/`.
+- Test result: build passed; unit tests passed 13/13; browser check confirmed the approval appears as a centered modal, shows `Edit Order #0716-0002`, and no longer displays the full `TABLET-...` ID.
+- Screenshot filename: `output/playwright/admin-edit-request-centered-modal.png`
+- Remaining issue if any: deploy/reload the Admin Web bundle the user is viewing so the centered modal replaces the old widget/toast; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 29
+
+- What was broken: Menu Settings showed a `Meals` category chip even though the live `Meals` category had no active menu items, making the category look bugged/empty.
+- Suspected cause: Menu Settings built filter chips from active category rows instead of from categories that actually have active visible menu items. The live Supabase data also contains duplicate `Meals` rows and only hidden/inactive smoke-test products under Meals.
+- Files changed: `src/App.tsx`, `WORKLOG.md`
+- Command run: live Supabase category/product grouping check; `npm run build`; `npm test`; targeted Playwright check against `http://127.0.0.1:5174/`.
+- Test result: build passed; unit tests passed 13/13; browser check confirmed Menu Settings chips are now `All`, `PANSIT`, `ULAM`, and `Uncategorized`, with no empty `Meals` chip, and active products still render correctly.
+- Screenshot filename: `output/playwright/menu-settings-meals-before.png`, `output/playwright/menu-settings-meals-fixed.png`
+- Remaining issue if any: the duplicate/empty `Meals` category row still exists in Supabase for Category Settings cleanup; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 30
+
+- What was broken: adding a product to `Meals` saved it back under `Uncategorized`, while `ULAM` and `PANSIT` saved correctly.
+- Suspected cause: after hiding empty menu chips, `persistMenuCatalog(...)` only built category IDs from the currently visible category list. Because `Meals` was empty and no longer visible, a new `Meals` item had no category ID during persistence and fell back to the first available category path.
+- Files changed: `src/App.tsx`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright/Supabase save check against `http://127.0.0.1:5174/`.
+- Test result: build passed; unit tests passed 13/13; adding a temporary `Meals Save Check ...` item persisted to the active `Meals` category ID `3261f126-b1c2-4bae-a716-3e002130525a` instead of `Uncategorized`; the temporary test product was hidden after verification.
+- Screenshot filename: `output/playwright/menu-settings-meals-save-check.png`
+- Remaining issue if any: duplicate inactive `Meals` category rows and hidden smoke-test products remain in Supabase cleanup history, but active `Meals` saves now use the correct category; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 31
+
+- What was broken: Send to Kitchen note modal icons looked inconsistent, with a mix of Lucide icons, text symbols, CSS-drawn shirt shapes, and wrong icon choices.
+- Suspected cause: the modal used plain text `x` / `!`, `List` for tables, `Eye` for the Glasses option, and CSS pseudo-elements to draw shirt icons instead of using one SVG icon system.
+- Files changed: `src/pos/PosApp.tsx`, `src/pos/pos.css`, `WORKLOG.md`
+- Command run: modal icon source scan; `npm run build`; `npm test`; targeted Playwright check against `http://127.0.0.1:5174/pos.html`.
+- Test result: build passed; unit tests passed 13/13; browser check opened Send to Kitchen, confirmed the modal contains SVG icons and no `<i>` pseudo-icon elements, and reported no console or page errors.
+- Screenshot filename: `output/playwright/send-to-kitchen-icons-fixed.png`
+- Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session.

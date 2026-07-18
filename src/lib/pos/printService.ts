@@ -2,6 +2,36 @@ import type { CompletedOrder } from './posTypes'
 
 export type PrintDocumentType = 'customer-receipt' | 'kitchen-ticket'
 
+type NativePrinterBridge = {
+  printReceipt?: (orderJson: string) => string | void
+  printKitchenTicket?: (orderJson: string) => string | void
+}
+
+declare global {
+  interface Window {
+    OohPrinter?: NativePrinterBridge
+    AndroidPrinter?: NativePrinterBridge
+  }
+}
+
+export function printPosDocument(order: CompletedOrder, documentType: PrintDocumentType) {
+  const nativePrinter = window.OohPrinter ?? window.AndroidPrinter
+  const nativeMethod = documentType === 'kitchen-ticket'
+    ? nativePrinter?.printKitchenTicket
+    : nativePrinter?.printReceipt
+
+  if (nativeMethod) {
+    const result = nativeMethod.call(nativePrinter, JSON.stringify(order))
+    const parsed = typeof result === 'string' ? parseNativePrintResult(result) : null
+    if (parsed && !parsed.success) {
+      throw new Error(parsed.message || 'Native printer failed.')
+    }
+    return
+  }
+
+  openPrintDocument(order, documentType)
+}
+
 export function openPrintDocument(order: CompletedOrder, documentType: PrintDocumentType) {
   const printWindow = window.open('', '_blank', 'width=420,height=720')
   if (!printWindow) {
@@ -11,6 +41,14 @@ export function openPrintDocument(order: CompletedOrder, documentType: PrintDocu
   printWindow.document.close()
   printWindow.focus()
   printWindow.print()
+}
+
+function parseNativePrintResult(value: string) {
+  try {
+    return JSON.parse(value) as { success?: boolean; message?: string }
+  } catch {
+    return null
+  }
 }
 
 export function buildPrintHtml(order: CompletedOrder, documentType: PrintDocumentType) {
@@ -86,4 +124,3 @@ function escapeHtml(value: string) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;')
 }
-

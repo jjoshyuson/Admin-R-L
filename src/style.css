@@ -2488,6 +2488,67 @@ textarea {
   white-space: nowrap;
 }
 
+.employee-admin-grid {
+  grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.15fr);
+}
+
+.employee-check-row,
+.employee-toggle-row label {
+  align-items: center;
+  color: #334155;
+  display: flex;
+  gap: 10px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.employee-check-row input,
+.employee-toggle-row input {
+  width: 18px;
+  height: 18px;
+}
+
+.employee-list {
+  display: grid;
+  gap: 12px;
+}
+
+.employee-card {
+  border: 1px solid #dbe4ea;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.06);
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.employee-card-head,
+.employee-toggle-row {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.employee-card-head strong {
+  color: #0f172a;
+  display: block;
+  font-size: 0.95rem;
+}
+
+.employee-card-head small {
+  color: #64748b;
+  display: block;
+  font-size: 0.74rem;
+  margin-top: 4px;
+}
+
+.employee-toggle-row {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
 @media (max-width: 900px) {
   .expense-admin-grid {
     grid-template-columns: 1fr;
@@ -2889,6 +2950,109 @@ textarea {
 .system-badge.is-synced {
   background: #dbeafe;
   color: #2563eb;
+}
+
+.admin-request-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(2px);
+}
+
+.admin-request-modal {
+  width: min(430px, calc(100vw - 36px));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(203, 213, 225, 0.95);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 28px 70px rgba(15, 23, 42, 0.3);
+}
+
+.admin-request-modal-head,
+.admin-request-actions,
+.admin-request-meta {
+  display: flex;
+  align-items: center;
+}
+
+.admin-request-modal-head {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-request-modal-head div {
+  min-width: 0;
+}
+
+.admin-request-modal-head span:first-child {
+  display: block;
+  margin-bottom: 3px;
+  color: #2563eb;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.admin-request-modal-head strong {
+  display: block;
+  color: #111827;
+  font-size: 1.18rem;
+  overflow-wrap: anywhere;
+}
+
+.admin-request-modal p {
+  margin: 0;
+  color: #475569;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.admin-request-meta {
+  justify-content: space-between;
+  gap: 10px;
+  color: #64748b;
+  font-size: 0.74rem;
+}
+
+.admin-request-meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-request-error {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.admin-request-actions {
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.admin-request-actions .save-changes-button,
+.admin-request-actions .ghost-pill {
+  width: auto;
+  min-height: 40px;
+}
+
+@media (max-width: 640px) {
+  .admin-request-actions .save-changes-button,
+  .admin-request-actions .ghost-pill {
+    flex: 1;
+  }
 }
 
 .finance-screen {

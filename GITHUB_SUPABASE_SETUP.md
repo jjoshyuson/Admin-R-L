@@ -290,6 +290,12 @@ If you want Menu Settings half-order pricing to persist from the web app, also r
 
 That patch adds the optional `public.products.half_order_price` column the latest admin-web build already knows how to read and write.
 
+If you want POS edit-order approval to be controlled by Admin Web, also run:
+
+- [SUPABASE_ORDER_EDIT_REQUESTS.sql](</C:/Users/joshy/OneDrive/Documents/OOH POS 3.0/SUPABASE_ORDER_EDIT_REQUESTS.sql>)
+
+That patch adds the `public.order_edit_requests` realtime table used when POS asks Admin Web to approve editing an existing order.
+
 ### E. Row Level Security / policies
 
 If RLS is enabled, the anon client must be allowed to perform the reads/writes required by the admin web app.

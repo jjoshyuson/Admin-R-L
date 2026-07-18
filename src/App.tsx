@@ -22,6 +22,12 @@ import {
   saveAdminSetting,
 } from './lib/adminApi'
 import { createRandomId } from './lib/randomId'
+import {
+  approveOrderEditRequest,
+  describeOrderEditRequestError,
+  fetchPendingOrderEditRequests,
+  subscribeToOrderEditRequests,
+} from './lib/orderEditRequests'
 import { hasSupabaseConfig } from './lib/supabase/client'
 import type {
   DailyAccountingRecord,
@@ -29,6 +35,7 @@ import type {
   IngredientPriceLog,
   IngredientRegistryItem,
   MenuProduct,
+  OrderEditRequestRecord,
   OrderRecord,
   OrderVoidRecord,
 } from './lib/adminTypes'
@@ -46,6 +53,7 @@ type MoreRoute =
   | 'sync'
   | 'orders'
   | 'sales-range'
+  | 'employees'
   | 'menu-settings'
   | 'category-settings'
   | 'recipes'
@@ -97,6 +105,14 @@ type AdminExpenseCategory = {
     id: string
     name: string
   }>
+}
+
+type EmployeeRecord = {
+  id: string
+  name: string
+  dailyRate: number
+  isCashier: boolean
+  isActive: boolean
 }
 
 type CategoryItem = {
@@ -1193,7 +1209,35 @@ function AdminShell() {
   const [resetWorkingAction, setResetWorkingAction] = useState<ResetActionId | null>(null)
   const [resetStatusMessage, setResetStatusMessage] = useState('')
   const [resetErrorMessage, setResetErrorMessage] = useState('')
+  const [orderEditRequests, setOrderEditRequests] = useState<OrderEditRequestRecord[]>([])
+  const [orderEditRequestBusyId, setOrderEditRequestBusyId] = useState<string | null>(null)
+  const [orderEditRequestError, setOrderEditRequestError] = useState('')
   const inventoryItems = ingredients
+
+  useEffect(() => {
+    let active = true
+
+    async function loadPendingEditRequests() {
+      try {
+        const requests = await fetchPendingOrderEditRequests()
+        if (!active) return
+        setOrderEditRequests(requests)
+      } catch (error) {
+        if (!active) return
+        setOrderEditRequestError(describeOrderEditRequestError(error))
+      }
+    }
+
+    void loadPendingEditRequests()
+    const unsubscribe = subscribeToOrderEditRequests(() => {
+      void loadPendingEditRequests()
+    })
+
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [])
 
   useEffect(() => {
     if (appMode !== 'pos-only') {
@@ -1287,6 +1331,15 @@ function AdminShell() {
     () => [...categories].sort((left, right) => left.orderIndex - right.orderIndex),
     [categories],
   )
+  const menuCategoryChips = useMemo(
+    () => ['All', ...uniqueNonEmptyValues(menuItems.map((item) => item.category))],
+    [menuItems],
+  )
+  useEffect(() => {
+    if (!menuCategoryChips.includes(activeMenuCategory)) {
+      setActiveMenuCategory('All')
+    }
+  }, [activeMenuCategory, menuCategoryChips])
   const filteredMenuItems = useMemo(() => {
     return menuItems.filter((item) => {
       const matchesCategory = activeMenuCategory === 'All' || item.category === activeMenuCategory
@@ -1562,11 +1615,19 @@ function AdminShell() {
   }
 
   function persistMenuCatalog(nextCategories: CategoryItem[], nextMenuItems: MenuItem[]) {
-    const remoteCategoryByName = new Map(
-      [...remoteCategories]
-        .sort((left, right) => left.sortOrder - right.sortOrder)
-        .map((category) => [normalizeCategoryNameKey(category.name), category] as const),
-    )
+    const remoteCategoryByName = new Map<string, typeof remoteCategories[number]>()
+    for (const category of [...remoteCategories].sort((left, right) => left.sortOrder - right.sortOrder)) {
+      const normalizedKey = normalizeCategoryNameKey(category.name)
+      if (!normalizedKey) continue
+      const current = remoteCategoryByName.get(normalizedKey)
+      if (
+        !current ||
+        (current.isActive === false && category.isActive !== false) ||
+        category.sortOrder < current.sortOrder
+      ) {
+        remoteCategoryByName.set(normalizedKey, category)
+      }
+    }
     const normalizedCategoryMap = new Map<string, CategoryItem>()
     for (const category of [...nextCategories].sort((left, right) => left.orderIndex - right.orderIndex)) {
       const normalizedKey = normalizeCategoryNameKey(category.name)
@@ -1578,6 +1639,22 @@ function AdminShell() {
         ...category,
         id: existingRemoteCategory?.id ?? category.id,
         name: category.name.trim(),
+      })
+    }
+    for (const item of nextMenuItems) {
+      const categoryName = item.category.trim()
+      const normalizedKey = normalizeCategoryNameKey(categoryName)
+      if (!normalizedKey || normalizedCategoryMap.has(normalizedKey)) {
+        continue
+      }
+      const existingRemoteCategory = remoteCategoryByName.get(normalizedKey)
+      normalizedCategoryMap.set(normalizedKey, {
+        id: existingRemoteCategory?.id ?? createRandomId('category'),
+        name: existingRemoteCategory?.name ?? categoryName,
+        description: '',
+        icon: getCategoryIcon(categoryIconMap, existingRemoteCategory?.name ?? categoryName),
+        itemCount: nextMenuItems.filter((entry) => normalizeCategoryNameKey(entry.category) === normalizedKey).length,
+        orderIndex: normalizedCategoryMap.size,
       })
     }
     const remoteCategoryList = Array.from(normalizedCategoryMap.values()).map((category, index) => ({
@@ -1923,6 +2000,20 @@ function AdminShell() {
     }
     await voidOrderMutation({ deviceOrderId: orderId, voidReason: 'Voided from Admin Web', voidedBy: 'Admin Web' })
     setFlashMessage(`Order ${orderId} marked void in the authority sync log.`)
+  }
+
+  async function handleApproveOrderEditRequest(request: OrderEditRequestRecord) {
+    setOrderEditRequestBusyId(request.id)
+    setOrderEditRequestError('')
+    try {
+      await approveOrderEditRequest(request.id, 'Admin Web')
+      setOrderEditRequests((current) => current.filter((item) => item.id !== request.id))
+      setFlashMessage(`Edit approved for ${request.displayOrderId}.`)
+    } catch (error) {
+      setOrderEditRequestError(describeOrderEditRequestError(error))
+    } finally {
+      setOrderEditRequestBusyId(null)
+    }
   }
 
   function openPrepRecipeEditor(recipeId?: string) {
@@ -2794,6 +2885,7 @@ function AdminShell() {
                 }))}
                 menuItems={filteredMenuItems}
                 categories={orderedCategories}
+                menuCategoryChips={menuCategoryChips}
                 menuSearch={menuSearch}
                 activeMenuCategory={activeMenuCategory}
                 onMenuSearchChange={setMenuSearch}
@@ -3042,8 +3134,67 @@ function AdminShell() {
             }
           />
         ) : null}
+
+        {orderEditRequests.length > 0 ? (
+          <OrderEditRequestPopup
+            request={orderEditRequests[0]}
+            pendingCount={orderEditRequests.length}
+            busy={orderEditRequestBusyId === orderEditRequests[0].id}
+            error={orderEditRequestError}
+            onApprove={() => {
+              void handleApproveOrderEditRequest(orderEditRequests[0])
+            }}
+            onDismiss={() => setOrderEditRequests((current) => current.slice(1))}
+          />
+        ) : null}
       </section>
     </main>
+  )
+}
+
+function OrderEditRequestPopup({
+  request,
+  pendingCount,
+  busy,
+  error,
+  onApprove,
+  onDismiss,
+}: {
+  request: OrderEditRequestRecord
+  pendingCount: number
+  busy: boolean
+  error: string
+  onApprove: () => void
+  onDismiss: () => void
+}) {
+  const shortOrderNumber = formatShortOrderNumber(request.displayOrderId || request.deviceOrderId)
+  return (
+    <div className="admin-request-modal-backdrop" role="presentation">
+      <section className="admin-request-modal" role="dialog" aria-modal="true" aria-label="Pending edit order request">
+        <div className="admin-request-modal-head">
+          <div>
+            <span>Pending Request</span>
+            <strong>Edit Order #{shortOrderNumber}</strong>
+          </div>
+          <span className="system-badge is-synced">{pendingCount}</span>
+        </div>
+        <p>
+          {request.requestedBy || 'POS'} is asking to edit this order from {request.deviceId || 'POS Web'}.
+          Approving here unlocks the edit screen on that POS.
+        </p>
+        <div className="admin-request-meta">
+          <span>{formatFullDateTime(request.requestedAt)}</span>
+          <span>Order #{shortOrderNumber}</span>
+        </div>
+        {error ? <div className="admin-request-error">{error}</div> : null}
+        <div className="admin-request-actions">
+          <button type="button" className="ghost-pill" onClick={onDismiss} disabled={busy}>Not Now</button>
+          <button type="button" className="save-changes-button" onClick={onApprove} disabled={busy}>
+            {busy ? 'Approving...' : 'Yes, Approve'}
+          </button>
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -4275,6 +4426,15 @@ function SettingsMoreScreen({
         />
       </MoreSection>
 
+      <MoreSection title="STAFF">
+        <ActionRow
+          icon={<CashDrawerIcon />}
+          title="Employee Management"
+          subtitle="Employee names, daily rates, and POS cashier access"
+          onClick={() => onNavigate('employees')}
+        />
+      </MoreSection>
+
       <MoreSection title="PRODUCT MANAGEMENT">
         <ActionRow
           icon={<ProductSettingsIcon />}
@@ -4538,6 +4698,7 @@ type MoreDetailScreenProps = {
   syncItems: LogRecord[]
   menuItems: MenuItem[]
   categories: CategoryItem[]
+  menuCategoryChips: string[]
   menuSearch: string
   activeMenuCategory: string
   onMenuSearchChange: (value: string) => void
@@ -4606,6 +4767,7 @@ function MoreDetailScreen({
   syncItems,
   menuItems,
   categories,
+  menuCategoryChips,
   menuSearch,
   activeMenuCategory,
   onMenuSearchChange,
@@ -4707,6 +4869,7 @@ function MoreDetailScreen({
         <MenuSettingsScreenV2
           items={menuItems}
           categories={categories}
+          categoryChips={menuCategoryChips}
           halfOrderPriceSupported={halfOrderPriceSupported}
           search={menuSearch}
           activeCategory={activeMenuCategory}
@@ -4759,6 +4922,10 @@ function MoreDetailScreen({
         onBack={onBack}
       />
     )
+  }
+
+  if (route === 'employees') {
+    return <EmployeeManagementScreen onBack={onBack} />
   }
 
   if (route === 'cash-drawer') {
@@ -5014,6 +5181,184 @@ function ExpenseCategorySettingsScreen({ onBack }: { onBack: () => void }) {
   )
 }
 
+function EmployeeManagementScreen({ onBack }: { onBack: () => void }) {
+  const [employees, setEmployees] = useState<EmployeeRecord[]>([])
+  const [status, setStatus] = useState('Loading employees...')
+  const [name, setName] = useState('')
+  const [dailyRate, setDailyRate] = useState('')
+  const [isCashier, setIsCashier] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    fetchAdminSetting('employees')
+      .then((setting) => {
+        if (!active) return
+        const nextEmployees = normalizeEmployeeSetting(setting)
+        setEmployees(nextEmployees)
+        writeLocalEmployeeSetting(nextEmployees)
+        setStatus(nextEmployees.length > 0 ? 'Employees loaded.' : 'No employees configured yet.')
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        const fallbackEmployees = readLocalEmployeeSetting()
+        setEmployees(fallbackEmployees)
+        setStatus(fallbackEmployees.length > 0
+          ? 'Loaded employees from this browser. Supabase settings could not be reached.'
+          : error instanceof Error ? error.message : 'Could not load employees.')
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  async function persist(nextEmployees: EmployeeRecord[], message: string) {
+    setSaving(true)
+    writeLocalEmployeeSetting(nextEmployees)
+    try {
+      await saveAdminSetting('employees', { employees: nextEmployees })
+      setEmployees(nextEmployees)
+      setStatus(message)
+    } catch (error) {
+      setEmployees(nextEmployees)
+      setStatus(error instanceof Error
+        ? `${message} Saved in this browser only: ${error.message}`
+        : `${message} Saved in this browser only.`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function addEmployee() {
+    const employeeName = name.trim()
+    const parsedRate = Number(dailyRate)
+    if (!employeeName) {
+      setStatus('Enter an employee name.')
+      return
+    }
+    if (employees.some((employee) => employee.name.trim().toLowerCase() === employeeName.toLowerCase())) {
+      setStatus(`${employeeName} already exists.`)
+      return
+    }
+    if (!Number.isFinite(parsedRate) || parsedRate < 0) {
+      setStatus('Enter a valid daily rate.')
+      return
+    }
+    const nextEmployee: EmployeeRecord = {
+      id: createRandomId('employee'),
+      name: employeeName,
+      dailyRate: Math.round(parsedRate * 100) / 100,
+      isCashier,
+      isActive: true,
+    }
+    void persist([...employees, nextEmployee], `${employeeName} added.`)
+    setName('')
+    setDailyRate('')
+    setIsCashier(true)
+  }
+
+  function updateEmployee(employeeId: string, patch: Partial<EmployeeRecord>) {
+    const nextEmployees = employees.map((employee) => employee.id === employeeId ? { ...employee, ...patch } : employee)
+    void persist(nextEmployees, 'Employee updated.')
+  }
+
+  function deleteEmployee(employeeId: string) {
+    const employee = employees.find((item) => item.id === employeeId)
+    void persist(employees.filter((item) => item.id !== employeeId), `${employee?.name ?? 'Employee'} deleted.`)
+  }
+
+  const activeCashierCount = employees.filter((employee) => employee.isActive && employee.isCashier).length
+
+  return (
+    <div className="record-screen expense-settings-screen employee-settings-screen">
+      <header className="record-header">
+        <button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back">
+          <span aria-hidden="true">&lt;</span>
+        </button>
+        <div>
+          <p className="section-kicker">Staff Settings</p>
+          <h1>Employee Management</h1>
+          <p>Employees added here appear in POS Web for cashier shift selection.</p>
+        </div>
+      </header>
+
+      <div className="finance-notice-banner">{status}</div>
+
+      <section className="surface-card expense-admin-grid employee-admin-grid">
+        <div className="product-modal-section">
+          <div className="section-head">
+            <h3>Add Employee</h3>
+            <span className="saved-pill">{activeCashierCount} POS cashiers</span>
+          </div>
+          <div className="cash-form-stack">
+            <label className="input-field">
+              <span>Employee Name</span>
+              <input className="text-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="Juan Dela Cruz" />
+            </label>
+            <label className="input-field">
+              <span>Daily Rate</span>
+              <input className="text-input" inputMode="decimal" value={dailyRate} onChange={(event) => setDailyRate(normalizeMoneyInput(event.target.value))} placeholder="0.00" />
+            </label>
+            <label className="employee-check-row">
+              <input type="checkbox" checked={isCashier} onChange={(event) => setIsCashier(event.target.checked)} />
+              <span>Can work as POS cashier</span>
+            </label>
+            <button type="button" className="save-changes-button" disabled={saving} onClick={addEmployee}>Add Employee</button>
+          </div>
+        </div>
+
+        <div className="product-modal-section">
+          <div className="section-head">
+            <h3>Employees</h3>
+            <span className="saved-pill">{employees.length} total</span>
+          </div>
+          <div className="employee-list">
+            {employees.map((employee) => (
+              <article key={employee.id} className="employee-card">
+                <div className="employee-card-head">
+                  <div>
+                    <strong>{employee.name}</strong>
+                    <small>{employee.isCashier ? 'Cashier enabled' : 'Not shown in POS cashier list'}</small>
+                  </div>
+                  <span className={`system-badge ${employee.isActive ? 'is-completed' : 'is-voided'}`}>
+                    {employee.isActive ? 'Active' : 'Inactive'}
+                  </span>
+                </div>
+                <label className="input-field">
+                  <span>Daily Rate</span>
+                  <input
+                    className="text-input"
+                    inputMode="decimal"
+                    value={String(employee.dailyRate)}
+                    onChange={(event) => updateEmployee(employee.id, { dailyRate: Number(normalizeMoneyInput(event.target.value)) || 0 })}
+                  />
+                </label>
+                <div className="employee-toggle-row">
+                  <label>
+                    <input type="checkbox" checked={employee.isCashier} onChange={(event) => updateEmployee(employee.id, { isCashier: event.target.checked })} />
+                    <span>Cashier</span>
+                  </label>
+                  <label>
+                    <input type="checkbox" checked={employee.isActive} onChange={(event) => updateEmployee(employee.id, { isActive: event.target.checked })} />
+                    <span>Active</span>
+                  </label>
+                  <button type="button" className="text-danger-button" disabled={saving} onClick={() => deleteEmployee(employee.id)}>Delete</button>
+                </div>
+              </article>
+            ))}
+            {employees.length === 0 ? (
+              <div className="sync-empty-state">
+                <strong>No employees yet.</strong>
+                <p>Add names and daily rates here. Cashier-enabled employees can be selected from POS Web.</p>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function normalizeAdminExpenseCategories(setting: Record<string, unknown> | null): AdminExpenseCategory[] {
   const rawCategories = Array.isArray(setting?.categories) ? setting.categories : []
   return rawCategories
@@ -5039,6 +5384,45 @@ function normalizeAdminExpenseCategories(setting: Record<string, unknown> | null
       }
     })
     .filter((category): category is AdminExpenseCategory => Boolean(category))
+}
+
+function normalizeEmployeeSetting(setting: Record<string, unknown> | null): EmployeeRecord[] {
+  const rawEmployees = Array.isArray(setting?.employees) ? setting.employees : []
+  return rawEmployees
+    .map((rawEmployee, index) => {
+      const employee = typeof rawEmployee === 'object' && rawEmployee !== null ? rawEmployee as Record<string, unknown> : {}
+      const name = String(employee.name ?? '').trim()
+      if (!name) return null
+      return {
+        id: String(employee.id ?? createRandomId(`employee-${index}`)),
+        name,
+        dailyRate: Math.max(0, Number(employee.dailyRate ?? employee.daily_rate ?? 0) || 0),
+        isCashier: employee.isCashier !== false && employee.is_cashier !== false,
+        isActive: employee.isActive !== false && employee.is_active !== false,
+      }
+    })
+    .filter((employee): employee is EmployeeRecord => Boolean(employee))
+}
+
+function readLocalEmployeeSetting(): EmployeeRecord[] {
+  if (typeof window === 'undefined') return []
+  try {
+    return normalizeEmployeeSetting(JSON.parse(window.localStorage.getItem('admin-web-employees') ?? '{}') as Record<string, unknown>)
+  } catch {
+    return []
+  }
+}
+
+function writeLocalEmployeeSetting(employees: EmployeeRecord[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem('admin-web-employees', JSON.stringify({ employees }))
+}
+
+function normalizeMoneyInput(value: string) {
+  const normalized = value.replace(/[^\d.]/g, '')
+  const [whole, ...decimalParts] = normalized.split('.')
+  const decimal = decimalParts.join('').slice(0, 2)
+  return decimalParts.length > 0 ? `${whole || '0'}.${decimal}` : whole
 }
 
 type OrderHistoryScreenProps = {
@@ -6678,6 +7062,7 @@ function ProductEditModal({
 type MenuSettingsScreenV2Props = {
   items: MenuItem[]
   categories: CategoryItem[]
+  categoryChips: string[]
   halfOrderPriceSupported: boolean
   search: string
   activeCategory: string
@@ -6692,6 +7077,7 @@ type MenuSettingsScreenV2Props = {
 function MenuSettingsScreenV2({
   items,
   categories,
+  categoryChips,
   halfOrderPriceSupported,
   search,
   activeCategory,
@@ -6702,7 +7088,6 @@ function MenuSettingsScreenV2({
   onEditItem,
   onOpenCategorySettings,
 }: MenuSettingsScreenV2Props) {
-  const categoryChips = ['All', ...uniqueNonEmptyValues(categories.map((category) => category.name))]
   const categoryIconByName = new Map(categories.map((category) => [category.name, category.icon]))
 
   return (
@@ -8355,7 +8740,26 @@ function formatQuantity(value: number, unit: string) {
 
 function formatShortOrderNumber(value: string) {
   const cleaned = value.trim()
-  return cleaned.length <= 8 ? cleaned : cleaned.slice(-8)
+  const timestampMatch = cleaned.match(/(\d{4})(\d{2})(\d{2})\d{6}-(\d{4,})$/)
+  if (timestampMatch) {
+    return `${timestampMatch[2]}${timestampMatch[3]}-${timestampMatch[4]}`
+  }
+
+  const lastSegment = cleaned.split('-').filter(Boolean).at(-1)
+  if (lastSegment && /^\d{4,}$/.test(lastSegment)) {
+    return lastSegment
+  }
+
+  if (/^#?\d{1,6}$/.test(cleaned)) {
+    return cleaned.replace(/^#/, '').padStart(4, '0')
+  }
+
+  const digits = cleaned.replace(/\D/g, '')
+  if (digits.length >= 5) {
+    return digits.slice(-5)
+  }
+
+  return cleaned.replace(/^#/, '') || '----'
 }
 
 function resolveCashOrderAmount(order: OrderRecord) {
