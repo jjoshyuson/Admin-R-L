@@ -13,7 +13,7 @@ export function registerServiceWorker() {
   if (canRegisterServiceWorker && shouldEnableServiceWorker) {
     window.addEventListener('load', () => {
       navigator.serviceWorker
-        .register('/sw.js', { scope: '/' })
+        .register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
         .catch((error) => {
           if (import.meta.env.DEV) {
             console.warn('Service worker registration failed.', error)

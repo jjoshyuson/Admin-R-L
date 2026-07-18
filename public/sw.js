@@ -1,14 +1,16 @@
 const SHELL_CACHE = 'ooh-web-shell-v2';
 const RUNTIME_CACHE = 'ooh-web-runtime-v2';
+const BASE_PATH = new URL(self.registration.scope).pathname;
+const withBase = (path) => `${BASE_PATH}${path}`.replace(/\/{2,}/g, '/');
 const APP_SHELL = [
-  '/',
-  '/pos.html',
-  '/manifest.webmanifest',
-  '/pos-manifest.webmanifest',
-  '/app-192x192.png',
-  '/app-512x512.png',
-  '/apple-touch-icon.png',
-  '/favicon.svg',
+  withBase(''),
+  withBase('pos.html'),
+  withBase('manifest.webmanifest'),
+  withBase('pos-manifest.webmanifest'),
+  withBase('app-192x192.png'),
+  withBase('app-512x512.png'),
+  withBase('apple-touch-icon.png'),
+  withBase('favicon.svg'),
 ];
 
 self.addEventListener('install', (event) => {
@@ -41,7 +43,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (request.mode === 'navigate') {
-    const fallbackPath = url.pathname === '/pos.html' ? '/pos.html' : '/';
+    const fallbackPath = url.pathname === withBase('pos.html') ? withBase('pos.html') : withBase('');
     event.respondWith(
       fetch(request).catch(() => caches.match(fallbackPath)),
     );
