@@ -30,8 +30,9 @@ export function printPosDocument(order: CompletedOrder, documentType: PrintDocum
     : nativePrinter?.printReceipt
 
   if (nativeMethod) {
+    const nativeOrderJson = JSON.stringify(buildNativePrintOrder(order, options))
     for (let copyIndex = 0; copyIndex < copies; copyIndex += 1) {
-      const result = nativeMethod.call(nativePrinter, JSON.stringify(order))
+      const result = nativeMethod.call(nativePrinter, nativeOrderJson)
       const parsed = typeof result === 'string' ? parseNativePrintResult(result) : null
       if (parsed && !parsed.success) {
         throw new Error(parsed.message || 'Native printer failed.')
@@ -41,6 +42,17 @@ export function printPosDocument(order: CompletedOrder, documentType: PrintDocum
   }
 
   openPrintDocument(order, documentType, copies, options)
+}
+
+function buildNativePrintOrder(order: CompletedOrder, options: PrintOptions) {
+  return {
+    ...order,
+    orderNote: options.includeOrderNote === false ? null : order.orderNote,
+    printOptions: {
+      paperWidth: options.paperWidth ?? '80mm',
+      detailMode: options.detailMode ?? 'standard',
+    },
+  }
 }
 
 export function openPrintDocument(order: CompletedOrder, documentType: PrintDocumentType, copies = 1, options: PrintOptions = {}) {
