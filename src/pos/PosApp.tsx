@@ -30,7 +30,7 @@ import { fetchAdminSetting, fetchCashMovements, fetchOrders, upsertCashMovements
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
 import { fetchPosMenu, getPreviewPosMenu } from '../lib/pos/menuService'
 import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ServiceMode } from '../lib/pos/posTypes'
-import { printPosDocument, type PrintDocumentType } from '../lib/pos/printService'
+import { printPosDocument, type PrintDocumentType, type ReceiptDetailMode, type ReceiptPaperWidth } from '../lib/pos/printService'
 import {
   cancelOrderEditRequest,
   createOrderEditRequest,
@@ -54,6 +54,11 @@ type SettingsSection = 'menu' | 'history' | 'money' | 'printing'
 type MoneyAccount = 'cash' | 'gcash'
 type MovementDirection = 'in' | 'out'
 type ExpensePaymentMethod = 'cash' | 'gcash'
+type ReceiptPrintSettings = {
+  paperWidth: ReceiptPaperWidth
+  detailMode: ReceiptDetailMode
+  includeOrderNote: boolean
+}
 type EditApprovalRequest = {
   requestId: string | null
   orderId: string
@@ -175,6 +180,8 @@ export function PosApp() {
   const [editOrderId, setEditOrderId] = useState<string | null>(null)
   const [editApprovalRequest, setEditApprovalRequest] = useState<EditApprovalRequest | null>(null)
   const [autoPrintReceipt, setAutoPrintReceipt] = useState(readAutoPrintReceipt)
+  const [receiptCopies, setReceiptCopies] = useState(readReceiptCopies)
+  const [receiptPrintSettings, setReceiptPrintSettings] = useState(readReceiptPrintSettings)
   const [menuCategoriesEnabled, setMenuCategoriesEnabled] = useState<Record<string, boolean>>({
     Meals: true,
     Drinks: true,
@@ -266,6 +273,14 @@ export function PosApp() {
   useEffect(() => {
     window.localStorage.setItem('pos-web-auto-print-receipt', autoPrintReceipt ? '1' : '0')
   }, [autoPrintReceipt])
+
+  useEffect(() => {
+    window.localStorage.setItem('pos-web-receipt-copies', String(receiptCopies))
+  }, [receiptCopies])
+
+  useEffect(() => {
+    window.localStorage.setItem('pos-web-receipt-print-settings', JSON.stringify(receiptPrintSettings))
+  }, [receiptPrintSettings])
 
   useEffect(() => {
     let active = true
@@ -696,7 +711,7 @@ export function PosApp() {
     setTicketItems([])
     setCheckoutTarget(null)
     setStatusMessage(`${order.id} paid and closed.`)
-    if (autoPrintReceipt) printOrderDocument(order, 'customer-receipt', setStatusMessage)
+    if (autoPrintReceipt) printOrderDocument(order, 'customer-receipt', setStatusMessage, receiptCopies, receiptPrintSettings)
     void syncOrderSnapshot(order, setStatusMessage)
     void syncPaymentSnapshot(order, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
   }
@@ -749,7 +764,7 @@ export function PosApp() {
     }))
     setCheckoutTarget(null)
     setStatusMessage(`${orderId} marked paid.`)
-    if (updatedOrder && autoPrintReceipt) printOrderDocument(updatedOrder, 'customer-receipt', setStatusMessage)
+    if (updatedOrder && autoPrintReceipt) printOrderDocument(updatedOrder, 'customer-receipt', setStatusMessage, receiptCopies, receiptPrintSettings)
     if (updatedOrder) void syncOrderSnapshot(updatedOrder, setStatusMessage)
     if (updatedOrder) void syncPaymentSnapshot(updatedOrder, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
     window.setTimeout(closeCompletedOrders, 0)
@@ -782,7 +797,7 @@ export function PosApp() {
     }))
     setStatusMessage(`${orderId} payment recorded.`)
     const paymentOrder = updatedOrder as RestaurantOrder | null
-    if (paymentOrder?.paid && autoPrintReceipt) printOrderDocument(paymentOrder, 'customer-receipt', setStatusMessage)
+    if (paymentOrder?.paid && autoPrintReceipt) printOrderDocument(paymentOrder, 'customer-receipt', setStatusMessage, receiptCopies, receiptPrintSettings)
     if (paymentOrder) void syncOrderSnapshot(paymentOrder, setStatusMessage)
     if (paymentOrder) void syncPaymentSnapshot(paymentOrder, setStatusMessage, payment, activeShiftSession, activeEmployeeName)
     window.setTimeout(closeCompletedOrders, 0)
@@ -988,7 +1003,11 @@ export function PosApp() {
             menuCategoriesEnabled={menuCategoriesEnabled}
             deviceId={deviceId}
             autoPrintReceipt={autoPrintReceipt}
+            receiptCopies={receiptCopies}
+            receiptPrintSettings={receiptPrintSettings}
             onAutoPrintReceiptChange={setAutoPrintReceipt}
+            onReceiptCopiesChange={setReceiptCopies}
+            onReceiptPrintSettingsChange={setReceiptPrintSettings}
             onToggleMenuCategory={(category) => setMenuCategoriesEnabled((current) => ({
               ...current,
               [category]: !(current[category] ?? false),
@@ -3239,7 +3258,11 @@ function SettingsPage({
   deviceId,
   onToggleMenuCategory,
   autoPrintReceipt,
+  receiptCopies,
+  receiptPrintSettings,
   onAutoPrintReceiptChange,
+  onReceiptCopiesChange,
+  onReceiptPrintSettingsChange,
 }: {
   history: RestaurantOrder[]
   products: PosMenuProduct[]
@@ -3247,7 +3270,11 @@ function SettingsPage({
   menuCategoriesEnabled: Record<string, boolean>
   deviceId: string
   autoPrintReceipt: boolean
+  receiptCopies: number
+  receiptPrintSettings: ReceiptPrintSettings
   onAutoPrintReceiptChange: (enabled: boolean) => void
+  onReceiptCopiesChange: (copies: number) => void
+  onReceiptPrintSettingsChange: (settings: ReceiptPrintSettings) => void
   onToggleMenuCategory: (category: string) => void
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('menu')
@@ -3257,7 +3284,7 @@ function SettingsPage({
   const [movementDirection, setMovementDirection] = useState<MovementDirection>('in')
   const [movementAmount, setMovementAmount] = useState('')
   const [movementNote, setMovementNote] = useState('')
-  const [receiptCopies, setReceiptCopies] = useState('1')
+  const [printSettingsStatus, setPrintSettingsStatus] = useState('Receipt settings are saved on this POS browser.')
   const [activeMenuListCategory, setActiveMenuListCategory] = useState('All Items')
 
   useEffect(() => {
@@ -3315,6 +3342,23 @@ function SettingsPage({
       setMovementStatus(hasSupabaseConfig ? 'Money movement saved to Supabase.' : 'Money movement recorded locally for this session.')
     } catch (error) {
       setMovementStatus(error instanceof Error ? error.message : 'Could not save money movement.')
+    }
+  }
+
+  function updateReceiptPrintSettings(nextSettings: Partial<ReceiptPrintSettings>) {
+    onReceiptPrintSettingsChange({ ...receiptPrintSettings, ...nextSettings })
+    setPrintSettingsStatus('Receipt settings saved.')
+  }
+
+  function printTestReceipt() {
+    try {
+      printPosDocument(buildTestReceipt(deviceId), 'customer-receipt', {
+        copies: receiptCopies,
+        ...receiptPrintSettings,
+      })
+      setPrintSettingsStatus(`Test receipt opened with ${receiptCopies} ${receiptCopies === 1 ? 'copy' : 'copies'}.`)
+    } catch (error) {
+      setPrintSettingsStatus(error instanceof Error ? error.message : 'Could not open test receipt.')
     }
   }
 
@@ -3439,7 +3483,7 @@ function SettingsPage({
           <section className="settings-panel">
             <SettingsPanelHeader title="Order History" subtitle="Closed orders from the current shift." />
             <div className="settings-card history-card">
-              <HistoryPage orders={history} />
+              <HistoryPage orders={history} receiptCopies={receiptCopies} receiptPrintSettings={receiptPrintSettings} />
             </div>
           </section>
         ) : null}
@@ -3502,18 +3546,47 @@ function SettingsPage({
 
         {activeSection === 'printing' ? (
           <section className="settings-panel">
-            <SettingsPanelHeader title="Printing" subtitle="Bluetooth receipt printing with browser fallback." />
-            <div className="settings-card">
-              <h3>Receipt Printing</h3>
-              <SettingsToggle label="Auto print after payment" checked={autoPrintReceipt} onChange={onAutoPrintReceiptChange} />
-              <label>
-                <span>Receipt copies</span>
-                <input inputMode="numeric" value={receiptCopies} onChange={(event) => setReceiptCopies(event.target.value.replace(/\D/g, '').slice(0, 2))} />
-              </label>
+            <SettingsPanelHeader title="Printing" subtitle="POS Web receipt setup for browser printing." />
+            <div className="printing-settings-grid">
+              <div className="settings-card printing-card">
+                <h3>Receipt Behavior</h3>
+                <SettingsToggle label="Auto print after payment" checked={autoPrintReceipt} onChange={onAutoPrintReceiptChange} />
+                <label>
+                  <span>Receipt copies</span>
+                  <div className="receipt-copy-control">
+                    <button type="button" onClick={() => onReceiptCopiesChange(receiptCopies - 1)} aria-label="Decrease receipt copies">-</button>
+                    <input inputMode="numeric" value={String(receiptCopies)} onChange={(event) => onReceiptCopiesChange(normalizeReceiptCopies(event.target.value))} />
+                    <button type="button" onClick={() => onReceiptCopiesChange(receiptCopies + 1)} aria-label="Increase receipt copies">+</button>
+                  </div>
+                </label>
+                <div className="settings-action-row">
+                  <button type="button" className="settings-primary-button" onClick={printTestReceipt}>Test Receipt</button>
+                  <span>{printSettingsStatus}</span>
+                </div>
+              </div>
+
+              <div className="settings-card printing-card">
+                <h3>Receipt Format</h3>
+                <div className="settings-field-group">
+                  <span>Paper width</span>
+                  <div className="segmented-control">
+                    <button type="button" className={receiptPrintSettings.paperWidth === '80mm' ? 'is-active' : ''} onClick={() => updateReceiptPrintSettings({ paperWidth: '80mm' })}>80mm</button>
+                    <button type="button" className={receiptPrintSettings.paperWidth === '58mm' ? 'is-active' : ''} onClick={() => updateReceiptPrintSettings({ paperWidth: '58mm' })}>58mm</button>
+                  </div>
+                </div>
+                <div className="settings-field-group">
+                  <span>Line detail</span>
+                  <div className="segmented-control">
+                    <button type="button" className={receiptPrintSettings.detailMode === 'standard' ? 'is-active' : ''} onClick={() => updateReceiptPrintSettings({ detailMode: 'standard' })}>Standard</button>
+                    <button type="button" className={receiptPrintSettings.detailMode === 'compact' ? 'is-active' : ''} onClick={() => updateReceiptPrintSettings({ detailMode: 'compact' })}>Compact</button>
+                  </div>
+                </div>
+                <SettingsToggle label="Print order notes" checked={receiptPrintSettings.includeOrderNote} onChange={(includeOrderNote) => updateReceiptPrintSettings({ includeOrderNote })} />
+              </div>
             </div>
             <div className="settings-card">
-              <h3>Printer Support</h3>
-              <p>When this POS runs inside the Android shell, receipts print silently through the paired Bluetooth ESC/POS printer. Browsers still use the normal print window.</p>
+              <h3>Web Printer Notes</h3>
+              <p>POS Web uses the browser print window. Select the thermal printer there, then keep the browser's saved printer preferences for daily cashier use.</p>
             </div>
           </section>
         ) : null}
@@ -3543,7 +3616,7 @@ function SettingsToggle({ label, checked, onChange }: { label: string; checked: 
   )
 }
 
-function HistoryPage({ orders }: { orders: RestaurantOrder[] }) {
+function HistoryPage({ orders, receiptCopies, receiptPrintSettings }: { orders: RestaurantOrder[]; receiptCopies: number; receiptPrintSettings: ReceiptPrintSettings }) {
   const [selectedOrderId, setSelectedOrderId] = useState(orders[0]?.id ?? '')
   const [historyStatus, setHistoryStatus] = useState('Showing closed orders from the current shift.')
   const visibleOrders = orders
@@ -3616,9 +3689,9 @@ function HistoryPage({ orders }: { orders: RestaurantOrder[] }) {
               ))}
             </div>
             <div className="history-actions">
-              <button type="button" className="settings-primary-button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus)}>Print Receipt</button>
+              <button type="button" className="settings-primary-button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus, receiptCopies, receiptPrintSettings)}>Print Receipt</button>
               <button type="button" onClick={() => printOrderDocument(selectedOrder, 'kitchen-ticket', setHistoryStatus)}>Print Kitchen Ticket</button>
-              <button type="button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus)}>Reprint Summary</button>
+              <button type="button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus, receiptCopies, receiptPrintSettings)}>Reprint Summary</button>
             </div>
           </>
         ) : (
@@ -3727,6 +3800,81 @@ function normalizePosEmployees(setting: Record<string, unknown> | null): PosEmpl
 
 function readAutoPrintReceipt() {
   return window.localStorage.getItem('pos-web-auto-print-receipt') === '1'
+}
+
+function readReceiptCopies() {
+  return normalizeReceiptCopies(window.localStorage.getItem('pos-web-receipt-copies') ?? '1')
+}
+
+function readReceiptPrintSettings(): ReceiptPrintSettings {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem('pos-web-receipt-print-settings') ?? '{}') as Partial<ReceiptPrintSettings>
+    return {
+      paperWidth: raw.paperWidth === '58mm' ? '58mm' : '80mm',
+      detailMode: raw.detailMode === 'compact' ? 'compact' : 'standard',
+      includeOrderNote: raw.includeOrderNote !== false,
+    }
+  } catch {
+    return {
+      paperWidth: '80mm',
+      detailMode: 'standard',
+      includeOrderNote: true,
+    }
+  }
+}
+
+function normalizeReceiptCopies(value: string | number) {
+  const numeric = typeof value === 'number' ? value : Number(value.replace(/\D/g, ''))
+  if (!Number.isFinite(numeric)) return 1
+  return Math.min(10, Math.max(1, Math.trunc(numeric)))
+}
+
+function buildTestReceipt(deviceId: string): CompletedOrder {
+  return {
+    deviceOrderId: createDeviceOrderId(deviceId, 1, Date.now()),
+    deviceId,
+    createdAt: new Date().toISOString(),
+    serviceMode: 'DINE IN',
+    payment: {
+      method: 'CASH',
+      paymentReference: null,
+      cashAmount: 500,
+      gcashAmount: null,
+      gcashReferenceLast4: null,
+      amountReceived: 500,
+      changeAmount: 155,
+    },
+    orderNote: 'Sample cashier note',
+    totals: {
+      subtotal: 345,
+      tax: 0,
+      total: 345,
+    },
+    items: [
+      {
+        productId: 'sample-meal',
+        name: 'Sample Meal',
+        serviceMode: 'DINE IN',
+        isHalfOrder: false,
+        quantity: 2,
+        price: 120,
+        lineTotal: 240,
+        kitchenStatus: 'PENDING',
+        isChecked: true,
+      },
+      {
+        productId: 'sample-drink',
+        name: 'Iced Tea',
+        serviceMode: 'TAKE OUT',
+        isHalfOrder: false,
+        quantity: 1,
+        price: 105,
+        lineTotal: 105,
+        kitchenStatus: 'PENDING',
+        isChecked: true,
+      },
+    ],
+  }
 }
 
 function formatPhp(value: number) {
@@ -3983,10 +4131,13 @@ function printOrderDocument(
   order: RestaurantOrder,
   documentType: PrintDocumentType,
   setStatusMessage: (message: string) => void,
+  copies = 1,
+  settings: ReceiptPrintSettings = readReceiptPrintSettings(),
 ) {
   try {
-    printPosDocument(toCompletedPrintOrder(order), documentType)
-    setStatusMessage(`${formatPosOrderRef(order.id)} ${documentType === 'kitchen-ticket' ? 'kitchen ticket' : 'receipt'} sent to printer.`)
+    printPosDocument(toCompletedPrintOrder(order), documentType, { copies, ...settings })
+    const copyLabel = documentType === 'customer-receipt' && copies > 1 ? ` (${copies} copies)` : ''
+    setStatusMessage(`${formatPosOrderRef(order.id)} ${documentType === 'kitchen-ticket' ? 'kitchen ticket' : 'receipt'} sent to printer${copyLabel}.`)
   } catch (error) {
     setStatusMessage(error instanceof Error ? error.message : 'Could not print order.')
   }
