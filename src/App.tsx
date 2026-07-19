@@ -11,6 +11,7 @@ import {
   calculateDailyAccounting,
   clearInventoryData,
   clearDailyLogsData,
+  clearExpensesLogData,
   clearMenuCatalogData,
   clearOrdersData,
   clearRecipesData,
@@ -29,6 +30,8 @@ import {
   subscribeToOrderEditRequests,
 } from './lib/orderEditRequests'
 import { hasSupabaseConfig } from './lib/supabase/client'
+import { approveShiftAudit, calculateShiftTotals, createShiftAdjustment, decideShiftAdjustment, defaultShiftSchedule, fetchPendingShiftAdjustments, fetchShiftReport, fetchShiftSchedule, saveShiftSchedule, subscribeToShiftAdjustments } from './lib/shiftService'
+import type { ShiftReport } from './lib/shiftService'
 import type {
   DailyAccountingRecord,
   IngredientCategory,
@@ -38,6 +41,9 @@ import type {
   OrderEditRequestRecord,
   OrderRecord,
   OrderVoidRecord,
+  ShiftSchedule,
+  ShiftAdjustment,
+  ShiftType,
 } from './lib/adminTypes'
 
 type Period = 'Daily' | 'Weekly' | 'Monthly'
@@ -60,6 +66,8 @@ type MoreRoute =
   | 'finance-overview'
   | 'cash-drawer'
   | 'expense-categories'
+  | 'turnover-settings'
+  | 'shift-reports'
   | 'payables'
   | 'profit'
 type MenuItemStatus = 'available' | 'unavailable' | 'hidden'
@@ -271,6 +279,7 @@ type ResetActionId =
   | 'clear-menu'
   | 'clear-recipes'
   | 'clear-daily-logs'
+  | 'clear-expenses-log'
   | 'clear-inventory'
 
 type RecipeSummaryMetrics = {
@@ -432,7 +441,7 @@ const salesRanges: SalesRange[] = ['Today', 'Last 7 Days', 'Week to Date', 'Mont
 const menuFilterChips = ['All']
 const defaultRecipeFilterChips = ['All']
 const paymentFilters = ['All Methods', 'GCash', 'Cash', 'Card']
-const deviceFilters = ['All Devices', 'Tablet 1', 'Tablet 2', 'Bank/GCash']
+const deviceFilters = ['All Devices', 'Tablet 1', 'Tablet 2']
 const categoryIconOptions: Array<{ value: CategoryIconKey; label: string }> = [
   { value: 'default', label: 'Default' },
   { value: 'plate', label: 'Plate' },
@@ -1212,6 +1221,9 @@ function AdminShell() {
   const [orderEditRequests, setOrderEditRequests] = useState<OrderEditRequestRecord[]>([])
   const [orderEditRequestBusyId, setOrderEditRequestBusyId] = useState<string | null>(null)
   const [orderEditRequestError, setOrderEditRequestError] = useState('')
+  const [shiftAdjustmentRequests, setShiftAdjustmentRequests] = useState<ShiftAdjustment[]>([])
+  const [shiftAdjustmentBusyId, setShiftAdjustmentBusyId] = useState<string | null>(null)
+  const [shiftAdjustmentError, setShiftAdjustmentError] = useState('')
   const inventoryItems = ingredients
 
   useEffect(() => {
@@ -1237,6 +1249,17 @@ function AdminShell() {
       active = false
       unsubscribe()
     }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    async function loadPendingAdjustments() {
+      try { const requests = await fetchPendingShiftAdjustments(); if (active) { setShiftAdjustmentRequests(requests); setShiftAdjustmentError('') } }
+      catch (error) { if (active) setShiftAdjustmentError(error instanceof Error ? error.message : 'Could not load adjustment requests.') }
+    }
+    void loadPendingAdjustments()
+    const unsubscribe = subscribeToShiftAdjustments(() => { void loadPendingAdjustments() })
+    return () => { active = false; unsubscribe() }
   }, [])
 
   useEffect(() => {
@@ -1519,7 +1542,7 @@ function AdminShell() {
       })),
     [remoteCashAccounts],
   )
-  const visibleCashAccounts = cashAccounts
+  const visibleCashAccounts = cashAccounts.filter((account) => account.id === 'main-safe')
   const visibleBills = billViews
   const visibleProfitData = profitDataView
   const cashOverview = useMemo<CashOverviewData>(() => {
@@ -1527,12 +1550,9 @@ function AdminShell() {
       return initialCashOverview
     }
     const sourceAccounts = cashAccounts.length > 0 ? cashAccounts : initialCashAccounts
-    const cashSalesToday = sourceAccounts
-      .filter((account) => account.id === 'tablet-1' || account.id === 'tablet-2')
-      .reduce((sum, account) => sum + account.salesToday, 0)
-    const digitalPayments = sourceAccounts
-      .filter((account) => account.type === 'bank')
-      .reduce((sum, account) => sum + account.salesToday, 0)
+    const todayOrders = orders.filter((order) => order.createdAt.slice(0, 10) === todayDateKey && !voids.some((item) => item.deviceOrderId === order.deviceOrderId))
+    const cashSalesToday = todayOrders.reduce((sum, order) => sum + resolveCashOrderAmount(order), 0)
+    const digitalPayments = todayOrders.reduce((sum, order) => sum + resolveGcashOrderAmount(order), 0)
     const mainSafeOpeningCash = sourceAccounts.find((account) => account.id === 'main-safe')?.currentBalance ?? 0
     const totalCashOnHand = mainSafeOpeningCash + cashSalesToday + digitalPayments
     return {
@@ -1541,7 +1561,7 @@ function AdminShell() {
       digitalPayments,
       totalCashOnHand,
     }
-  }, [cashAccounts])
+  }, [cashAccounts, orders, todayDateKey, voids])
   const cashOverviewExpectedTotal = useMemo(
     () => cashOverview.openingCash + cashOverview.cashSalesToday + cashOverview.digitalPayments,
     [cashOverview],
@@ -2016,6 +2036,20 @@ function AdminShell() {
     }
   }
 
+  async function handleShiftAdjustmentDecision(request: ShiftAdjustment, decision: 'APPROVED' | 'REJECTED') {
+    setShiftAdjustmentBusyId(request.id)
+    setShiftAdjustmentError('')
+    try {
+      await decideShiftAdjustment(request.id, decision, 'Admin Web')
+      setShiftAdjustmentRequests((current) => current.filter((item) => item.id !== request.id))
+      setFlashMessage(`Adjustment ${decision.toLowerCase()}: ${request.direction} ${formatPhp(request.amount)} ${request.account}.`)
+    } catch (error) {
+      setShiftAdjustmentError(error instanceof Error ? error.message : 'Could not update adjustment request.')
+    } finally {
+      setShiftAdjustmentBusyId(null)
+    }
+  }
+
   function openPrepRecipeEditor(recipeId?: string) {
     const draft = recipeId
       ? buildRecipeDraftFromRemote(recipeId, recipes, recipeIngredients, ingredientCatalog)
@@ -2351,6 +2385,10 @@ function AdminShell() {
 
   async function handleClearDailyLogsReset() {
     await runResetAction('clear-daily-logs', () => clearDailyLogsData(), 'Daily logs were cleared.')
+  }
+
+  async function handleClearExpensesLogReset() {
+    await runResetAction('clear-expenses-log', () => clearExpensesLogData(), 'Expenses log was cleared.')
   }
 
   async function handleClearInventoryReset() {
@@ -2968,6 +3006,16 @@ function AdminShell() {
             onDraftChange={handlePurchaseDraftChange}
             onSubmit={handleSubmitPurchases}
           />
+        ) : shiftAdjustmentRequests.length > 0 ? (
+          <ShiftAdjustmentRequestPopup
+            request={shiftAdjustmentRequests[0]}
+            pendingCount={shiftAdjustmentRequests.length}
+            busy={shiftAdjustmentBusyId === shiftAdjustmentRequests[0].id}
+            error={shiftAdjustmentError}
+            onApprove={() => void handleShiftAdjustmentDecision(shiftAdjustmentRequests[0], 'APPROVED')}
+            onReject={() => void handleShiftAdjustmentDecision(shiftAdjustmentRequests[0], 'REJECTED')}
+            onDismiss={() => setShiftAdjustmentRequests((current) => current.slice(1))}
+          />
         ) : null}
 
         {activeFixIngredient ? (
@@ -2999,6 +3047,7 @@ function AdminShell() {
             onClearMenu={() => void handleClearMenuReset()}
             onClearRecipes={() => void handleClearRecipesReset()}
             onClearDailyLogs={() => void handleClearDailyLogsReset()}
+            onClearExpensesLog={() => void handleClearExpensesLogReset()}
             onClearInventory={() => void handleClearInventoryReset()}
           />
         ) : null}
@@ -3198,6 +3247,10 @@ function OrderEditRequestPopup({
   )
 }
 
+function ShiftAdjustmentRequestPopup({ request, pendingCount, busy, error, onApprove, onReject, onDismiss }: { request: ShiftAdjustment; pendingCount: number; busy: boolean; error: string; onApprove: () => void; onReject: () => void; onDismiss: () => void }) {
+  return <div className="admin-request-modal-backdrop" role="presentation"><section className="admin-request-modal" role="dialog" aria-modal="true" aria-label="Pending shift adjustment request"><div className="admin-request-modal-head"><div><span>Pending Adjustment</span><strong>{request.direction} {formatPhp(request.amount)} • {request.account}</strong></div><span className="system-badge is-synced">{pendingCount}</span></div><p>{request.requestedBy} requested this adjustment for {request.shiftId}. Totals will not change until it is approved.</p><div className="admin-request-meta"><span>{formatFullDateTime(request.requestedAt)}</span><span>{request.reason}</span></div>{error ? <div className="admin-request-error">{error}</div> : null}<div className="admin-request-actions"><button type="button" className="ghost-pill" onClick={onDismiss} disabled={busy}>Not Now</button><button type="button" className="ghost-pill" onClick={onReject} disabled={busy}>Reject</button><button type="button" className="save-changes-button" onClick={onApprove} disabled={busy}>{busy ? 'Updating...' : 'Approve'}</button></div></section></div>
+}
+
 function buildLinePath(values: number[], width: number, height: number) {
   if (values.length === 0) {
     return ''
@@ -3282,8 +3335,8 @@ function buildDashboardView({
     gcash: metricOrders.reduce((sum, order) => sum + resolveGcashOrderAmount(order), 0),
   }
   const deviceBreakdown = {
-    tablet1: salesOrders.filter((order) => normalizeDeviceId(order.deviceId) === 'tablet-1').reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
-    tablet2: salesOrders.filter((order) => normalizeDeviceId(order.deviceId) === 'tablet-2').reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
+    tablet1: salesOrders.filter((order) => order.shiftId?.endsWith('-first')).reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
+    tablet2: salesOrders.filter((order) => order.shiftId?.endsWith('-second')).reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
   }
   const rangeLabel = metricsPeriodLabel(metricsPeriod)
   const accountingWindow = accounting.filter((record) => {
@@ -4193,21 +4246,21 @@ function DashboardScreen({
             </div>
           </div>
           <div className="breakdown-block">
-            <p className="eyebrow">By Device</p>
+            <p className="eyebrow">By Shift</p>
             <div className="device-bars" aria-hidden="true">
               <div className="device-bar">
                 <span
                   className="bar-fill bar-fill-one"
                   style={{ width: `${breakdownWidth(deviceBreakdown.tablet1, Math.max(deviceBreakdown.tablet1, deviceBreakdown.tablet2))}%` }}
                 />
-                <small>Tablet 1 {formatPhp(deviceBreakdown.tablet1)}</small>
+                <small>First Shift {formatPhp(deviceBreakdown.tablet1)}</small>
               </div>
               <div className="device-bar">
                 <span
                   className="bar-fill bar-fill-two"
                   style={{ width: `${breakdownWidth(deviceBreakdown.tablet2, Math.max(deviceBreakdown.tablet1, deviceBreakdown.tablet2))}%` }}
                 />
-                <small>Tablet 2 {formatPhp(deviceBreakdown.tablet2)}</small>
+                <small>Second Shift {formatPhp(deviceBreakdown.tablet2)}</small>
               </div>
             </div>
           </div>
@@ -4424,6 +4477,12 @@ function SettingsMoreScreen({
           subtitle="Sales totals for a custom date range"
           onClick={() => onNavigate('sales-range')}
         />
+        <ActionRow
+          icon={<OrderHistoryIcon />}
+          title="Shift Reports"
+          subtitle="First and Second Shift summaries, expenses, and adjustments"
+          onClick={() => onNavigate('shift-reports')}
+        />
       </MoreSection>
 
       <MoreSection title="STAFF">
@@ -4432,6 +4491,12 @@ function SettingsMoreScreen({
           title="Employee Management"
           subtitle="Employee names, daily rates, and POS cashier access"
           onClick={() => onNavigate('employees')}
+        />
+        <ActionRow
+          icon={<SyncLogsIcon />}
+          title="Turnover Settings"
+          subtitle="Configure automatic First and Second Shift boundaries"
+          onClick={() => onNavigate('turnover-settings')}
         />
       </MoreSection>
 
@@ -4459,8 +4524,8 @@ function SettingsMoreScreen({
         />
         <ActionRow
           icon={<CashDrawerIcon />}
-          title="Cash Control"
-          subtitle="Opening balance, cash flow, counted cash, and discrepancies"
+          title="Main Safe"
+          subtitle="Audited shift cash received into the safe"
           onClick={() => onNavigate('cash-drawer')}
         />
         <ActionRow
@@ -4928,6 +4993,9 @@ function MoreDetailScreen({
     return <EmployeeManagementScreen onBack={onBack} />
   }
 
+  if (route === 'turnover-settings') return <TurnoverSettingsScreen onBack={onBack} />
+  if (route === 'shift-reports') return <ShiftReportsScreen onBack={onBack} />
+
   if (route === 'cash-drawer') {
     return (
       <CashControlScreen
@@ -5008,6 +5076,95 @@ function MoreDetailScreen({
       </div>
     </div>
   )
+}
+
+function TurnoverSettingsScreen({ onBack }: { onBack: () => void }) {
+  const [draft, setDraft] = useState<ShiftSchedule>(defaultShiftSchedule)
+  const [status, setStatus] = useState('Loading turnover settings...')
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { fetchShiftSchedule().then((value) => { setDraft(value); setStatus('Times cover the complete business day automatically.') }).catch((error: unknown) => setStatus(error instanceof Error ? error.message : 'Could not load settings.')) }, [])
+  async function save() {
+    setSaving(true)
+    try { await saveShiftSchedule(draft); setStatus('Turnover schedule saved. POS terminals will use it on their next shift check.') }
+    catch (error) { setStatus(error instanceof Error ? error.message : 'Could not save settings.') }
+    finally { setSaving(false) }
+  }
+  return <div className="record-screen shift-admin-screen">
+    <header className="record-header"><button type="button" className="back-button icon-back-button" onClick={onBack}>&lt;</button><h1>Turnover Settings</h1><button type="button" className="ghost-pill" disabled={saving} onClick={() => void save()}>{saving ? 'Saving...' : 'Save'}</button></header>
+    <section className="surface-card shift-settings-card"><h2>Two-shift schedule</h2><p>Each shift starts at the configured time and ends when the other begins, so all 24 hours are covered.</p>
+      <div className="shift-time-grid"><label><span>First Shift starts</span><input type="time" value={draft.firstShiftStart} onChange={(event) => setDraft({ ...draft, firstShiftStart: event.target.value })} /></label><label><span>Second Shift starts</span><input type="time" value={draft.secondShiftStart} onChange={(event) => setDraft({ ...draft, secondShiftStart: event.target.value })} /></label><label><span>Business timezone</span><input value={draft.timezone} onChange={(event) => setDraft({ ...draft, timezone: event.target.value })} placeholder="Asia/Manila" /></label></div>
+      <div className="finance-notice-banner">{status}</div>
+    </section>
+  </div>
+}
+
+function ShiftReportsScreen({ onBack }: { onBack: () => void }) {
+  const [businessDate, setBusinessDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [shiftType, setShiftType] = useState<ShiftType>('FIRST')
+  const [page, setPage] = useState<'summary' | 'expenses' | 'adjustments'>('summary')
+  const [expenseAccount, setExpenseAccount] = useState<'CASH' | 'GCASH' | null>(null)
+  const [report, setReport] = useState<ShiftReport>({ sessions: [], orders: [], payments: [], expenses: [], adjustments: [], audit: null })
+  const [status, setStatus] = useState('Loading shift report...')
+  const [adjustment, setAdjustment] = useState({ account: 'CASH' as 'CASH' | 'GCASH', direction: 'ADD' as 'ADD' | 'REMOVE', amount: '', reason: '' })
+  const [auditDraft, setAuditDraft] = useState({ countedCash: '', verifiedGcash: '', notes: '', varianceReason: '', auditedBy: 'Admin Web' })
+  const [auditBusy, setAuditBusy] = useState(false)
+  async function load() { try { const value = await fetchShiftReport(businessDate, shiftType); setReport(value); setStatus('Live shift report loaded.') } catch (error) { setStatus(error instanceof Error ? error.message : 'Could not load report.') } }
+  useEffect(() => { void load() }, [businessDate, shiftType])
+  const totals = calculateShiftTotals(report)
+  async function addAdjustment() {
+    const amount = Number(adjustment.amount); if (!(amount > 0) || !adjustment.reason.trim()) { setStatus('Adjustment amount and reason are required.'); return }
+    await createShiftAdjustment({ shiftId: `${businessDate}-${shiftType.toLowerCase()}`, shiftSessionId: report.sessions.at(-1)?.id ?? null, account: adjustment.account, direction: adjustment.direction, amount, reason: adjustment.reason.trim(), requestedBy: 'Admin Web' }, true)
+    setAdjustment({ ...adjustment, amount: '', reason: '' }); await load()
+  }
+  async function decide(id: string, decision: 'APPROVED' | 'REJECTED') { await decideShiftAdjustment(id, decision); await load() }
+  async function approveAudit() {
+    const countedCash = Number(auditDraft.countedCash)
+    const verifiedGcash = Number(auditDraft.verifiedGcash)
+    if (!Number.isFinite(countedCash) || countedCash < 0 || !Number.isFinite(verifiedGcash) || verifiedGcash < 0) { setStatus('Counted cash and verified GCash must be valid non-negative amounts.'); return }
+    const hasVariance = Math.abs(countedCash - totals.netCash) >= 0.005 || Math.abs(verifiedGcash - totals.netGcash) >= 0.005
+    if (hasVariance && !auditDraft.varianceReason.trim()) { setStatus('A reason is required when cash or GCash has a variance.'); return }
+    setAuditBusy(true)
+    try {
+      await approveShiftAudit({ businessDate, shiftType, countedCash, verifiedGcash, notes: auditDraft.notes.trim(), varianceReason: auditDraft.varianceReason.trim(), auditedBy: auditDraft.auditedBy.trim() || 'Admin Web' })
+      setStatus('Shift audited. Counted cash was transferred into Main Safe.'); await load()
+    } catch (error) { setStatus(error instanceof Error ? error.message : 'Could not approve shift audit.') }
+    finally { setAuditBusy(false) }
+  }
+  const summaryMetrics = [
+    { label: 'Total Sales', detail: 'Cash + GCash', value: totals.totalSales, glyph: '🛒', tone: 'green' },
+    { label: 'Total Cash Sales', value: totals.grossCash, glyph: '▣', tone: 'blue' },
+    { label: 'Total GCash Sales', value: totals.grossGcash, glyph: 'G', tone: 'purple' },
+    { label: 'Ending Cash', detail: `After ${formatPhp(totals.cashExpenses)} expenses`, value: totals.netCash, glyph: '▱', tone: 'orange', expenseAccount: 'CASH' as const },
+    { label: 'Ending GCash', detail: `After ${formatPhp(totals.gcashExpenses)} expenses`, value: totals.netGcash, glyph: '▯', tone: 'cyan', expenseAccount: 'GCASH' as const },
+    { label: 'Unpaid', value: totals.totalUnpaid, glyph: '▦', tone: 'navy' },
+  ]
+  const visibleExpenses = expenseAccount === null
+    ? report.expenses
+    : report.expenses.filter((item) => expenseAccount === 'GCASH' ? item.accountType === 'BANK' : item.accountType !== 'BANK')
+  function openExpenses(account: 'CASH' | 'GCASH') {
+    setExpenseAccount(account)
+    setPage('expenses')
+  }
+  const hasOpenSessions = report.sessions.some((session) => session.status === 'OPEN')
+  const draftCountedCash = auditDraft.countedCash === '' ? totals.netCash : Number(auditDraft.countedCash)
+  const draftVerifiedGcash = auditDraft.verifiedGcash === '' ? totals.netGcash : Number(auditDraft.verifiedGcash)
+  const draftVariance = (Number.isFinite(draftCountedCash) ? draftCountedCash - totals.netCash : 0) + (Number.isFinite(draftVerifiedGcash) ? draftVerifiedGcash - totals.netGcash : 0)
+  return <div className="record-screen shift-admin-screen shift-report-screen">
+    <header className="record-header shift-report-header"><button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back">‹</button><h1>Shift Reports</h1><button type="button" className="ghost-pill shift-print-button" onClick={() => window.print()}><span aria-hidden="true">▣</span> Print</button></header>
+    <section className="surface-card shift-report-controls"><div className="shift-control-row"><label><span>Business Date</span><input type="date" value={businessDate} onChange={(event) => setBusinessDate(event.target.value)} /></label><div className="segmented-control shift-selector"><button type="button" className={shiftType === 'FIRST' ? 'is-active' : ''} onClick={() => setShiftType('FIRST')}>First Shift</button><button type="button" className={shiftType === 'SECOND' ? 'is-active' : ''} onClick={() => setShiftType('SECOND')}>Second Shift</button></div></div><span className="shift-live-status"><i aria-hidden="true">✓</i>{status}</span></section>
+    <nav className="shift-report-tabs"><button className={page === 'summary' ? 'is-active' : ''} onClick={() => setPage('summary')}><span aria-hidden="true">▥</span>Summary</button><button className={page === 'expenses' ? 'is-active' : ''} onClick={() => { setExpenseAccount(null); setPage('expenses') }}><span aria-hidden="true">▤</span>Expenses</button><button className={page === 'adjustments' ? 'is-active' : ''} onClick={() => setPage('adjustments')}><span aria-hidden="true">⌘</span>Adjustments</button></nav>
+    {page === 'summary' ? <><section className="shift-metric-grid">{summaryMetrics.map((metric) => {
+      const content = <><span className={`shift-metric-icon is-${metric.tone}`} aria-hidden="true">{metric.glyph}</span><span className="shift-metric-copy"><small>{metric.label}</small><strong className={metric.value < 0 ? 'is-negative' : ''}>{formatPhp(metric.value)}</strong>{metric.detail ? <em>{metric.detail}</em> : null}</span>{metric.expenseAccount ? <span className="shift-metric-chevron" aria-hidden="true">›</span> : null}</>
+      return metric.expenseAccount
+        ? <button type="button" className="surface-card shift-metric-row is-clickable" key={metric.label} onClick={() => openExpenses(metric.expenseAccount)} aria-label={`${metric.label}; show ${metric.expenseAccount === 'CASH' ? 'cash' : 'GCash'} expenses`}>{content}</button>
+        : <article className="surface-card shift-metric-row" key={metric.label}>{content}</article>
+    })}</section><section className="surface-card shift-session-card"><h2>Cashier Sessions</h2><div className="audit-session-list">{report.sessions.length === 0 ? <p>No cashier sessions for this shift.</p> : report.sessions.map((item) => { const initials = item.employeeName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase(); const open = item.status === 'OPEN'; return <article key={item.id}><span className="audit-session-avatar">{initials}</span><span className="audit-session-copy"><strong>{item.employeeName}</strong><small><span aria-hidden="true">▣</span>{new Date(item.clockedInAt).toLocaleString()} – {item.clockedOutAt ? new Date(item.clockedOutAt).toLocaleString() : 'Open'}</small><small><span aria-hidden="true">▦</span>{item.deviceId}</small></span><em className={open ? 'is-open' : 'is-closed'}>{open ? '◷ Open' : '✓ Closed'}</em></article> })}</div><button type="button" className="audit-view-sessions">View all sessions <span aria-hidden="true">›</span></button></section>
+    <section className="surface-card shift-audit-card"><span className={`audit-status-pill ${report.audit ? 'is-audited' : ''}`}>{report.audit ? '✓ Audited' : '◷ Awaiting Audit'}</span>
+    {report.audit ? <div className="audit-completed-summary"><div className="audit-value-grid"><div><small>Expected / Counted Cash</small><strong>{formatPhp(report.audit.expectedCash)} / {formatPhp(report.audit.countedCash)}</strong></div><div><small>Expected / Verified GCash</small><strong>{formatPhp(report.audit.expectedGcash)} / {formatPhp(report.audit.verifiedGcash)}</strong></div></div><div className="audit-variance-row"><span>Combined Variance</span><strong className={(report.audit.cashVariance + report.audit.gcashVariance) >= 0 ? 'is-over' : 'is-short'}>{formatSignedPhp(report.audit.cashVariance + report.audit.gcashVariance)}</strong></div><div className="audit-approved-meta"><span>Approved by {report.audit.auditedBy}</span><span>{report.audit.varianceReason || report.audit.notes || 'No variance or notes.'}</span></div></div> : <div className="audit-form"><div className="audit-value-grid audit-entry-grid"><label><span className="shift-metric-icon is-green" aria-hidden="true">▣</span><span><small>Physically Counted Cash</small><input inputMode="decimal" value={auditDraft.countedCash} onChange={(event) => setAuditDraft({ ...auditDraft, countedCash: event.target.value })} placeholder={totals.netCash.toFixed(2)} /></span></label><label><span className="shift-metric-icon is-purple" aria-hidden="true">G</span><span><small>Verified GCash Total</small><input inputMode="decimal" value={auditDraft.verifiedGcash} onChange={(event) => setAuditDraft({ ...auditDraft, verifiedGcash: event.target.value })} placeholder={totals.netGcash.toFixed(2)} /></span></label></div><div className="audit-value-grid audit-expected-grid"><div><small>Expected Cash</small><strong>{formatPhp(totals.netCash)}</strong></div><div><small>Expected GCash</small><strong>{formatPhp(totals.netGcash)}</strong></div></div><div className="audit-variance-row"><span>Variance</span><strong className={draftVariance >= 0 ? 'is-over' : 'is-short'}>{formatSignedPhp(draftVariance)}<small>{draftVariance > 0 ? '(over)' : draftVariance < 0 ? '(short)' : '(balanced)'}</small></strong></div><label className="audit-reason-field"><span>Variance Reason</span><div><input value={auditDraft.varianceReason} onChange={(event) => setAuditDraft({ ...auditDraft, varianceReason: event.target.value })} placeholder="Required when over or short" /><span aria-hidden="true">›</span></div></label></div>}
+    </section>{!report.audit ? <button type="button" className="audit-start-button" disabled={auditBusy || hasOpenSessions} onClick={() => void approveAudit()}><span aria-hidden="true">♢</span>{auditBusy ? 'Approving...' : 'Approve'}</button> : null}</> : null}
+    {page === 'expenses' ? <section className="surface-card"><div className="shift-expense-heading"><div><h2>{expenseAccount ? `${expenseAccount === 'CASH' ? 'Cash' : 'GCash'} Expense Log` : 'Expense Log'}</h2>{expenseAccount ? <p>Total expenses: <strong>{formatPhp(expenseAccount === 'CASH' ? totals.cashExpenses : totals.gcashExpenses)}</strong></p> : null}</div>{expenseAccount ? <button type="button" className="ghost-pill" onClick={() => setExpenseAccount(null)}>Show all</button> : null}</div><div className="shift-ledger-list">{visibleExpenses.length === 0 ? <p>No {expenseAccount === 'CASH' ? 'cash ' : expenseAccount === 'GCASH' ? 'GCash ' : ''}expenses for this shift.</p> : visibleExpenses.map((item) => <article key={item.id}><strong>{formatPhp(item.amount)} • {item.accountType === 'BANK' ? 'GCash' : 'Cash'}</strong><span>{item.reasonCategory} — {item.note || 'No note'}</span><em>{item.createdBy} • {new Date(item.createdAtEpochMillis).toLocaleString()}</em></article>)}</div></section> : null}
+    {page === 'adjustments' ? <><section className="surface-card shift-adjustment-entry"><h2>Admin Adjustment</h2><select value={adjustment.account} onChange={(e) => setAdjustment({ ...adjustment, account: e.target.value as 'CASH' | 'GCASH' })}><option>CASH</option><option>GCASH</option></select><select value={adjustment.direction} onChange={(e) => setAdjustment({ ...adjustment, direction: e.target.value as 'ADD' | 'REMOVE' })}><option>ADD</option><option>REMOVE</option></select><input inputMode="decimal" value={adjustment.amount} onChange={(e) => setAdjustment({ ...adjustment, amount: e.target.value })} placeholder="Amount" /><input value={adjustment.reason} onChange={(e) => setAdjustment({ ...adjustment, reason: e.target.value })} placeholder="Required reason" /><button className="ghost-pill" onClick={() => void addAdjustment()}>Apply Adjustment</button></section><section className="surface-card"><div className="shift-ledger-list">{report.adjustments.map((item) => <article key={item.id}><strong>{item.direction} {formatPhp(item.amount)} • {item.account}</strong><span>{item.reason} — {item.status}</span><em>{item.requestedBy} • {new Date(item.requestedAt).toLocaleString()}</em>{item.status === 'PENDING' ? <div><button onClick={() => void decide(item.id, 'APPROVED')}>Approve</button><button onClick={() => void decide(item.id, 'REJECTED')}>Reject</button></div> : null}</article>)}</div></section></> : null}
+  </div>
 }
 
 function ExpenseCategorySettingsScreen({ onBack }: { onBack: () => void }) {
@@ -6029,7 +6186,7 @@ function CashOverviewScreen({ data, expectedTotal, difference, onBack }: CashOve
             <strong>{formatPhp(data.openingCash)}</strong>
           </div>
           <div>
-            <span>Tablet Cash</span>
+            <span>Unaudited Shift Cash</span>
             <strong>{formatPhp(data.cashSalesToday)}</strong>
           </div>
           <div>
@@ -6052,7 +6209,7 @@ function CashOverviewScreen({ data, expectedTotal, difference, onBack }: CashOve
             <strong>{formatPhp(data.openingCash)}</strong>
           </div>
           <div className="finance-row">
-            <span>Tablet 1 + Tablet 2 Cash Sales</span>
+            <span>First + Second Shift Cash Sales</span>
             <strong>{formatPhp(data.cashSalesToday)}</strong>
           </div>
           <div className="finance-row">
@@ -6060,7 +6217,7 @@ function CashOverviewScreen({ data, expectedTotal, difference, onBack }: CashOve
             <strong>{formatPhp(data.digitalPayments)}</strong>
           </div>
           <div className="finance-row total-row">
-            <span>Main Safe + Cash + GCash</span>
+            <span>Main Safe + Shift Cash + GCash</span>
             <strong>{formatPhp(expectedTotal)}</strong>
           </div>
         </article>
@@ -6264,17 +6421,8 @@ function CashControlScreen({
       </section>
 
       <div className="cash-action-grid">
-        <button type="button" className="finance-primary-button" onClick={() => onOpenAction({ type: 'cash_pull' })}>
-          Cash Pull
-        </button>
-        <button type="button" className="finance-secondary-button" onClick={() => onOpenAction({ type: 'transfer' })}>
-          Transfer
-        </button>
-        <button type="button" className="finance-secondary-button" onClick={() => onOpenAction({ type: 'adjust' })}>
-          Adjust
-        </button>
         <button type="button" className="finance-secondary-button" onClick={() => onOpenAction({ type: 'logs' })}>
-          Logs
+          View Safe Audit Log
         </button>
       </div>
     </div>
@@ -7927,6 +8075,7 @@ type ResetOptionsModalProps = {
   onClearMenu: () => void
   onClearRecipes: () => void
   onClearDailyLogs: () => void
+  onClearExpensesLog: () => void
   onClearInventory: () => void
 }
 
@@ -7944,6 +8093,7 @@ function ResetOptionsModal({
   onClearMenu,
   onClearRecipes,
   onClearDailyLogs,
+  onClearExpensesLog,
   onClearInventory,
 }: ResetOptionsModalProps) {
   const resetConfirmed = value.trim().toUpperCase() === 'RESET'
@@ -7999,6 +8149,7 @@ function ResetOptionsModal({
           {renderResetAction('clear-menu', 'Menu', 'Clear categories and menu products.', 'Clear Menu', onClearMenu, true)}
           {renderResetAction('clear-recipes', 'Recipes', 'Clear recipes and recipe ingredient links.', 'Clear Recipes', onClearRecipes)}
           {renderResetAction('clear-daily-logs', 'Daily Logs', 'Clear ingredient price logs and saved accounting logs.', 'Clear Logs', onClearDailyLogs)}
+          {renderResetAction('clear-expenses-log', 'Expenses Log', 'Clear expense entries while keeping other cash movement history.', 'Clear Expenses', onClearExpensesLog, true)}
           {renderResetAction('clear-inventory', 'Inventory', 'Delete inventory items and count history, then zero active sellable stock in Supabase.', 'Clear Inventory', onClearInventory)}
         </div>
 

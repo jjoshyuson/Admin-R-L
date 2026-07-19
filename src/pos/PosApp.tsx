@@ -38,6 +38,8 @@ import {
   subscribeToOrderEditRequest,
 } from '../lib/orderEditRequests'
 import { hasSupabaseConfig, requireSupabase } from '../lib/supabase/client'
+import { closeOpenShiftSession, createShiftAdjustment, fetchOpenShiftSession, fetchShiftAdjustments, fetchShiftSchedule, openShiftSession, resolveShiftWindow } from '../lib/shiftService'
+import type { ShiftAdjustment, ShiftSchedule, ShiftSession } from '../lib/adminTypes'
 
 type MainTab = 'new-order' | 'ongoing' | 'kitchen' | 'sale-tracker' | 'settings'
 type OrderStatus = 'preparing' | 'served' | 'paid'
@@ -89,6 +91,8 @@ type SalePayment = {
     quantity: number
     price: number
   }>
+  shiftId?: string | null
+  shiftSessionId?: string | null
 }
 
 type TicketItem = {
@@ -127,6 +131,8 @@ type RestaurantOrder = {
   paymentNotes: string
   orderType: OrderType | 'MIXED'
   createdAt: number
+  shiftId: string | null
+  shiftSessionId: string | null
 }
 
 const defaultCategoryNames = ['Meals', 'Drinks', 'Add-ons', 'Others']
@@ -157,6 +163,9 @@ export function PosApp() {
   const [primaryNavCollapsed, setPrimaryNavCollapsed] = useState(readPrimaryNavCollapsed)
   const [employees, setEmployees] = useState<PosEmployee[]>(readLocalPosEmployees)
   const [activeEmployeeId, setActiveEmployeeId] = useState(readActiveEmployeeId)
+  const [shiftSchedule, setShiftSchedule] = useState<ShiftSchedule | null>(null)
+  const [activeShiftSession, setActiveShiftSession] = useState<ShiftSession | null>(null)
+  const [shiftBusy, setShiftBusy] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Loading menu...')
   const [nextOrderNumber, setNextOrderNumber] = useState(1)
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
@@ -230,6 +239,29 @@ export function PosApp() {
   useEffect(() => {
     window.localStorage.setItem('pos-web-active-employee-id', activeEmployeeId)
   }, [activeEmployeeId])
+
+  useEffect(() => {
+    let active = true
+    Promise.all([fetchShiftSchedule(), fetchOpenShiftSession(deviceId)]).then(([schedule, session]) => {
+      if (!active) return
+      setShiftSchedule(schedule)
+      setActiveShiftSession(session)
+      setActiveEmployeeId(session?.employeeId ?? '')
+    }).catch((error: unknown) => setStatusMessage(error instanceof Error ? error.message : 'Could not load shift status.'))
+    return () => { active = false }
+  }, [deviceId])
+
+  useEffect(() => {
+    if (!activeShiftSession || !shiftSchedule) return
+    const timer = window.setInterval(() => {
+      if (resolveShiftWindow(new Date(), shiftSchedule).shiftId === activeShiftSession.shiftId) return
+      void closeOpenShiftSession(deviceId).then(() => {
+        setActiveShiftSession(null); setActiveEmployeeId('')
+        setStatusMessage('Scheduled turnover reached. Select the next cashier to clock in.')
+      })
+    }, 30_000)
+    return () => window.clearInterval(timer)
+  }, [activeShiftSession, deviceId, shiftSchedule])
 
   useEffect(() => {
     window.localStorage.setItem('pos-web-auto-print-receipt', autoPrintReceipt ? '1' : '0')
@@ -322,10 +354,33 @@ export function PosApp() {
   const total = subtotal + tax
   const ongoingOrders = orders.filter((order) => !order.readyForPayment && !(order.paid && order.readyForPayment))
   const finishOrders = orders.filter((order) => order.readyForPayment && !order.paid)
-  const completedToday = history.length
+  const shiftHistory = activeShiftSession
+    ? history.filter((order) => order.shiftId === activeShiftSession.shiftId)
+    : []
+  const completedThisShift = shiftHistory.length
   const cashierEmployees = employees.filter((employee) => employee.isActive && employee.isCashier)
   const activeEmployee = cashierEmployees.find((employee) => employee.id === activeEmployeeId) ?? null
   const activeEmployeeName = activeEmployee?.name ?? 'Select cashier'
+
+  async function clockInEmployee(employeeId: string) {
+    const employee = cashierEmployees.find((item) => item.id === employeeId)
+    if (!employee || !shiftSchedule || shiftBusy) return
+    setShiftBusy(true)
+    try {
+      const session = await openShiftSession({ employeeId: employee.id, employeeName: employee.name, deviceId, schedule: shiftSchedule })
+      setActiveEmployeeId(employee.id); setActiveShiftSession(session)
+      setStatusMessage(`${employee.name} clocked into ${session.shiftType === 'FIRST' ? 'First' : 'Second'} Shift. Cash starts at ₱0.`)
+    } catch (error) { setStatusMessage(error instanceof Error ? error.message : 'Could not clock in.') }
+    finally { setShiftBusy(false) }
+  }
+
+  async function clockOutEmployee() {
+    if (shiftBusy) return
+    setShiftBusy(true)
+    try { await closeOpenShiftSession(deviceId); setActiveEmployeeId(''); setActiveShiftSession(null); setStatusMessage('Shift closed. Cash reset to ₱0 for the next cashier.') }
+    catch (error) { setStatusMessage(error instanceof Error ? error.message : 'Could not close shift.') }
+    finally { setShiftBusy(false) }
+  }
   const selectedOrder = selectedOrderId
     ? ongoingOrders.find((order) => order.id === selectedOrderId) ?? ongoingOrders[0] ?? null
     : ongoingOrders[0] ?? null
@@ -510,6 +565,8 @@ export function PosApp() {
       paymentNotes: note,
       orderType: ticketOrderType(ticketItems),
       createdAt,
+      shiftId: activeShiftSession?.shiftId ?? null,
+      shiftSessionId: activeShiftSession?.id ?? null,
     }
     setOrders((current) => [order, ...current])
     setNextOrderNumber((value) => value + 1)
@@ -518,7 +575,7 @@ export function PosApp() {
     setStatusMessage(`${order.id} saved to ongoing orders.`)
     setActiveTab('ongoing')
     await syncOrderSnapshot(order, setStatusMessage)
-    await syncPaymentSnapshot(order, setStatusMessage)
+    await syncPaymentSnapshot(order, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
   }
 
   function startAddOrder(orderId: string) {
@@ -631,6 +688,8 @@ export function PosApp() {
       paymentNotes: '',
       orderType: ticketOrderType(ticketItems),
       createdAt,
+      shiftId: activeShiftSession?.shiftId ?? null,
+      shiftSessionId: activeShiftSession?.id ?? null,
     }
     setHistory((current) => [order, ...current])
     setNextOrderNumber((value) => value + 1)
@@ -639,7 +698,7 @@ export function PosApp() {
     setStatusMessage(`${order.id} paid and closed.`)
     if (autoPrintReceipt) printOrderDocument(order, 'customer-receipt', setStatusMessage)
     void syncOrderSnapshot(order, setStatusMessage)
-    void syncPaymentSnapshot(order, setStatusMessage)
+    void syncPaymentSnapshot(order, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
   }
 
   function updateOrderItem(orderId: string, itemId: string, served: boolean) {
@@ -692,7 +751,7 @@ export function PosApp() {
     setStatusMessage(`${orderId} marked paid.`)
     if (updatedOrder && autoPrintReceipt) printOrderDocument(updatedOrder, 'customer-receipt', setStatusMessage)
     if (updatedOrder) void syncOrderSnapshot(updatedOrder, setStatusMessage)
-    if (updatedOrder) void syncPaymentSnapshot(updatedOrder, setStatusMessage)
+    if (updatedOrder) void syncPaymentSnapshot(updatedOrder, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
     window.setTimeout(closeCompletedOrders, 0)
   }
 
@@ -725,7 +784,7 @@ export function PosApp() {
     const paymentOrder = updatedOrder as RestaurantOrder | null
     if (paymentOrder?.paid && autoPrintReceipt) printOrderDocument(paymentOrder, 'customer-receipt', setStatusMessage)
     if (paymentOrder) void syncOrderSnapshot(paymentOrder, setStatusMessage)
-    if (paymentOrder) void syncPaymentSnapshot(paymentOrder, setStatusMessage, payment)
+    if (paymentOrder) void syncPaymentSnapshot(paymentOrder, setStatusMessage, payment, activeShiftSession, activeEmployeeName)
     window.setTimeout(closeCompletedOrders, 0)
   }
 
@@ -770,23 +829,24 @@ export function PosApp() {
           <strong>{activeEmployeeName}</strong>
           <small>{activeEmployee ? `Cashier - ${formatPhp(activeEmployee.dailyRate)} / day` : 'Choose person on shift'}</small>
           {activeEmployee ? (
-            <button type="button" onClick={() => setActiveEmployeeId('')}><LogOut size={16} aria-hidden="true" /> Log Out</button>
+            <button type="button" disabled={shiftBusy} onClick={() => void clockOutEmployee()}><LogOut size={16} aria-hidden="true" /> Clock Out</button>
           ) : null}
           {!activeEmployee ? (
             <select
               className="sidebar-employee-select"
               value={activeEmployeeId}
-              onChange={(event) => setActiveEmployeeId(event.target.value)}
+              onChange={(event) => void clockInEmployee(event.target.value)}
               aria-label="Select cashier on shift"
             >
-              <option value="">Select cashier</option>
+              <option value="">{shiftBusy ? 'Opening shift...' : 'Select cashier to clock in'}</option>
               {cashierEmployees.map((employee) => (
                 <option key={employee.id} value={employee.id}>{employee.name}</option>
               ))}
             </select>
           ) : null}
           <span>{ongoingOrders.length} ongoing</span>
-          <span>{completedToday} closed</span>
+          <span>{completedThisShift} closed this shift</span>
+          <span>{activeShiftSession ? `${activeShiftSession.shiftType === 'FIRST' ? 'First' : 'Second'} Shift • Cash ₱0 opening` : 'No open shift'}</span>
         </div>
       </aside>
       {activeTab === 'new-order' ? (
@@ -909,6 +969,7 @@ export function PosApp() {
           <SaleTrackerPage
             deviceId={deviceId}
             staffName={activeEmployeeName}
+            shiftSession={activeShiftSession}
             orderType={orderType}
             halfOrderEnabled={halfOrderEnabled}
             onOrderTypeChange={setOrderType}
@@ -916,11 +977,12 @@ export function PosApp() {
           />
         </section>
       ) : null}
+      {!activeShiftSession ? <div className="shift-lock-overlay"><section><Clock3 size={38} /><h2>Clock in to start</h2><p>Select the cashier in the sidebar. Orders and financial entries are locked until a shift is open.</p></section></div> : null}
 
       {activeTab === 'settings' ? (
         <section className="pos-workspace">
           <SettingsPage
-            history={history}
+            history={shiftHistory}
             products={products}
             categories={visibleCategories.map((category) => category.name)}
             menuCategoriesEnabled={menuCategoriesEnabled}
@@ -1983,6 +2045,7 @@ function FinishOrderDetailPanel({
   const [peopleCount, setPeopleCount] = useState(3)
   const [customerName, setCustomerName] = useState('')
   const [splitItemQuantities, setSplitItemQuantities] = useState<Record<string, number>>({})
+  const [paymentPopupOpen, setPaymentPopupOpen] = useState(false)
 
   if (!order) {
     return (
@@ -2274,12 +2337,61 @@ function FinishOrderDetailPanel({
             </>
           ) : null}
         </section>
-        <strong>Payment Method</strong>
-        <div className="finish-method-grid">
+        <button
+          type="button"
+          className="confirm-payment-mode-button"
+          disabled={amountDue <= 0 || amountDue > balance || (paymentMode === 'credit' && customerName.trim().length === 0)}
+          onClick={() => setPaymentPopupOpen(true)}
+        >
+          Confirm Mode
+          <strong>{paymentModeLabel(paymentMode)} · {formatPhp(amountDue || balance)}</strong>
+        </button>
+      </section>
+
+      {paymentPopupOpen ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="payment-modal finish-collection-modal" role="dialog" aria-modal="true" aria-labelledby="pending-payment-title">
+            <section className="checkout-summary-panel">
+              <header>
+                <h2 id="pending-payment-title">Order Summary</h2>
+                <span>{order.items.length} items</span>
+              </header>
+              <div className="checkout-summary-items">
+                {order.items.map((item) => (
+                  <article key={item.id}>
+                    <div>
+                      <strong>{item.name}</strong>
+                      <small>Current order</small>
+                    </div>
+                    <div>
+                      <strong>{formatPhp(item.price * item.quantity)}</strong>
+                      <small>x{item.quantity}</small>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <section className="checkout-totals">
+                <div><span>Order total</span><strong>{formatPhp(total)}</strong></div>
+                {order.paymentReceived > 0 ? <div><span>Previously paid</span><strong>{formatPhp(order.paymentReceived)}</strong></div> : null}
+                <div className="checkout-total"><span>{paymentModeLabel(paymentMode)}</span><strong>{formatPhp(amountDue)}</strong></div>
+              </section>
+            </section>
+
+            <section className="checkout-payment-panel">
+              <header>
+                <div>
+                  <p className="eyebrow">Checkout · {paymentModeLabel(paymentMode)}</p>
+                  <h2>Payment {formatPosOrderRef(order.id)}</h2>
+                </div>
+                <button type="button" className="modal-close" onClick={() => setPaymentPopupOpen(false)}>Close</button>
+              </header>
+              <div className="finish-popup-body">
+                <strong>Payment Method</strong>
+                <div className="finish-method-grid">
           <button type="button" className={method === 'cash' ? 'is-active' : ''} onClick={() => { setMethod('cash'); setKeypadTarget('amount') }}>Cash</button>
           <button type="button" className={method === 'gcash' ? 'is-active' : ''} onClick={() => { setMethod('gcash'); setKeypadTarget('amount') }}>GCash</button>
           <button type="button" className={method === 'split' ? 'is-active' : ''} onClick={() => { setMethod('split'); setKeypadTarget('amount') }}>Split</button>
-        </div>
+                </div>
         {method === 'split' ? (
           <div className="finish-split-amounts">
             <button type="button" className={splitField === 'cash' && keypadTarget === 'amount' ? 'is-active' : ''} onClick={() => { setSplitField('cash'); setKeypadTarget('amount') }}>
@@ -2337,15 +2449,13 @@ function FinishOrderDetailPanel({
             />
           </label>
         ) : null}
-        <label className="finish-reference-field">
+                <label className="finish-reference-field">
           <span>Order Notes (Optional)</span>
           <input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Add payment note..." />
-        </label>
-      </section>
-      <section className="detail-actions">
+                </label>
         <button
           type="button"
-          className="send-kitchen"
+                  className="modal-primary process-payment-button"
           disabled={!canConfirm}
           onClick={() => {
             if (!onApplyPayment) return
@@ -2370,11 +2480,16 @@ function FinishOrderDetailPanel({
             setCustomerName('')
             setSplitItemQuantities({})
             setPaymentMode('full')
+                    setPaymentPopupOpen(false)
           }}
         >
           Confirm Payment {formatPhp(amountDue || balance)}
         </button>
-      </section>
+              </div>
+            </section>
+          </section>
+        </div>
+      ) : null}
     </aside>
   )
 }
@@ -2604,6 +2719,7 @@ function SaleTrackerPage({
   halfOrderEnabled,
   onOrderTypeChange,
   onHalfOrderToggle,
+  shiftSession,
 }: {
   deviceId: string
   staffName: string
@@ -2611,12 +2727,17 @@ function SaleTrackerPage({
   halfOrderEnabled: boolean
   onOrderTypeChange: (orderType: OrderType) => void
   onHalfOrderToggle: () => void
+  shiftSession: ShiftSession | null
 }) {
   const [payments, setPayments] = useState<SalePayment[]>([])
   const [trackerStatus, setTrackerStatus] = useState('Loading payments...')
   const [cardLayout, setCardLayout] = useState<'money-first' | 'counts-first'>('money-first')
   const [selectedPayment, setSelectedPayment] = useState<SalePayment | null>(null)
   const [showExpenseModal, setShowExpenseModal] = useState(false)
+  const [showAdjustmentModal, setShowAdjustmentModal] = useState(false)
+  const [showFinancialHistory, setShowFinancialHistory] = useState(false)
+  const [shiftExpenses, setShiftExpenses] = useState<CashMovement[]>([])
+  const [shiftAdjustments, setShiftAdjustments] = useState<ShiftAdjustment[]>([])
 
   useEffect(() => {
     let active = true
@@ -2629,8 +2750,12 @@ function SaleTrackerPage({
 
       try {
         const rows = await fetchSalePayments()
+        const movements = await fetchCashMovements()
+        const adjustments = shiftSession ? await fetchShiftAdjustments(shiftSession.shiftId) : []
         if (!active) return
         setPayments(rows)
+        setShiftExpenses(movements.filter((item) => item.shiftSessionId === shiftSession?.id && item.movementKind === 'PAY_OUT'))
+        setShiftAdjustments(adjustments.filter((item) => item.shiftSessionId === shiftSession?.id))
         setTrackerStatus(`Live Supabase payments synced. ${rows.length} records loaded.`)
       } catch (error) {
         if (!active) return
@@ -2655,41 +2780,50 @@ function SaleTrackerPage({
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
         void loadPayments()
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cash_movements' }, () => { void loadPayments() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_adjustments' }, () => { void loadPayments() })
       .subscribe()
 
     return () => {
       active = false
       void supabase.removeChannel(channel)
     }
-  }, [])
+  }, [shiftSession?.id])
 
-  const todayPayments = payments.filter((payment) => isToday(payment.createdAt))
-  const paidToday = todayPayments.filter((payment) => payment.status === 'paid')
-  const cashTotal = paidToday
+  const shiftPayments = shiftSession
+    ? payments.filter((payment) => payment.shiftSessionId === shiftSession.id)
+    : []
+  const paidThisShift = shiftPayments.filter((payment) => payment.status === 'paid')
+  const cashTotal = paidThisShift
     .filter((payment) => payment.method === 'cash')
     .reduce((sum, payment) => sum + payment.amount, 0)
-  const gcashTotal = paidToday
+  const gcashTotal = paidThisShift
     .filter((payment) => payment.method === 'gcash')
     .reduce((sum, payment) => sum + payment.amount, 0)
-  const ongoingTotal = payments
+  const cashExpenses = shiftExpenses.filter((item) => item.accountType !== 'BANK').reduce((sum, item) => sum + item.amount, 0)
+  const gcashExpenses = shiftExpenses.filter((item) => item.accountType === 'BANK').reduce((sum, item) => sum + item.amount, 0)
+  const approvedAdjustment = (account: 'CASH' | 'GCASH') => shiftAdjustments.filter((item) => item.status === 'APPROVED' && item.account === account).reduce((sum, item) => sum + (item.direction === 'ADD' ? item.amount : -item.amount), 0)
+  const netCash = cashTotal - cashExpenses + approvedAdjustment('CASH')
+  const netGcash = gcashTotal - gcashExpenses + approvedAdjustment('GCASH')
+  const ongoingTotal = shiftPayments
     .filter((payment) => payment.status === 'unpaid')
     .reduce((sum, payment) => sum + payment.amount, 0)
-  const averagePayment = todayPayments.length > 0
-    ? todayPayments.reduce((sum, payment) => sum + payment.amount, 0) / todayPayments.length
+  const averagePayment = shiftPayments.length > 0
+    ? shiftPayments.reduce((sum, payment) => sum + payment.amount, 0) / shiftPayments.length
     : 0
-  const unpaidToday = todayPayments.filter((payment) => payment.status === 'unpaid')
-  const customerCount = new Set(todayPayments.map((payment) => payment.customerName || payment.orderId || payment.id)).size
+  const unpaidThisShift = shiftPayments.filter((payment) => payment.status === 'unpaid')
+  const customerCount = new Set(shiftPayments.map((payment) => payment.customerName || payment.orderId || payment.id)).size
 
   const metricCards = [
-    { label: 'Total Paid Cash', value: cashTotal, subtext: 'Today', tone: 'green' },
-    { label: 'Total GCash', value: gcashTotal, subtext: 'Today', tone: 'blue' },
+    { label: 'Total Paid Cash', value: netCash, subtext: `${formatPhp(cashTotal)} gross − ${formatPhp(cashExpenses)} expenses`, tone: 'green' },
+    { label: 'Total GCash', value: netGcash, subtext: `${formatPhp(gcashTotal)} gross − ${formatPhp(gcashExpenses)} expenses`, tone: 'blue' },
     { label: 'Ongoing Payments', value: ongoingTotal, subtext: 'Unpaid', tone: 'orange' },
-    { label: 'Average Payment', value: averagePayment, subtext: 'Today', tone: 'neutral' },
+    { label: 'Average Payment', value: averagePayment, subtext: 'This shift', tone: 'neutral' },
   ] as const
   const overviewCards = [
-    { label: 'Total Transactions Today', value: todayPayments.length },
-    { label: 'Paid Transactions', value: paidToday.length },
-    { label: 'Unpaid Transactions', value: unpaidToday.length },
+    { label: 'Total Transactions This Shift', value: shiftPayments.length },
+    { label: 'Paid Transactions', value: paidThisShift.length },
+    { label: 'Unpaid Transactions', value: unpaidThisShift.length },
     { label: 'Total Customers', value: customerCount },
   ] as const
   const moneyCardsFirst = cardLayout === 'money-first'
@@ -2772,8 +2906,8 @@ function SaleTrackerPage({
                 <span>Details</span>
               </div>
               <div className="sale-simple-table-body">
-                {payments.length === 0 ? <EmptyState text="No payments found in Supabase yet." /> : null}
-                {payments.map((payment) => (
+                {shiftPayments.length === 0 ? <EmptyState text="No transactions in this shift yet." /> : null}
+                {shiftPayments.map((payment) => (
                   <article key={payment.id}>
                     <strong>{payment.orderId ? formatPosOrderRef(payment.orderId) : '-'}</strong>
                     <strong>{formatPhp(payment.amount)}</strong>
@@ -2790,20 +2924,20 @@ function SaleTrackerPage({
         <aside className="sale-summary-panel">
           <header>
             <h2>Sale Summary</h2>
-            <span>Today</span>
+            <span>Current shift</span>
           </header>
           <div className="sale-summary-list">
             <article>
               <span>Cash Total</span>
-              <strong>{formatPhp(cashTotal)}</strong>
+              <strong>{formatPhp(netCash)}</strong>
             </article>
             <article>
               <span>GCash Total</span>
-              <strong>{formatPhp(gcashTotal)}</strong>
+              <strong>{formatPhp(netGcash)}</strong>
             </article>
             <article>
               <span>Total Paid</span>
-              <strong>{formatPhp(cashTotal + gcashTotal)}</strong>
+              <strong>{formatPhp(netCash + netGcash)}</strong>
             </article>
             <article>
               <span>Ongoing Balance</span>
@@ -2812,20 +2946,19 @@ function SaleTrackerPage({
           </div>
           <div className="sale-quick-actions">
             <button type="button" onClick={() => setShowExpenseModal(true)}>Log Expense</button>
-            <button type="button" onClick={() => setTrackerStatus('Add cash payment selected.')}>Add Cash Payment</button>
-            <button type="button" onClick={() => setTrackerStatus('Add GCash payment selected.')}>Add GCash Payment</button>
-            <button type="button" onClick={() => setTrackerStatus('Manual entry selected.')}>Manual Entry</button>
-            <button type="button" onClick={() => setTrackerStatus('History selected.')}>View History</button>
+            <button type="button" onClick={() => setShowAdjustmentModal(true)}>Request Adjustment</button>
+            <button type="button" onClick={() => setShowFinancialHistory(true)}>View History</button>
           </div>
-          <button type="button" className="sale-new-payment" onClick={() => setTrackerStatus('New Payment selected.')}>New Payment</button>
         </aside>
       </div>
       {selectedPayment ? (
-        <SalePaymentDetailsModal payment={selectedPayment} onClose={() => setSelectedPayment(null)} />
+        <SalePaymentDetailsModal payment={selectedPayment} cashierName={staffName} onClose={() => setSelectedPayment(null)} />
       ) : null}
       {showExpenseModal ? (
         <LogExpenseModal
           deviceId={deviceId}
+          shiftSession={shiftSession}
+          staffName={staffName}
           onClose={() => setShowExpenseModal(false)}
           onSaved={(message) => {
             setTrackerStatus(message)
@@ -2833,18 +2966,35 @@ function SaleTrackerPage({
           }}
         />
       ) : null}
+      {showAdjustmentModal && shiftSession ? <PosAdjustmentModal shiftSession={shiftSession} staffName={staffName} onClose={() => setShowAdjustmentModal(false)} onSaved={(message) => { setTrackerStatus(message); setShowAdjustmentModal(false) }} /> : null}
+      {showFinancialHistory ? <FinancialHistoryModal expenses={shiftExpenses} adjustments={shiftAdjustments} onClose={() => setShowFinancialHistory(false)} /> : null}
     </section>
   )
+}
+
+function FinancialHistoryModal({ expenses, adjustments, onClose }: { expenses: CashMovement[]; adjustments: ShiftAdjustment[]; onClose: () => void }) {
+  const [tab, setTab] = useState<'expenses' | 'adjustments'>('expenses')
+  return <div className="modal-backdrop expense-backdrop"><section className="expense-modal financial-history-modal" role="dialog" aria-modal="true"><header><div><span>Current Shift</span><h2>Financial History</h2></div><button className="modal-close" onClick={onClose}>x</button></header><div className="expense-body"><div className="expense-payment-grid"><button className={tab === 'expenses' ? 'is-selected' : ''} onClick={() => setTab('expenses')}>Expenses ({expenses.length})</button><button className={tab === 'adjustments' ? 'is-selected' : ''} onClick={() => setTab('adjustments')}>Adjustments ({adjustments.length})</button></div><div className="financial-history-list">{tab === 'expenses' ? (expenses.length ? expenses.map((item) => <article key={item.id}><div><strong>{item.reasonCategory}</strong><span>{item.note || 'No note'} • {item.accountType === 'BANK' ? 'GCash' : 'Cash'}</span></div><em>-{formatPhp(item.amount)}</em></article>) : <p>No expenses in this shift.</p>) : (adjustments.length ? adjustments.map((item) => <article key={item.id}><div><strong>{item.reason}</strong><span>{item.account} • {item.status}</span></div><em>{item.direction === 'ADD' ? '+' : '-'}{formatPhp(item.amount)}</em></article>) : <p>No adjustment requests in this shift.</p>)}</div></div><footer><button className="modal-secondary" onClick={onClose}>Close</button></footer></section></div>
+}
+
+function PosAdjustmentModal({ shiftSession, staffName, onClose, onSaved }: { shiftSession: ShiftSession; staffName: string; onClose: () => void; onSaved: (message: string) => void }) {
+  const [account, setAccount] = useState<'CASH' | 'GCASH'>('CASH'); const [direction, setDirection] = useState<'ADD' | 'REMOVE'>('ADD'); const [amount, setAmount] = useState(''); const [reason, setReason] = useState(''); const [status, setStatus] = useState('Admin approval is required before totals change.')
+  async function submit() { const value = Number(amount); if (!(value > 0) || !reason.trim()) { setStatus('Amount and reason are required.'); return } try { await createShiftAdjustment({ shiftId: shiftSession.shiftId, shiftSessionId: shiftSession.id, account, direction, amount: value, reason: reason.trim(), requestedBy: staffName }); onSaved('Adjustment request sent to Admin for approval.') } catch (error) { setStatus(error instanceof Error ? error.message : 'Could not send request.') } }
+  return <div className="modal-backdrop expense-backdrop"><section className="expense-modal" role="dialog" aria-modal="true"><header><div><span>Approval Required</span><h2>Request Adjustment</h2></div><button className="modal-close" onClick={onClose}>x</button></header><div className="expense-body"><div className="expense-payment-grid"><button className={account === 'CASH' ? 'is-selected' : ''} onClick={() => setAccount('CASH')}>Cash</button><button className={account === 'GCASH' ? 'is-selected' : ''} onClick={() => setAccount('GCASH')}>GCash</button></div><div className="expense-payment-grid"><button className={direction === 'ADD' ? 'is-selected' : ''} onClick={() => setDirection('ADD')}>Add</button><button className={direction === 'REMOVE' ? 'is-selected' : ''} onClick={() => setDirection('REMOVE')}>Remove</button></div><label className="expense-field"><span>Amount</span><input inputMode="decimal" value={amount} onChange={(e) => setAmount(normalizeAmountInput(e.target.value))} /></label><label className="expense-field"><span>Reason</span><input value={reason} onChange={(e) => setReason(e.target.value)} /></label><p className="expense-status">{status}</p></div><footer><button className="modal-secondary" onClick={onClose}>Cancel</button><button className="modal-primary" onClick={() => void submit()}>Send Request</button></footer></section></div>
 }
 
 function LogExpenseModal({
   deviceId,
   onClose,
   onSaved,
+  shiftSession,
+  staffName,
 }: {
   deviceId: string
   onClose: () => void
   onSaved: (message: string) => void
+  shiftSession: ShiftSession | null
+  staffName: string
 }) {
   const amountRef = useRef<HTMLInputElement | null>(null)
   const [categories, setCategories] = useState<ExpenseCategorySetting[]>([])
@@ -2899,6 +3049,8 @@ function LogExpenseModal({
         subcategory: selectedSubcategory,
         paymentMethod,
         note,
+        shiftSession,
+        staffName,
       })
       onSaved(hasSupabaseConfig
         ? `Expense saved to Supabase cash_movements. ${formatPhp(amountValue)} deducted from ${expensePaymentLabel(paymentMethod)}.`
@@ -3015,7 +3167,7 @@ function LogExpenseModal({
   )
 }
 
-function SalePaymentDetailsModal({ payment, onClose }: { payment: SalePayment; onClose: () => void }) {
+function SalePaymentDetailsModal({ payment, cashierName, onClose }: { payment: SalePayment; cashierName: string; onClose: () => void }) {
   const orderRef = payment.orderId ? formatPosOrderRef(payment.orderId) : '-'
   return (
     <div className="modal-backdrop sale-detail-backdrop" role="presentation">
@@ -3048,12 +3200,12 @@ function SalePaymentDetailsModal({ payment, onClose }: { payment: SalePayment; o
           </section>
           <section className="sale-detail-meta">
             <div>
-              <span>Customer / Device</span>
-              <strong>{payment.customerName || 'Walk-in Customer'}</strong>
+              <span>Cashier</span>
+              <strong>{cashierName}</strong>
             </div>
             <div>
-              <span>Full Order ID</span>
-              <strong>{payment.orderId || payment.id}</strong>
+              <span>Order Number</span>
+              <strong>{orderRef}</strong>
             </div>
           </section>
           <section className="sale-detail-items">
@@ -3168,7 +3320,7 @@ function SettingsPage({
 
   const settingSections: Array<{ id: SettingsSection; title: string; subtitle: string }> = [
     { id: 'menu', title: 'Menu List', subtitle: `${products.length} products` },
-    { id: 'history', title: 'Order History', subtitle: `${history.length} closed today` },
+    { id: 'history', title: 'Order History', subtitle: `${history.length} closed this shift` },
     { id: 'money', title: 'Money Movements', subtitle: hasSupabaseConfig ? 'Supabase connected' : 'Needs Supabase env' },
     { id: 'printing', title: 'Printing', subtitle: 'Receipt print setup' },
   ]
@@ -3285,7 +3437,7 @@ function SettingsPage({
 
         {activeSection === 'history' ? (
           <section className="settings-panel">
-            <SettingsPanelHeader title="Order History" subtitle="Closed orders from this POS session." />
+            <SettingsPanelHeader title="Order History" subtitle="Closed orders from the current shift." />
             <div className="settings-card history-card">
               <HistoryPage orders={history} />
             </div>
@@ -3393,35 +3545,9 @@ function SettingsToggle({ label, checked, onChange }: { label: string; checked: 
 
 function HistoryPage({ orders }: { orders: RestaurantOrder[] }) {
   const [selectedOrderId, setSelectedOrderId] = useState(orders[0]?.id ?? '')
-  const [syncedOrders, setSyncedOrders] = useState<RestaurantOrder[]>([])
-  const [historyStatus, setHistoryStatus] = useState('Loading admin order history...')
-  const visibleOrders = syncedOrders.length > 0 ? syncedOrders : orders
+  const [historyStatus, setHistoryStatus] = useState('Showing closed orders from the current shift.')
+  const visibleOrders = orders
   const selectedOrder = visibleOrders.find((order) => order.id === selectedOrderId) ?? visibleOrders[0] ?? null
-
-  useEffect(() => {
-    let active = true
-    fetchOrders()
-      .then((items) => {
-        if (!active) return
-        const mappedOrders = items.map(mapAdminOrderToRestaurantOrder)
-        setSyncedOrders(mappedOrders)
-        setHistoryStatus(
-          hasSupabaseConfig
-            ? `${mappedOrders.length} orders synced from Admin/Supabase history.`
-            : 'Supabase not configured. Showing local POS history only.',
-        )
-        if (!selectedOrderId && mappedOrders[0]) {
-          setSelectedOrderId(mappedOrders[0].id)
-        }
-      })
-      .catch((error: unknown) => {
-        if (!active) return
-        setHistoryStatus(error instanceof Error ? error.message : 'Could not load admin order history.')
-      })
-    return () => {
-      active = false
-    }
-  }, [])
 
   useEffect(() => {
     if (!selectedOrderId && visibleOrders[0]) {
@@ -3438,7 +3564,7 @@ function HistoryPage({ orders }: { orders: RestaurantOrder[] }) {
         </div>
         <p className="history-sync-note">{historyStatus}</p>
         <div className="history-list">
-          {visibleOrders.length === 0 ? <EmptyState text="No synced orders yet." /> : null}
+          {visibleOrders.length === 0 ? <EmptyState text="No closed orders in this shift yet." /> : null}
           {visibleOrders.map((order) => (
             <button
               key={order.id}
@@ -3715,6 +3841,8 @@ function mapAdminOrderToRestaurantOrder(order: OrderRecord): RestaurantOrder {
     paymentNotes: order.orderNote ?? '',
     orderType: normalizeOrderType(order.serviceMode),
     createdAt: Date.parse(order.createdAt) || Date.now(),
+    shiftId: order.shiftId ?? null,
+    shiftSessionId: order.shiftSessionId ?? null,
   }
 }
 
@@ -3934,15 +4062,6 @@ function roundCurrency(value: number) {
   return Math.round(value * 100) / 100
 }
 
-function isToday(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return false
-  const now = new Date()
-  return date.getFullYear() === now.getFullYear()
-    && date.getMonth() === now.getMonth()
-    && date.getDate() === now.getDate()
-}
-
 function paymentMethodText(method: SalePayment['method']) {
   if (method === 'gcash') return 'GCash'
   if (method === 'cash') return 'Cash'
@@ -3977,7 +4096,7 @@ async function fetchSalePayments() {
   const supabase = requireSupabase()
   const { data, error } = await supabase
     .from('payments')
-    .select('id,order_id,customer_name,amount,method,status,created_at')
+    .select('id,order_id,customer_name,amount,method,status,created_at,collection_shift_id,shift_session_id')
     .order('created_at', { ascending: false })
 
   if (error) {
@@ -3993,7 +4112,7 @@ async function fetchSalePaymentsFromOrders() {
   const supabase = requireSupabase()
   const { data, error } = await supabase
     .from('orders')
-    .select('device_order_id,device_id,payment_method,payment_status,workflow_status,cash_amount,gcash_amount,total,items_json,created_at')
+    .select('device_order_id,device_id,payment_method,payment_status,workflow_status,cash_amount,gcash_amount,total,items_json,created_at,shift_id,shift_session_id')
     .order('created_at', { ascending: false })
 
   if (error) throw error
@@ -4012,6 +4131,8 @@ function mapSalePaymentRow(row: Record<string, unknown>): SalePayment {
     status: status === 'paid' ? 'paid' : 'unpaid',
     createdAt: String(row.created_at ?? new Date().toISOString()),
     items: [],
+    shiftId: row.collection_shift_id ? String(row.collection_shift_id) : null,
+    shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
   }
 }
 
@@ -4038,6 +4159,8 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
       status: 'unpaid',
       createdAt,
       items,
+      shiftId: row.shift_id ? String(row.shift_id) : null,
+      shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
     }]
   }
 
@@ -4052,6 +4175,8 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
       status: 'paid',
       createdAt,
       items,
+      shiftId: row.shift_id ? String(row.shift_id) : null,
+      shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
     })
   }
   if (gcashAmount > 0) {
@@ -4064,6 +4189,8 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
       status: 'paid',
       createdAt,
       items,
+      shiftId: row.shift_id ? String(row.shift_id) : null,
+      shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
     })
   }
 
@@ -4078,6 +4205,8 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
     status: 'paid',
     createdAt,
     items,
+    shiftId: row.shift_id ? String(row.shift_id) : null,
+    shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
   }]
 }
 
@@ -4152,6 +4281,8 @@ async function saveExpenseMovement(input: {
   subcategory?: { id: string; name: string }
   paymentMethod: ExpensePaymentMethod
   note: string
+  shiftSession: ShiftSession | null
+  staffName: string
 }) {
   const account = expenseAccountForPaymentMethod(input.paymentMethod, input.deviceId)
   const reasonCategory = [input.category.name, input.subcategory?.name].filter(Boolean).join(' / ')
@@ -4166,8 +4297,10 @@ async function saveExpenseMovement(input: {
     amount: roundCurrency(input.amount),
     note: input.note.trim() || `POS expense paid by ${expensePaymentLabel(input.paymentMethod)}`,
     relatedBillId: null,
-    createdBy: 'POS Web',
+    createdBy: input.staffName,
     createdAtEpochMillis: Date.now(),
+    shiftId: input.shiftSession?.shiftId ?? null,
+    shiftSessionId: input.shiftSession?.id ?? null,
   }
   await upsertCashMovements([movement])
 }
@@ -4237,17 +4370,39 @@ async function syncPaymentSnapshot(
   order: RestaurantOrder,
   setStatusMessage: (message: string) => void,
   payment?: OrderPaymentInput,
+  shiftSession?: ShiftSession | null,
+  collectedBy = 'POS Web',
 ) {
   if (!hasSupabaseConfig) return
 
   try {
     const supabase = requireSupabase()
-    const rows = buildPaymentRows(order, payment)
+    const rows = buildPaymentRows(order, payment).map((row) => ({
+      ...row,
+      customer_name: collectedBy,
+      origin_shift_id: order.shiftId,
+      collection_shift_id: row.status === 'paid' ? shiftSession?.shiftId ?? null : null,
+      shift_session_id: row.status === 'paid' ? shiftSession?.id ?? null : null,
+    }))
     if (rows.length === 0) return
     const { error } = await supabase.from('payments').upsert(rows, { onConflict: 'id' })
     if (error) {
-      if (isMissingTableError(error)) return
-      throw error
+      if (!isMissingTableError(error)) throw error
+    }
+    const eventRows = rows.filter((row) => row.status === 'paid' && row.shift_session_id && (row.method === 'cash' || row.method === 'gcash')).map((row) => ({
+      id: `shift-${row.id}`,
+      order_id: row.order_id,
+      origin_shift_id: order.shiftId,
+      collection_shift_id: row.collection_shift_id,
+      shift_session_id: row.shift_session_id,
+      method: String(row.method).toUpperCase(),
+      amount: row.amount,
+      collected_by: collectedBy,
+      collected_at: row.created_at,
+    }))
+    if (eventRows.length > 0) {
+      const result = await supabase.from('shift_payment_events').upsert(eventRows, { onConflict: 'id' })
+      if (result.error && !isMissingTableError(result.error)) throw result.error
     }
   } catch (error) {
     setStatusMessage(`${order.id} payment sync failed: ${error instanceof Error ? error.message : 'Unknown Supabase error.'}`)
@@ -4394,6 +4549,8 @@ function buildSupabaseOrderPayload(order: RestaurantOrder, includeWorkflowFields
     })),
     created_at: new Date(order.createdAt).toISOString(),
     uploaded_at: new Date().toISOString(),
+    shift_id: order.shiftId,
+    shift_session_id: order.shiftSessionId,
   }
 
   if (!includeWorkflowFields) return basePayload

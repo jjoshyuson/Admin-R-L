@@ -340,8 +340,8 @@ export function buildDashboardSnapshot(
 
   const paymentBreakdown: PaymentBreakdown = { cash: cashSales, gcash: gcashSales }
   const deviceBreakdown: DeviceSalesBreakdown = {
-    tablet1: activeOrders.filter((order) => normalizeAccountId(order.deviceId) === 'tablet-1').reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
-    tablet2: activeOrders.filter((order) => normalizeAccountId(order.deviceId) === 'tablet-2').reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
+    tablet1: activeOrders.filter((order) => order.shiftId?.endsWith('-first')).reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
+    tablet2: activeOrders.filter((order) => order.shiftId?.endsWith('-second')).reduce((sum, order) => sum + resolveOrderSalesAmount(order), 0),
   }
 
   const devices: DeviceStatus[] = ['tablet-1', 'tablet-2'].map((deviceId) => {

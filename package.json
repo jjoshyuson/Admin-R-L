@@ -7,17 +7,23 @@
     "dev": "vite",
     "dev:pos": "vite --open /pos.html",
     "build": "tsc && vite build",
+    "android:sync": "npm run build && cap sync android",
+    "android:open": "npm run android:sync && cap open android",
+    "android:run": "npm run android:sync && cap run android",
     "preview": "vite preview",
     "test": "vitest run",
     "test:smoke": "playwright test"
   },
   "dependencies": {
+    "@capacitor/android": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
     "@supabase/supabase-js": "^2.53.0",
     "lucide-react": "^1.24.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.4.2",
     "@playwright/test": "^1.59.1",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",

@@ -49,6 +49,25 @@ On the other PC before starting work:
 git pull origin main
 ```
 
+## Android POS App
+
+Capacitor packages the same POS web application as an installable Android app. The normal
+web release is unchanged: pushing `main` still triggers the GitHub Pages workflow.
+
+For an Android build, install Android Studio and its Android SDK, then run:
+
+```powershell
+npm install
+npm run android:open
+```
+
+The command builds the web app, copies it into the native Android project, and opens the
+project in Android Studio. Use Android Studio to run it on a POS device or create a signed
+APK/AAB. After web-code changes, run `npm run android:sync` before rebuilding Android.
+
+The Android app is a separate release artifact: `git push` deploys the website, but it does
+not automatically publish a new APK to devices or Google Play.
+
 ## Cloud Dev Option
 
 You can also open the repo in GitHub Codespaces from the GitHub repo page. The `.devcontainer` config installs dependencies and forwards the Vite dev server port.

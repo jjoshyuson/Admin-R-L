@@ -537,7 +537,7 @@ export async function fetchCashMovements(): Promise<CashMovement[]> {
     const supabase = requireSupabase()
     const { data, error } = await supabase
       .from('cash_movements')
-      .select('id,account_id,account_type,source_account_id,destination_account_id,movement_kind,reason_category,amount,note,related_bill_id,created_by,created_at')
+      .select('id,account_id,account_type,source_account_id,destination_account_id,movement_kind,reason_category,amount,note,related_bill_id,created_by,created_at,shift_id,shift_session_id')
       .order('created_at', { ascending: false })
       .limit(400)
     if (error) throw error
@@ -554,6 +554,8 @@ export async function fetchCashMovements(): Promise<CashMovement[]> {
       relatedBillId: row.related_bill_id ? String(row.related_bill_id) : null,
       createdBy: String(row.created_by ?? 'Admin 3.0'),
       createdAtEpochMillis: Date.parse(String(row.created_at ?? '')) || Date.now(),
+      shiftId: row.shift_id ? String(row.shift_id) : null,
+      shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
     }))
   })
 }
@@ -992,6 +994,8 @@ export async function upsertCashMovements(movements: CashMovement[]) {
       related_bill_id: movement.relatedBillId,
       created_by: movement.createdBy,
       created_at: asIsoTimestamp(movement.createdAtEpochMillis),
+      shift_id: movement.shiftId ?? null,
+      shift_session_id: movement.shiftSessionId ?? null,
     }))
     const { error } = await supabase.from('cash_movements').upsert(payload, { onConflict: 'id' })
     if (error) throw error
@@ -1054,6 +1058,14 @@ export async function clearDailyLogsData() {
   return maybeConfigured(undefined, async () => {
     await deleteAll('daily_accounting')
     await deleteAll('ingredient_price_logs')
+  })
+}
+
+export async function clearExpensesLogData() {
+  return maybeConfigured(undefined, async () => {
+    const supabase = requireSupabase()
+    const { error } = await supabase.from('cash_movements').delete().eq('movement_kind', 'PAY_OUT')
+    if (error) throw error
   })
 }
 

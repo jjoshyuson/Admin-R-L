@@ -53,6 +53,8 @@ export type OrderRecord = {
   total: number
   createdAt: string
   items: OrderItemRecord[]
+  shiftId?: string | null
+  shiftSessionId?: string | null
 }
 
 export type OrderVoidRecord = {
@@ -203,6 +205,74 @@ export type CashMovement = {
   relatedBillId: string | null
   createdBy: string
   createdAtEpochMillis: number
+  shiftId?: string | null
+  shiftSessionId?: string | null
+}
+
+export type ShiftType = 'FIRST' | 'SECOND'
+export type ShiftSchedule = {
+  firstShiftStart: string
+  secondShiftStart: string
+  timezone: string
+}
+export type ShiftSession = {
+  id: string
+  shiftId: string
+  businessDate: string
+  shiftType: ShiftType
+  employeeId: string
+  employeeName: string
+  deviceId: string
+  clockedInAt: string
+  clockedOutAt: string | null
+  status: 'OPEN' | 'CLOSED'
+  scheduleSnapshot: ShiftSchedule
+}
+export type ShiftPaymentEvent = {
+  id: string
+  orderId: string
+  originShiftId: string | null
+  collectionShiftId: string
+  shiftSessionId: string
+  method: 'CASH' | 'GCASH'
+  amount: number
+  collectedBy: string
+  collectedAt: string
+}
+export type ShiftAdjustmentStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED'
+export type ShiftAdjustment = {
+  id: string
+  shiftId: string
+  shiftSessionId: string | null
+  account: 'CASH' | 'GCASH'
+  direction: 'ADD' | 'REMOVE'
+  amount: number
+  reason: string
+  requestedBy: string
+  requestedAt: string
+  status: ShiftAdjustmentStatus
+  approvedBy: string | null
+  approvedAt: string | null
+}
+
+export type ShiftAuditStatus = 'AWAITING_AUDIT' | 'AUDITED'
+export type ShiftAudit = {
+  id: string
+  shiftId: string
+  businessDate: string
+  shiftType: ShiftType
+  expectedCash: number
+  countedCash: number
+  cashVariance: number
+  expectedGcash: number
+  verifiedGcash: number
+  gcashVariance: number
+  notes: string | null
+  varianceReason: string | null
+  status: ShiftAuditStatus
+  auditedBy: string
+  auditedAt: string
+  safeMovementId: string
 }
 
 export type Payable = {
