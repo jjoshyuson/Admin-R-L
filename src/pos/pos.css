@@ -2127,6 +2127,24 @@ h1 {
   grid-template-columns: auto minmax(0, 1fr);
 }
 
+.tablet-app-download-card {
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.tablet-app-download-card p {
+  margin: 6px 0 0;
+}
+
+.tablet-app-download-card a.settings-primary-button {
+  align-items: center;
+  color: #ffffff;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 42px;
+  text-decoration: none;
+}
+
 .settings-table,
 .settings-menu-list,
 .history-list,
@@ -3994,6 +4012,11 @@ h1 {
   }
 
   .printing-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tablet-app-download-card {
+    align-items: stretch;
     grid-template-columns: 1fr;
   }
 

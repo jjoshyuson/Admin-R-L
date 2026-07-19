@@ -3588,6 +3588,15 @@ function SettingsPage({
               <h3>Web Printer Notes</h3>
               <p>POS Web uses the browser print window. Select the thermal printer there, then keep the browser's saved printer preferences for daily cashier use.</p>
             </div>
+            <div className="settings-card tablet-app-download-card">
+              <div>
+                <h3>Tablet Printer App</h3>
+                <p>Install this Android wrapper on the tablet for silent Bluetooth thermal receipt printing.</p>
+              </div>
+              <a className="settings-primary-button" href="/downloads/ooh-pos-tablet-debug.apk" download>
+                Download APK
+              </a>
+            </div>
           </section>
         ) : null}
 
