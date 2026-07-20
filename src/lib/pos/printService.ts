@@ -130,14 +130,16 @@ export function buildPrintHtml(order: CompletedOrder, documentType: PrintDocumen
 function buildTicketMarkup(order: CompletedOrder, documentType: PrintDocumentType, copyNumber: number, copyCount: number, options: PrintOptions) {
   const isKitchen = documentType === 'kitchen-ticket'
   const title = isKitchen ? 'Kitchen Ticket' : 'Customer Receipt'
-  const showServiceMode = options.detailMode !== 'compact'
+  const showServiceMode = isKitchen || options.detailMode !== 'compact'
   const includeOrderNote = options.includeOrderNote !== false
   const rows = order.items
     .map((item) => {
-      const detail = `${item.quantity}x ${item.name}${item.isHalfOrder ? ' (Half)' : ''}`
-      const service = showServiceMode && item.serviceMode !== order.serviceMode ? `<div class="item-detail">${escapeHtml(item.serviceMode)}</div>` : ''
+      const servicePrefix = showServiceMode && shouldShowItemServiceMode(order.serviceMode, item.serviceMode)
+        ? `${formatServiceMode(item.serviceMode)} - `
+        : ''
+      const detail = `${servicePrefix}${item.quantity}x ${item.name}${item.isHalfOrder ? ' (Half)' : ''}`
       const amount = isKitchen ? '' : `<strong>${formatPhp(item.lineTotal)}</strong>`
-      return `<div class="row"><span>${escapeHtml(detail)}</span>${amount}</div>${service}`
+      return `<div class="row"><span>${escapeHtml(detail)}</span>${amount}</div>`
     })
     .join('')
 
@@ -148,7 +150,7 @@ function buildTicketMarkup(order: CompletedOrder, documentType: PrintDocumentTyp
         <div class="meta">
           <div>${escapeHtml(shortOrderId(order.deviceOrderId))}</div>
           <div>${escapeHtml(formatReceiptTimestamp(order.createdAt))}</div>
-          <div>${escapeHtml(order.serviceMode)} | ${escapeHtml(order.deviceId || 'Tablet')}</div>
+          <div>${escapeHtml(formatHeaderMeta(order.serviceMode, order.deviceId || 'Tablet'))}</div>
         </div>
       </div>
       <hr class="separator" />
@@ -168,6 +170,25 @@ function buildTicketMarkup(order: CompletedOrder, documentType: PrintDocumentTyp
       ${includeOrderNote && order.orderNote ? `<div class="note">${escapeHtml(order.orderNote)}</div>` : ''}
       ${copyCount > 1 ? `<div class="center copy-mark">Copy ${copyNumber} of ${copyCount}</div>` : ''}
     </main>`
+}
+
+function shouldShowItemServiceMode(orderServiceMode: string, itemServiceMode: string) {
+  return orderServiceMode === 'MIXED' || itemServiceMode !== orderServiceMode
+}
+
+function formatHeaderMeta(serviceMode: string, deviceId: string) {
+  return serviceMode === 'MIXED' ? deviceId : `${formatServiceMode(serviceMode)} | ${deviceId}`
+}
+
+function formatServiceMode(value: string) {
+  switch (value) {
+    case 'TAKE OUT':
+      return 'Take Out'
+    case 'DINE IN':
+      return 'Dine In'
+    default:
+      return value
+  }
 }
 
 function normalizeCopies(value: number | undefined) {

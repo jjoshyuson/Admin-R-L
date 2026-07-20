@@ -136,7 +136,8 @@ public class BluetoothEscPosPrinter {
         line(out, "OOH POS");
         line(out, shortOrderId(order.optString("deviceOrderId")));
         line(out, formatTimestamp(order.optString("createdAt")));
-        line(out, order.optString("serviceMode", "DINE IN") + " | " + order.optString("deviceId", "Tablet"));
+        String orderServiceMode = order.optString("serviceMode", "DINE IN");
+        line(out, formatHeaderMeta(orderServiceMode, order.optString("deviceId", "Tablet")));
         raw(out, 0x1B, 0x61, 0x00);
         line(out, separator);
 
@@ -151,7 +152,11 @@ public class BluetoothEscPosPrinter {
             }
             int quantity = Math.max(1, item.optInt("quantity", 1));
             String name = item.optString("name", "Item") + (item.optBoolean("isHalfOrder") ? " (Half)" : "");
-            line(out, truncate(quantity + "x " + name, paperColumns));
+            String itemServiceMode = item.optString("serviceMode", orderServiceMode);
+            String modePrefix = shouldShowItemServiceMode(orderServiceMode, itemServiceMode)
+                ? formatServiceMode(itemServiceMode) + " - "
+                : "";
+            line(out, truncate(modePrefix + quantity + "x " + name, paperColumns));
             if (type == DocumentType.RECEIPT) {
                 line(out, rightAlign(formatPhp(item.optDouble("lineTotal", 0.0)), paperColumns));
             }
@@ -216,6 +221,24 @@ public class BluetoothEscPosPrinter {
 
     private String formatPhp(double value) {
         return NumberFormat.getCurrencyInstance(new Locale("en", "PH")).format(value);
+    }
+
+    private boolean shouldShowItemServiceMode(String orderServiceMode, String itemServiceMode) {
+        return "MIXED".equals(orderServiceMode) || !itemServiceMode.equals(orderServiceMode);
+    }
+
+    private String formatHeaderMeta(String serviceMode, String deviceId) {
+        return "MIXED".equals(serviceMode) ? deviceId : formatServiceMode(serviceMode) + " | " + deviceId;
+    }
+
+    private String formatServiceMode(String value) {
+        if ("TAKE OUT".equals(value)) {
+            return "Take Out";
+        }
+        if ("DINE IN".equals(value)) {
+            return "Dine In";
+        }
+        return value;
     }
 
     private String formatTimestamp(String value) {

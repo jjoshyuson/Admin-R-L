@@ -554,3 +554,23 @@
 - Test result: build passed; unit tests passed 18/18 after adding automatic kitchen-ticket printing for new orders, edited orders, and add-order sends. Add-order sends print only the newly added kitchen lines so existing items are not duplicated on the kitchen printer.
 - Screenshot filename: not applicable; no UI layout changed in this pass.
 - Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 34
+
+- What was broken: printed mixed Dine In / Take Out orders could rely on a `MIXED` header instead of showing the service mode on each item line, especially through the Android Bluetooth printer.
+- Suspected cause: browser print used a separate service-mode detail line only in some modes, while the native ESC/POS printer printed only the order-level `serviceMode` header.
+- Files changed: `src/lib/pos/printService.ts`, `android/app/src/main/java/com/ooh/pos/printing/BluetoothEscPosPrinter.java`, `public/downloads/ooh-pos-tablet-debug.apk`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; `npx cap sync android`; Android `assembleDebug` with Android Studio JBR as `JAVA_HOME`
+- Test result: build passed; unit tests passed 18/18; Android debug APK built successfully after printing each mixed-order item as `Qty x Item - Dine In/Take Out` and changing the mixed header label to `Per-item mode`.
+- Screenshot filename: not applicable; print text formatting/native output changed, not a screen layout.
+- Remaining issue if any: commit/push the updated APK and deploy before the app download link will serve this build; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 35
+
+- What was broken: mixed-order printouts could still appear wrong because the Dine In / Take Out label was appended after the item name, where a thermal printer can truncate it, and the header still had a per-order mode line.
+- Suspected cause: the mode label needed to be the first text on each mixed-order item line, not a suffix or header-level summary.
+- Files changed: `src/lib/pos/printService.ts`, `src/lib/pos/printService.test.ts`, `android/app/src/main/java/com/ooh/pos/printing/BluetoothEscPosPrinter.java`, `public/downloads/ooh-pos-tablet-debug.apk`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; `npx cap sync android`; Android `assembleDebug` with Android Studio JBR as `JAVA_HOME`
+- Test result: build passed; unit tests passed 19/19 including a mixed kitchen-ticket regression test that asserts `Dine In - 1x ...`, `Take Out - 2x ...`, and no `MIXED` text in the browser kitchen-ticket HTML. Android debug APK also built successfully with matching native Bluetooth print formatting.
+- Screenshot filename: not applicable; print text formatting/native output changed, not a screen layout.
+- Remaining issue if any: commit/push the updated APK and deploy, then reinstall that new APK on the tablet before testing; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
