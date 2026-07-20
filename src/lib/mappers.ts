@@ -76,6 +76,8 @@ export function parseOrderItems(rawItems: unknown): OrderItemRecord[] {
         lineTotal: safeNumber(row.lineTotal ?? row.line_total),
       }
       if (row.productId != null) item.productId = String(row.productId)
+      if (row.categoryName != null) item.categoryName = String(row.categoryName)
+      if (row.category_name != null) item.categoryName = String(row.category_name)
       if (row.serviceMode != null) item.serviceMode = String(row.serviceMode)
       if (row.isHalfOrder != null) item.isHalfOrder = Boolean(row.isHalfOrder)
       if (row.price != null) item.price = safeNumber(row.price)

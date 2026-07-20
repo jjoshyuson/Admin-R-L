@@ -534,3 +534,23 @@
 - Test result: build passed; unit tests passed 13/13; browser check opened Send to Kitchen, confirmed the modal contains SVG icons and no `<i>` pseudo-icon elements, and reported no console or page errors.
 - Screenshot filename: `output/playwright/send-to-kitchen-icons-fixed.png`
 - Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 32
+
+- What was broken: POS Web had a category-level kitchen toggle in Settings > Menu List, but it was only UI state and did not persist or affect kitchen ticket printing.
+- Suspected cause: orders did not carry menu category names through the POS order model / `items_json`, and the kitchen-ticket print path always printed every order item.
+- Files changed: `src/pos/PosApp.tsx`, `src/lib/adminTypes.ts`, `src/lib/adminApi.ts`, `src/lib/mappers.ts`, `src/lib/pos/posTypes.ts`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright browser check against `http://127.0.0.1:5175/pos.html`.
+- Test result: build passed; unit tests passed 18/18; browser check confirmed POS Settings > Menu List renders the category kitchen print toggle with no page or console errors.
+- Screenshot filename: `output/playwright/pos-kitchen-category-print-setting.png`
+- Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session; the browser check hid the no-shift overlay with injected test CSS so the settings screen could be inspected without opening a shift.
+
+### Attempt 33
+
+- What was broken: tapping Send to Kitchen saved/synced the order but did not automatically print the kitchen ticket.
+- Suspected cause: the Send to Kitchen save path updated local/Supabase order state only; printing was only reachable from Order History.
+- Files changed: `src/pos/PosApp.tsx`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`
+- Test result: build passed; unit tests passed 18/18 after adding automatic kitchen-ticket printing for new orders, edited orders, and add-order sends. Add-order sends print only the newly added kitchen lines so existing items are not duplicated on the kitchen printer.
+- Screenshot filename: not applicable; no UI layout changed in this pass.
+- Remaining issue if any: Gemini screenshot review is still pending because no Gemini review tool was available in this session.

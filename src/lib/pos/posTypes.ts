@@ -60,6 +60,7 @@ export type PaymentDetails = {
 
 export type KitchenOrderItem = {
   productId: string
+  categoryName?: string
   name: string
   serviceMode: ServiceMode
   isHalfOrder: boolean
@@ -89,4 +90,3 @@ export type SaveOrderInput = {
   payment: PaymentDetails
   createdAt?: Date
 }
-

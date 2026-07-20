@@ -262,6 +262,8 @@ export async function fetchOrders(): Promise<OrderRecord[]> {
                 lineTotal: Number(item.lineTotal ?? item.line_total ?? 0),
               }
               if (item.productId != null) mapped.productId = String(item.productId)
+              if (item.categoryName != null) mapped.categoryName = String(item.categoryName)
+              if (item.category_name != null) mapped.categoryName = String(item.category_name)
               if (item.serviceMode != null) mapped.serviceMode = String(item.serviceMode)
               if (item.isHalfOrder != null) mapped.isHalfOrder = Boolean(item.isHalfOrder)
               if (item.price != null) mapped.price = Number(item.price)

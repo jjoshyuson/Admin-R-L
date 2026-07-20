@@ -103,6 +103,7 @@ type SalePayment = {
 type TicketItem = {
   lineId: string
   productId: string
+  categoryName: string
   name: string
   price: number
   quantity: number
@@ -114,6 +115,7 @@ type TicketItem = {
 type OrderItem = {
   id: string
   productId: string
+  categoryName: string
   name: string
   quantity: number
   price: number
@@ -182,12 +184,7 @@ export function PosApp() {
   const [autoPrintReceipt, setAutoPrintReceipt] = useState(readAutoPrintReceipt)
   const [receiptCopies, setReceiptCopies] = useState(readReceiptCopies)
   const [receiptPrintSettings, setReceiptPrintSettings] = useState(readReceiptPrintSettings)
-  const [menuCategoriesEnabled, setMenuCategoriesEnabled] = useState<Record<string, boolean>>({
-    Meals: true,
-    Drinks: true,
-    'Add-ons': true,
-    Others: false,
-  })
+  const [menuCategoriesEnabled, setMenuCategoriesEnabled] = useState(readKitchenPrintCategorySettings)
 
   useEffect(() => {
     let active = true
@@ -283,6 +280,10 @@ export function PosApp() {
   }, [receiptPrintSettings])
 
   useEffect(() => {
+    window.localStorage.setItem('pos-web-kitchen-print-categories', JSON.stringify(menuCategoriesEnabled))
+  }, [menuCategoriesEnabled])
+
+  useEffect(() => {
     let active = true
 
     async function loadSyncedOrders() {
@@ -362,6 +363,10 @@ export function PosApp() {
       .filter((product) => product.status !== 'HIDDEN')
       .filter((product) => selectedCategory === 'All Items' || sameCategory(selectedCategory, product.categoryName))
   }, [products, selectedCategory])
+  const categoryByProductId = useMemo(
+    () => new Map(products.map((product) => [product.id, product.categoryName || 'Uncategorized'])),
+    [products],
+  )
   const visibleHalfOrderAvailable = visibleProducts.some((product) => resolveHalfOrderPrice(product) != null)
 
   const subtotal = ticketItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
@@ -438,6 +443,7 @@ export function PosApp() {
         {
           lineId,
           productId: product.id,
+          categoryName: product.categoryName || 'Uncategorized',
           name: product.name,
           price: unitPrice,
           quantity: 1,
@@ -463,17 +469,23 @@ export function PosApp() {
     setTicketItems((current) => current.filter((item) => item.lineId !== lineId))
   }
 
+  function printSentKitchenTicket(order: RestaurantOrder) {
+    printOrderDocument(order, 'kitchen-ticket', setStatusMessage, 1, receiptPrintSettings, menuCategoriesEnabled, categoryByProductId)
+  }
+
   async function saveOrder(note: string) {
     if (ticketItems.length === 0) return
     const targetEditOrderId = kitchenNoteTarget?.editOrderId ?? editOrderId
     if (targetEditOrderId) {
       const existingOrder = orders.find((order) => order.id === targetEditOrderId)
+      if (!existingOrder) return
       const existingItems = new Map(existingOrder?.items.map((item) => [item.id, item]) ?? [])
       const nextItems: OrderItem[] = ticketItems.map((item, index) => {
         const existing = existingItems.get(item.lineId)
         return {
           id: existing?.id ?? `${item.lineId}:edit:${Date.now()}:${index}`,
           productId: item.productId,
+          categoryName: item.categoryName,
           name: item.name,
           quantity: item.quantity,
           price: item.price,
@@ -484,18 +496,17 @@ export function PosApp() {
         }
       })
       const readyForPayment = nextItems.length > 0 && nextItems.every((item) => item.served)
-      let updatedOrder: RestaurantOrder | null = null
+      const updatedOrder: RestaurantOrder = {
+        ...existingOrder,
+        items: nextItems,
+        status: readyForPayment ? 'served' : 'preparing',
+        readyForPayment,
+        paid: false,
+        paymentNotes: [existingOrder.paymentNotes, note ? `Edit order: ${note}` : 'Edit order'].filter(Boolean).join(' | '),
+        orderType: ticketOrderType(ticketItems),
+      }
       setOrders((current) => current.map((order) => {
         if (order.id !== targetEditOrderId) return order
-        updatedOrder = {
-          ...order,
-          items: nextItems,
-          status: readyForPayment ? 'served' : 'preparing',
-          readyForPayment,
-          paid: false,
-          paymentNotes: [order.paymentNotes, note ? `Edit order: ${note}` : 'Edit order'].filter(Boolean).join(' | '),
-          orderType: ticketOrderType(ticketItems),
-        }
         return updatedOrder
       }))
       setTicketItems([])
@@ -505,45 +516,49 @@ export function PosApp() {
       setSelectedOrderId(targetEditOrderId)
       setStatusMessage(`${formatPosOrderRef(targetEditOrderId)} edited and sent to kitchen.`)
       setActiveTab('ongoing')
-      if (updatedOrder) await syncOrderSnapshot(updatedOrder, setStatusMessage)
+      printSentKitchenTicket(updatedOrder)
+      await syncOrderSnapshot(updatedOrder, setStatusMessage)
       return
     }
 
     const targetOrderId = kitchenNoteTarget?.appendToOrderId ?? appendOrderId
     if (targetOrderId) {
       const createdAt = Date.now()
-      let updatedOrder: RestaurantOrder | null = null
-      setOrders((current) => current.map((order) => {
-        if (order.id !== targetOrderId) return order
-        const appendedItems: OrderItem[] = ticketItems.map((item, index) => ({
-          id: `${item.lineId}:addon:${createdAt}:${index}`,
+      const existingOrder = orders.find((order) => order.id === targetOrderId)
+      if (!existingOrder) return
+      const appendedItems: OrderItem[] = ticketItems.map((item, index) => ({
+        id: `${item.lineId}:addon:${createdAt}:${index}`,
+        productId: item.productId,
+        categoryName: item.categoryName,
+        name: item.name,
+        quantity: item.quantity,
+        price: item.price,
+        served: false,
+        paidQuantity: 0,
+        orderType: item.orderType,
+        isHalfOrder: item.isHalfOrder,
+      }))
+      const updatedOrder: RestaurantOrder = {
+        ...existingOrder,
+        items: [...existingOrder.items, ...appendedItems],
+        status: 'preparing',
+        readyForPayment: false,
+        paid: false,
+        paymentNotes: [existingOrder.paymentNotes, note ? `Add order: ${note}` : 'Add order'].filter(Boolean).join(' | '),
+        orderType: ticketOrderType([...existingOrder.items, ...appendedItems].map((item) => ({
+          lineId: item.id,
           productId: item.productId,
+          categoryName: item.categoryName,
           name: item.name,
-          quantity: item.quantity,
           price: item.price,
-          served: false,
-          paidQuantity: 0,
+          quantity: item.quantity,
+          imagePath: null,
           orderType: item.orderType,
           isHalfOrder: item.isHalfOrder,
-        }))
-        updatedOrder = {
-          ...order,
-          items: [...order.items, ...appendedItems],
-          status: 'preparing',
-          readyForPayment: false,
-          paid: false,
-          paymentNotes: [order.paymentNotes, note ? `Add order: ${note}` : 'Add order'].filter(Boolean).join(' | '),
-          orderType: ticketOrderType([...order.items, ...appendedItems].map((item) => ({
-            lineId: item.id,
-            productId: item.productId,
-            name: item.name,
-            price: item.price,
-            quantity: item.quantity,
-            imagePath: null,
-            orderType: item.orderType,
-            isHalfOrder: item.isHalfOrder,
-          }))),
-        }
+        }))),
+      }
+      setOrders((current) => current.map((order) => {
+        if (order.id !== targetOrderId) return order
         return updatedOrder
       }))
       setTicketItems([])
@@ -553,7 +568,12 @@ export function PosApp() {
       setSelectedOrderId(targetOrderId)
       setStatusMessage(`${formatPosOrderRef(targetOrderId)} add order sent to kitchen.`)
       setActiveTab('ongoing')
-      if (updatedOrder) await syncOrderSnapshot(updatedOrder, setStatusMessage)
+      printSentKitchenTicket({
+        ...updatedOrder,
+        items: appendedItems,
+        paymentNotes: note ? `Add order: ${note}` : 'Add order',
+      })
+      await syncOrderSnapshot(updatedOrder, setStatusMessage)
       return
     }
     const createdAt = Date.now()
@@ -563,6 +583,7 @@ export function PosApp() {
       items: ticketItems.map((item) => ({
         id: item.lineId,
         productId: item.productId,
+        categoryName: item.categoryName,
         name: item.name,
         quantity: item.quantity,
         price: item.price,
@@ -589,6 +610,7 @@ export function PosApp() {
     setKitchenNoteTarget(null)
     setStatusMessage(`${order.id} saved to ongoing orders.`)
     setActiveTab('ongoing')
+    printSentKitchenTicket(order)
     await syncOrderSnapshot(order, setStatusMessage)
     await syncPaymentSnapshot(order, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
   }
@@ -686,6 +708,7 @@ export function PosApp() {
       items: ticketItems.map((item) => ({
         id: item.lineId,
         productId: item.productId,
+        categoryName: item.categoryName,
         name: item.name,
         quantity: item.quantity,
         price: item.price,
@@ -1010,7 +1033,7 @@ export function PosApp() {
             onReceiptPrintSettingsChange={setReceiptPrintSettings}
             onToggleMenuCategory={(category) => setMenuCategoriesEnabled((current) => ({
               ...current,
-              [category]: !(current[category] ?? false),
+              [category]: !isKitchenCategoryEnabled(current, category),
             }))}
           />
         </section>
@@ -3408,7 +3431,7 @@ function SettingsPage({
                 <div className="settings-category-list">
                   {menuListCategories.map((category) => {
                     const isAll = category === 'All Items'
-                    const isVisible = isAll || menuCategoriesEnabled[category]
+                    const isVisible = isAll || isKitchenCategoryEnabled(menuCategoriesEnabled, category)
                     const count = isAll ? products.length : countProductsForCategory(products, category)
                     return (
                       <button
@@ -3427,11 +3450,11 @@ function SettingsPage({
                 {activeMenuListCategory !== 'All Items' ? (
                   <button
                     type="button"
-                    className={`settings-category-kitchen-toggle ${menuCategoriesEnabled[activeMenuListCategory] ? 'is-enabled' : ''}`}
+                    className={`settings-category-kitchen-toggle ${isKitchenCategoryEnabled(menuCategoriesEnabled, activeMenuListCategory) ? 'is-enabled' : ''}`}
                     onClick={() => onToggleMenuCategory(activeMenuListCategory)}
                   >
-                    <span>{menuCategoriesEnabled[activeMenuListCategory] ? 'Kitchen enabled' : 'Kitchen hidden'}</span>
-                    <strong>{menuCategoriesEnabled[activeMenuListCategory] ? 'On' : 'Off'}</strong>
+                    <span>{isKitchenCategoryEnabled(menuCategoriesEnabled, activeMenuListCategory) ? 'Prints to kitchen' : 'Hidden from kitchen print'}</span>
+                    <strong>{isKitchenCategoryEnabled(menuCategoriesEnabled, activeMenuListCategory) ? 'On' : 'Off'}</strong>
                   </button>
                 ) : null}
                 <button type="button" className="settings-add-category">+ Add Category</button>
@@ -3483,7 +3506,7 @@ function SettingsPage({
           <section className="settings-panel">
             <SettingsPanelHeader title="Order History" subtitle="Closed orders from the current shift." />
             <div className="settings-card history-card">
-              <HistoryPage orders={history} receiptCopies={receiptCopies} receiptPrintSettings={receiptPrintSettings} />
+              <HistoryPage orders={history} products={products} kitchenCategorySettings={menuCategoriesEnabled} receiptCopies={receiptCopies} receiptPrintSettings={receiptPrintSettings} />
             </div>
           </section>
         ) : null}
@@ -3625,11 +3648,27 @@ function SettingsToggle({ label, checked, onChange }: { label: string; checked: 
   )
 }
 
-function HistoryPage({ orders, receiptCopies, receiptPrintSettings }: { orders: RestaurantOrder[]; receiptCopies: number; receiptPrintSettings: ReceiptPrintSettings }) {
+function HistoryPage({
+  orders,
+  products,
+  kitchenCategorySettings,
+  receiptCopies,
+  receiptPrintSettings,
+}: {
+  orders: RestaurantOrder[]
+  products: PosMenuProduct[]
+  kitchenCategorySettings: Record<string, boolean>
+  receiptCopies: number
+  receiptPrintSettings: ReceiptPrintSettings
+}) {
   const [selectedOrderId, setSelectedOrderId] = useState(orders[0]?.id ?? '')
   const [historyStatus, setHistoryStatus] = useState('Showing closed orders from the current shift.')
   const visibleOrders = orders
   const selectedOrder = visibleOrders.find((order) => order.id === selectedOrderId) ?? visibleOrders[0] ?? null
+  const categoryByProductId = useMemo(
+    () => new Map(products.map((product) => [product.id, product.categoryName || 'Uncategorized'])),
+    [products],
+  )
 
   useEffect(() => {
     if (!selectedOrderId && visibleOrders[0]) {
@@ -3699,7 +3738,7 @@ function HistoryPage({ orders, receiptCopies, receiptPrintSettings }: { orders: 
             </div>
             <div className="history-actions">
               <button type="button" className="settings-primary-button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus, receiptCopies, receiptPrintSettings)}>Print Receipt</button>
-              <button type="button" onClick={() => printOrderDocument(selectedOrder, 'kitchen-ticket', setHistoryStatus)}>Print Kitchen Ticket</button>
+              <button type="button" onClick={() => printOrderDocument(selectedOrder, 'kitchen-ticket', setHistoryStatus, 1, receiptPrintSettings, kitchenCategorySettings, categoryByProductId)}>Print Kitchen Ticket</button>
               <button type="button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus, receiptCopies, receiptPrintSettings)}>Reprint Summary</button>
             </div>
           </>
@@ -3830,6 +3869,23 @@ function readReceiptPrintSettings(): ReceiptPrintSettings {
       includeOrderNote: true,
     }
   }
+}
+
+function readKitchenPrintCategorySettings(): Record<string, boolean> {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem('pos-web-kitchen-print-categories') ?? '{}') as Record<string, unknown>
+    return Object.fromEntries(
+      Object.entries(raw)
+        .filter(([category]) => category.trim().length > 0)
+        .map(([category, enabled]) => [category, enabled !== false]),
+    )
+  } catch {
+    return {}
+  }
+}
+
+function isKitchenCategoryEnabled(settings: Record<string, boolean>, category: string) {
+  return settings[category] !== false
 }
 
 function normalizeReceiptCopies(value: string | number) {
@@ -3974,6 +4030,7 @@ function mapAdminOrderToRestaurantOrder(order: OrderRecord): RestaurantOrder {
     return {
       id: `${order.deviceOrderId}-${index}`,
       productId: item.productId ?? `${order.deviceOrderId}-${index}`,
+      categoryName: item.categoryName ?? itemCategory(item.name),
       name: item.name,
       quantity,
       price,
@@ -4142,9 +4199,16 @@ function printOrderDocument(
   setStatusMessage: (message: string) => void,
   copies = 1,
   settings: ReceiptPrintSettings = readReceiptPrintSettings(),
+  kitchenCategorySettings: Record<string, boolean> = readKitchenPrintCategorySettings(),
+  categoryByProductId: Map<string, string> = new Map(),
 ) {
   try {
-    printPosDocument(toCompletedPrintOrder(order), documentType, { copies, ...settings })
+    const printOrder = toCompletedPrintOrder(order, documentType === 'kitchen-ticket' ? { kitchenCategorySettings, categoryByProductId } : undefined)
+    if (documentType === 'kitchen-ticket' && printOrder.items.length === 0) {
+      setStatusMessage(`${formatPosOrderRef(order.id)} has no items in the selected kitchen print categories.`)
+      return
+    }
+    printPosDocument(printOrder, documentType, { copies, ...settings })
     const copyLabel = documentType === 'customer-receipt' && copies > 1 ? ` (${copies} copies)` : ''
     setStatusMessage(`${formatPosOrderRef(order.id)} ${documentType === 'kitchen-ticket' ? 'kitchen ticket' : 'receipt'} sent to printer${copyLabel}.`)
   } catch (error) {
@@ -4152,8 +4216,20 @@ function printOrderDocument(
   }
 }
 
-function toCompletedPrintOrder(order: RestaurantOrder): CompletedOrder {
-  const subtotal = order.items.reduce((sum, item) => sum + item.price * item.quantity, 0)
+function toCompletedPrintOrder(
+  order: RestaurantOrder,
+  options?: {
+    kitchenCategorySettings: Record<string, boolean>
+    categoryByProductId: Map<string, string>
+  },
+): CompletedOrder {
+  const sourceItems = options
+    ? order.items.filter((item) => {
+      const category = options.categoryByProductId.get(item.productId) || item.categoryName || itemCategory(item.name)
+      return isKitchenCategoryEnabled(options.kitchenCategorySettings, category)
+    })
+    : order.items
+  const subtotal = sourceItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
   const tax = roundCurrency(subtotal * taxRate)
   const total = roundCurrency(subtotal + tax)
   const paymentMethod = (order.paymentMethod ?? 'cash').toUpperCase() as CompletedOrder['payment']['method']
@@ -4173,8 +4249,9 @@ function toCompletedPrintOrder(order: RestaurantOrder): CompletedOrder {
     },
     orderNote: order.paymentNotes || null,
     totals: { subtotal: roundCurrency(subtotal), tax, total },
-    items: order.items.map((item) => ({
+    items: sourceItems.map((item) => ({
       productId: item.productId,
+      categoryName: options?.categoryByProductId.get(item.productId) || item.categoryName || itemCategory(item.name),
       name: item.name,
       serviceMode: item.orderType,
       isHalfOrder: item.isHalfOrder,
@@ -4191,6 +4268,7 @@ function orderItemToTicketItem(item: OrderItem): TicketItem {
   return {
     lineId: item.id,
     productId: item.productId,
+    categoryName: item.categoryName,
     name: item.name,
     price: item.price,
     quantity: item.quantity,
@@ -4697,6 +4775,7 @@ function buildSupabaseOrderPayload(order: RestaurantOrder, includeWorkflowFields
     total,
     items_json: order.items.map((item) => ({
       productId: item.productId,
+      categoryName: item.categoryName,
       name: item.name,
       serviceMode: item.orderType,
       isHalfOrder: item.isHalfOrder,

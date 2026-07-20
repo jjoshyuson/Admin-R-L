@@ -26,6 +26,7 @@ export type SyncMeta = {
 
 export type OrderItemRecord = {
   productId?: string
+  categoryName?: string
   name: string
   serviceMode?: string
   isHalfOrder?: boolean
