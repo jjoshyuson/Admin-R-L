@@ -574,3 +574,13 @@
 - Test result: build passed; unit tests passed 19/19 including a mixed kitchen-ticket regression test that asserts `Dine In - 1x ...`, `Take Out - 2x ...`, and no `MIXED` text in the browser kitchen-ticket HTML. Android debug APK also built successfully with matching native Bluetooth print formatting.
 - Screenshot filename: not applicable; print text formatting/native output changed, not a screen layout.
 - Remaining issue if any: commit/push the updated APK and deploy, then reinstall that new APK on the tablet before testing; Gemini screenshot review is still pending because no Gemini review tool was available in this session.
+
+### Attempt 36
+
+- What was broken: POS Sale Tracker could show only one ₱460 transaction even after multiple orders, and the transaction detail modal clipped longer order-item lists.
+- Suspected cause: Sale Tracker treated the `payments` table as the primary source even when payment rows were missing/incomplete, filtered rows by the exact open `shift_session_id` instead of the whole current `shift_id`, and the detail item card used `overflow: hidden` without an inner scroll area.
+- Files changed: `src/pos/PosApp.tsx`, `src/pos/pos.css`, `public/downloads/ooh-pos-tablet-debug.apk`, `WORKLOG.md`
+- Command run: `npm run build`; `npm test`; targeted Playwright browser check against `http://127.0.0.1:5176/pos.html`; `npx cap sync android`; Android `assembleDebug` with Android Studio JBR as `JAVA_HOME`
+- Test result: build passed; unit tests passed 19/19; browser check loaded Sale Tracker with no page or console errors; Android debug APK built successfully after merging Sale Tracker rows from `orders` plus `payments`, broadening current-shift matching, and adding a scrollable detail item list.
+- Screenshot filename: `output/playwright/sale-tracker-detail-scroll.png`
+- Remaining issue if any: the browser check had no live rows in the fresh test context, so it verified page health rather than a populated transaction modal; Gemini screenshot review is still pending because no Gemini review tool was available in this session.

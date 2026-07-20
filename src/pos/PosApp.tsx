@@ -2796,8 +2796,8 @@ function SaleTrackerPage({
         const adjustments = shiftSession ? await fetchShiftAdjustments(shiftSession.shiftId) : []
         if (!active) return
         setPayments(rows)
-        setShiftExpenses(movements.filter((item) => item.shiftSessionId === shiftSession?.id && item.movementKind === 'PAY_OUT'))
-        setShiftAdjustments(adjustments.filter((item) => item.shiftSessionId === shiftSession?.id))
+        setShiftExpenses(movements.filter((item) => shiftSession && item.movementKind === 'PAY_OUT' && cashMovementBelongsToShift(item, shiftSession)))
+        setShiftAdjustments(adjustments.filter((item) => shiftSession && shiftAdjustmentBelongsToShift(item, shiftSession)))
         setTrackerStatus(`Live Supabase payments synced. ${rows.length} records loaded.`)
       } catch (error) {
         if (!active) return
@@ -2833,7 +2833,7 @@ function SaleTrackerPage({
   }, [shiftSession?.id])
 
   const shiftPayments = shiftSession
-    ? payments.filter((payment) => payment.shiftSessionId === shiftSession.id)
+    ? payments.filter((payment) => salePaymentBelongsToShift(payment, shiftSession))
     : []
   const paidThisShift = shiftPayments.filter((payment) => payment.status === 'paid')
   const cashTotal = paidThisShift
@@ -3255,14 +3255,16 @@ function SalePaymentDetailsModal({ payment, cashierName, onClose }: { payment: S
               <strong>Order Items</strong>
               <span>{payment.items.length} items</span>
             </div>
-            {payment.items.length === 0 ? <EmptyState text="No item details available for this payment." /> : null}
-            {payment.items.map((item, index) => (
-              <article key={`${item.name}-${index}`}>
-                <span>{item.quantity}x</span>
-                <strong>{item.name}</strong>
-                <em>{formatPhp(item.price * item.quantity)}</em>
-              </article>
-            ))}
+            <div className="sale-detail-items-list">
+              {payment.items.length === 0 ? <EmptyState text="No item details available for this payment." /> : null}
+              {payment.items.map((item, index) => (
+                <article key={`${item.name}-${index}`}>
+                  <span>{item.quantity}x</span>
+                  <strong>{item.name}</strong>
+                  <em>{formatPhp(item.price * item.quantity)}</em>
+                </article>
+              ))}
+            </div>
           </section>
         </div>
         <footer>
@@ -4332,6 +4334,7 @@ function countProductsForCategory(products: PosMenuProduct[], category: string) 
 
 async function fetchSalePayments() {
   const supabase = requireSupabase()
+  const orderRows = await fetchSalePaymentsFromOrders()
   const { data, error } = await supabase
     .from('payments')
     .select('id,order_id,customer_name,amount,method,status,created_at,collection_shift_id,shift_session_id')
@@ -4339,11 +4342,12 @@ async function fetchSalePayments() {
 
   if (error) {
     if (isMissingTableError(error)) {
-      return fetchSalePaymentsFromOrders()
+      return orderRows
     }
     throw error
   }
-  return (data ?? []).map(mapSalePaymentRow)
+  const paymentRows = (data ?? []).map(mapSalePaymentRow)
+  return mergeSalePaymentRows(paymentRows, orderRows)
 }
 
 async function fetchSalePaymentsFromOrders() {
@@ -4372,6 +4376,56 @@ function mapSalePaymentRow(row: Record<string, unknown>): SalePayment {
     shiftId: row.collection_shift_id ? String(row.collection_shift_id) : null,
     shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
   }
+}
+
+function mergeSalePaymentRows(paymentRows: SalePayment[], orderRows: SalePayment[]) {
+  const orderRowsByOrderId = new Map(orderRows.map((row) => [row.orderId, row]))
+  const merged = paymentRows.map((payment) => {
+    const order = orderRowsByOrderId.get(payment.orderId)
+    if (!order) return payment
+    return {
+      ...payment,
+      items: payment.items.length > 0 ? payment.items : order.items,
+      shiftId: payment.shiftId ?? order.shiftId,
+      shiftSessionId: payment.shiftSessionId ?? order.shiftSessionId,
+      customerName: payment.customerName || order.customerName,
+      createdAt: payment.createdAt || order.createdAt,
+    }
+  })
+  const existingKeys = new Set(merged.map(salePaymentKey))
+  orderRows.forEach((order) => {
+    if (!existingKeys.has(salePaymentKey(order))) {
+      merged.push(order)
+    }
+  })
+  return merged.sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+}
+
+function salePaymentKey(payment: SalePayment) {
+  return `${payment.orderId}:${payment.method}:${payment.status}`
+}
+
+function salePaymentBelongsToShift(payment: SalePayment, shiftSession: ShiftSession) {
+  if (payment.shiftId === shiftSession.shiftId || payment.shiftSessionId === shiftSession.id) return true
+  return recordCreatedDuringShift(payment.createdAt, payment.shiftId, payment.shiftSessionId, shiftSession)
+}
+
+function cashMovementBelongsToShift(movement: CashMovement, shiftSession: ShiftSession) {
+  if (movement.shiftId === shiftSession.shiftId || movement.shiftSessionId === shiftSession.id) return true
+  return recordCreatedDuringShift(new Date(movement.createdAtEpochMillis).toISOString(), movement.shiftId, movement.shiftSessionId, shiftSession)
+}
+
+function shiftAdjustmentBelongsToShift(adjustment: ShiftAdjustment, shiftSession: ShiftSession) {
+  if (adjustment.shiftId === shiftSession.shiftId || adjustment.shiftSessionId === shiftSession.id) return true
+  return recordCreatedDuringShift(adjustment.requestedAt, adjustment.shiftId, adjustment.shiftSessionId, shiftSession)
+}
+
+function recordCreatedDuringShift(createdAt: string, shiftId: string | null | undefined, shiftSessionId: string | null | undefined, shiftSession: ShiftSession) {
+  if (shiftId || shiftSessionId) return false
+  const created = Date.parse(createdAt)
+  const opened = Date.parse(shiftSession.clockedInAt)
+  const closed = shiftSession.clockedOutAt ? Date.parse(shiftSession.clockedOutAt) : Date.now()
+  return Number.isFinite(created) && Number.isFinite(opened) && created >= opened && created <= closed
 }
 
 function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] {
