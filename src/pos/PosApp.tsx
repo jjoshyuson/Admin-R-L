@@ -4388,7 +4388,11 @@ function printOrderDocument(
     const copyLabel = documentType === 'customer-receipt' && copies > 1 ? ` (${copies} copies)` : ''
     setStatusMessage(`${formatPosOrderRef(order.id)} ${documentType === 'kitchen-ticket' ? 'kitchen ticket' : 'receipt'} sent to printer${copyLabel}.`)
   } catch (error) {
-    setStatusMessage(error instanceof Error ? error.message : 'Could not print order.')
+    const message = error instanceof Error ? error.message : 'Could not print order.'
+    setStatusMessage(message)
+    if (message.toLowerCase().includes('paper is out')) {
+      window.alert(message)
+    }
   }
 }
 
