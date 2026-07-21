@@ -39,6 +39,13 @@ export function printPosDocument(order: CompletedOrder, documentType: PrintDocum
     : nativePrinter?.printReceipt
 
   if (nativeMethod) {
+    const paperStatus = checkNativePrinterStatus()
+    if (paperStatus.state === 'PAPER_OUT') {
+      throw new Error('Printing stopped: paper is out. Replace the roll, then use Reprint on the order.')
+    }
+    if (paperStatus.state === 'ERROR') {
+      throw new Error(`Printing stopped: ${paperStatus.message}`)
+    }
     const nativeOrderJson = JSON.stringify(buildNativePrintOrder(order, options))
     for (let copyIndex = 0; copyIndex < copies; copyIndex += 1) {
       const result = nativeMethod.call(nativePrinter, nativeOrderJson)

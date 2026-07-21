@@ -472,11 +472,6 @@ export function PosApp() {
   function reprintKitchenTicket(orderId: string) {
     const order = orders.find((item) => item.id === orderId)
     if (!order) return
-    const paperStatus = checkNativePrinterStatus()
-    if (paperStatus.state === 'PAPER_OUT') {
-      setStatusMessage(`${formatPosOrderRef(order.id)} not reprinted: replace the printer paper first.`)
-      return
-    }
     printSentKitchenTicket({
       ...order,
       paymentNotes: ['REPRINT', order.paymentNotes].filter(Boolean).join(' · '),
@@ -527,12 +522,12 @@ export function PosApp() {
       setStatusMessage(`${formatPosOrderRef(targetEditOrderId)} edited and sent to kitchen.`)
       setActiveTab('ongoing')
       const kitchenPrintDelta = buildKitchenPrintDelta(existingOrder, updatedOrder)
+      await syncOrderSnapshot(updatedOrder, setStatusMessage)
       if (kitchenPrintDelta.items.length > 0) {
         printSentKitchenTicket(kitchenPrintDelta)
       } else {
         setStatusMessage(`${formatPosOrderRef(targetEditOrderId)} updated. No new kitchen items to print.`)
       }
-      await syncOrderSnapshot(updatedOrder, setStatusMessage)
       return
     }
 
@@ -583,12 +578,12 @@ export function PosApp() {
       setSelectedOrderId(targetOrderId)
       setStatusMessage(`${formatPosOrderRef(targetOrderId)} add order sent to kitchen.`)
       setActiveTab('ongoing')
+      await syncOrderSnapshot(updatedOrder, setStatusMessage)
       printSentKitchenTicket({
         ...updatedOrder,
         items: appendedItems,
         paymentNotes: note ? `Add order: ${note}` : 'Add order',
       })
-      await syncOrderSnapshot(updatedOrder, setStatusMessage)
       return
     }
     const createdAt = Date.now()
@@ -625,9 +620,9 @@ export function PosApp() {
     setKitchenNoteTarget(null)
     setStatusMessage(`${order.id} saved to ongoing orders.`)
     setActiveTab('ongoing')
-    printSentKitchenTicket(order)
     await syncOrderSnapshot(order, setStatusMessage)
     await syncPaymentSnapshot(order, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
+    printSentKitchenTicket(order)
   }
 
   function startAddOrder(orderId: string) {
