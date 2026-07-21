@@ -6021,6 +6021,21 @@ h1 {
   width: 42px;
 }
 
+.header-icon-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.header-icon-button .is-spinning {
+  animation: pos-refresh-spin 0.8s linear infinite;
+}
+
+@keyframes pos-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .product-section-label {
   color: #111827;
   font-size: 14px;
@@ -6425,8 +6440,10 @@ h1 {
 .pos-shell.is-ongoing .grid-mode {
   align-items: center;
   display: inline-flex;
+  gap: 6px;
   justify-content: center;
-  width: 40px;
+  padding: 0 12px;
+  width: auto;
 }
 
 .pos-shell.is-ongoing .grid-mode.is-active {
@@ -6441,6 +6458,10 @@ h1 {
   max-height: calc(100vh - 146px);
   overflow-y: auto;
   padding-right: 4px;
+}
+
+.pos-shell.is-ongoing .ongoing-grid.is-list-view {
+  grid-template-columns: 1fr;
 }
 
 .pos-shell.is-ongoing .mini-order-card {
@@ -6532,6 +6553,13 @@ h1 {
   padding-top: 9px;
 }
 
+.pos-shell.is-ongoing .ongoing-card-price {
+  color: #0f5132;
+  font-size: 15px;
+  margin-left: auto;
+  margin-right: 8px;
+}
+
 .pos-shell.is-ongoing .order-card-chevron {
   color: #94a3b8;
   font-size: 24px;
@@ -6614,8 +6642,17 @@ h1 {
   border-bottom: 1px dashed #e5e7eb;
   display: grid;
   gap: 12px;
-  grid-template-columns: 20px 38px minmax(0, 1fr);
+  grid-template-columns: 20px 38px minmax(0, 1fr) auto;
   padding: 12px 0;
+}
+
+.pos-shell.is-ongoing .detail-items em {
+  color: #0f172a;
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 750;
+  padding-top: 7px;
+  white-space: nowrap;
 }
 
 .pos-shell.is-ongoing .detail-items span {
@@ -6667,6 +6704,103 @@ h1 {
 .pos-shell.is-ongoing .detail-actions .edit-order-action {
   border-color: #fecaca;
   color: #dc2626;
+}
+
+.pos-shell.is-ongoing .detail-actions .cancel-order-action {
+  background: #fff7f7;
+  border-color: #fca5a5;
+  color: #b91c1c;
+}
+
+/* Pending Payment cards mirror the compact Ongoing Orders card system. */
+.pos-shell.is-kitchen .grid-mode {
+  gap: 6px;
+  padding: 0 12px;
+  width: auto;
+}
+
+.pos-shell.is-kitchen .ongoing-grid {
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+}
+
+.pos-shell.is-kitchen .ongoing-grid.is-list-view {
+  grid-template-columns: 1fr;
+}
+
+.pos-shell.is-kitchen .payment-order-card {
+  align-items: start;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 44px minmax(0, 1fr);
+  height: auto;
+  min-height: 138px;
+  padding: 16px;
+}
+
+.pos-shell.is-kitchen .payment-order-card.is-selected {
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.18), 0 8px 20px rgba(15, 23, 42, 0.06);
+}
+
+.pos-shell.is-kitchen .payment-order-card .order-card-icon {
+  align-items: center;
+  background: #eef5f7;
+  border: 1px solid #dbe7eb;
+  border-radius: 10px;
+  color: #0f5132;
+  display: flex;
+  height: 44px;
+  justify-content: center;
+  width: 44px;
+}
+
+.pos-shell.is-kitchen .payment-order-card .order-card-copy {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pos-shell.is-kitchen .payment-order-card header {
+  align-items: flex-start;
+}
+
+.pos-shell.is-kitchen .payment-order-card header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.pos-shell.is-kitchen .payment-order-card header strong {
+  color: #0f172a;
+  font-size: 17px;
+  font-weight: 750;
+}
+
+.pos-shell.is-kitchen .payment-order-card header span,
+.pos-shell.is-kitchen .payment-order-card time,
+.pos-shell.is-kitchen .payment-order-card footer span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.pos-shell.is-kitchen .payment-order-card footer {
+  border-top: 1px solid #f1f5f9;
+  justify-content: space-between;
+  margin: 2px 0 0;
+  padding: 9px 0 0;
+}
+
+.pos-shell.is-kitchen .payment-order-card .ongoing-card-price {
+  color: #0f5132;
+  font-size: 15px;
+  margin-left: auto;
+  margin-right: 8px;
+}
+
+.pos-shell.is-kitchen .payment-order-card .order-card-chevron {
+  color: #94a3b8;
 }
 
 /* Highest-specificity fix for older ongoing workspace rules. The dashboard

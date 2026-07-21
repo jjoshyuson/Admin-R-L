@@ -672,12 +672,17 @@ export async function uploadMenuItemImage(file: File, nameHint: string) {
     const supabase = requireSupabase()
     const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg'
     const fileName = `${slugify(nameHint)}-${Date.now()}.${extension}`
-    const path = `menu-icons/${fileName}`
+    const path = `products/${fileName}`
     const uploadResult = await supabase.storage.from(getStorageBucket()).upload(path, file, {
       contentType: file.type || 'image/jpeg',
       upsert: true,
     })
-    if (uploadResult.error) throw uploadResult.error
+    if (uploadResult.error) {
+      if (uploadResult.error.message.toLowerCase().includes('bucket not found')) {
+        throw new Error(`The Supabase Storage bucket "${getStorageBucket()}" does not exist. Run SUPABASE_MENU_IMAGES.sql in the Supabase SQL Editor, then try again.`)
+      }
+      throw uploadResult.error
+    }
     const { data } = supabase.storage.from(getStorageBucket()).getPublicUrl(path)
     return data.publicUrl
   })
@@ -928,13 +933,14 @@ export async function transferCash(input: TransferCashInput) {
 }
 
 export async function adjustCash(input: AdjustCashInput) {
+  const accountId = normalizeAccountId(input.accountId)
   return upsertCashMovements([
     {
       id: createRandomId('cash-movement'),
-      accountId: normalizeAccountId(input.accountId),
-      accountType: normalizeAccountId(input.accountId) === 'main-safe' ? 'SAFE' : 'TABLET_DRAWER',
-      sourceAccountId: input.adjustmentType === 'remove' ? normalizeAccountId(input.accountId) : null,
-      destinationAccountId: input.adjustmentType === 'add' ? normalizeAccountId(input.accountId) : null,
+      accountId,
+      accountType: accountId === 'main-safe' ? 'SAFE' : accountId === 'bank-gcash' ? 'BANK' : 'TABLET_DRAWER',
+      sourceAccountId: input.adjustmentType === 'remove' ? accountId : null,
+      destinationAccountId: input.adjustmentType === 'add' ? accountId : null,
       movementKind: input.adjustmentType === 'add' ? 'ADJUSTMENT_PLUS' : 'ADJUSTMENT_MINUS',
       reasonCategory: 'Adjustment',
       amount: input.amount,

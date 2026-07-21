@@ -18,11 +18,13 @@ import {
   deactivateMenuCategory,
   deactivateMenuProduct,
   fetchAdminSetting,
+  upsertCashMovements,
   recordInventoryCount,
   seedTroubleshootingData,
   saveAdminSetting,
 } from './lib/adminApi'
 import { createRandomId } from './lib/randomId'
+import { WorkVault } from './WorkVault'
 import {
   approveOrderEditRequest,
   describeOrderEditRequestError,
@@ -60,6 +62,7 @@ type MoreRoute =
   | 'orders'
   | 'sales-range'
   | 'employees'
+  | 'salary-tracker'
   | 'menu-settings'
   | 'category-settings'
   | 'recipes'
@@ -281,6 +284,7 @@ type ResetActionId =
   | 'clear-daily-logs'
   | 'clear-expenses-log'
   | 'clear-inventory'
+  | 'clear-workvault'
 
 type RecipeSummaryMetrics = {
   totalRecipeCost: number
@@ -397,6 +401,7 @@ type CashControlModal =
   | { type: 'transfer' }
   | { type: 'adjust' }
   | { type: 'cash_pull' }
+  | { type: 'expense' }
   | { type: 'logs' }
   | { type: 'log_detail'; movementId: string }
   | null
@@ -1110,6 +1115,7 @@ function AdminShell() {
     halfOrderPriceSupported,
     refresh: refreshMenuCatalog,
     setCategoriesAndProducts,
+    uploadProductImage,
   } = useMenuCatalog()
   const {
     recipes,
@@ -1180,7 +1186,7 @@ function AdminShell() {
     note: '',
   })
   const [adjustDraft, setAdjustDraft] = useState<AdjustDraft>({
-    accountId: 'tablet-2',
+    accountId: 'main-safe',
     adjustmentType: 'add',
     amount: '',
     note: '',
@@ -1190,6 +1196,10 @@ function AdminShell() {
     amount: '',
     note: '',
   })
+  const [financeExpenseDraft, setFinanceExpenseDraft] = useState<FinanceExpenseDraft>({
+    accountId: 'main-safe', amount: '', categoryId: '', subcategoryId: '', note: '',
+  })
+  const [financeExpenseCategories, setFinanceExpenseCategories] = useState<AdminExpenseCategory[]>([])
   const [manualRefreshBusy, setManualRefreshBusy] = useState(false)
   const [seedSyncBusy, setSeedSyncBusy] = useState(false)
   const [cashControlError, setCashControlError] = useState('')
@@ -1261,6 +1271,22 @@ function AdminShell() {
     const unsubscribe = subscribeToShiftAdjustments(() => { void loadPendingAdjustments() })
     return () => { active = false; unsubscribe() }
   }, [])
+
+  useEffect(() => {
+    if (cashControlModal?.type !== 'expense') return
+    let active = true
+    fetchAdminSetting('expense_categories').then((setting) => {
+      if (!active) return
+      const categories = normalizeAdminExpenseCategories(setting)
+      setFinanceExpenseCategories(categories)
+      setFinanceExpenseDraft((current) => categories.some((category) => category.id === current.categoryId)
+        ? current
+        : { ...current, categoryId: '', subcategoryId: '' })
+    }).catch((error: unknown) => {
+      if (active) setCashControlError(error instanceof Error ? error.message : 'Could not load expense categories.')
+    })
+    return () => { active = false }
+  }, [cashControlModal?.type])
 
   useEffect(() => {
     if (appMode !== 'pos-only') {
@@ -2403,6 +2429,18 @@ function AdminShell() {
     )
   }
 
+  async function handleClearWorkVaultReset() {
+    await runResetAction(
+      'clear-workvault',
+      async () => {
+        const emptyWorkVault = { workVaultShifts: [], transactions: [], schedule: [], attendance: [] }
+        await saveAdminSetting('salary_tracker', emptyWorkVault)
+        window.localStorage.setItem('admin-web-salary-tracker', JSON.stringify(emptyWorkVault))
+      },
+      'WorkVault schedules and employee earnings were cleared. Employee profiles were kept.',
+    )
+  }
+
   function openMenuItemEditor(itemId: string) {
     setProductModal({ type: 'menu-item', itemId })
   }
@@ -2742,6 +2780,37 @@ function AdminShell() {
     resetCashControlState()
   }
 
+  async function handleFinanceExpenseSubmit() {
+    const amount = Number(financeExpenseDraft.amount)
+    const account = visibleCashAccounts.find((entry) => entry.id === financeExpenseDraft.accountId)
+    const category = financeExpenseCategories.find((entry) => entry.id === financeExpenseDraft.categoryId)
+    const subcategory = category?.subcategories.find((entry) => entry.id === financeExpenseDraft.subcategoryId)
+    if (!account) { setCashControlError('Select Main Safe or GCash.'); return }
+    if (!Number.isFinite(amount) || amount <= 0) { setCashControlError('Amount must be numeric and greater than 0.'); return }
+    if (!category) { setCashControlError('Select an expense category.'); return }
+    if (account.currentBalance - amount < 0) { setCashControlError('Account balance cannot go negative.'); return }
+    try {
+      await upsertCashMovements([{
+        id: createRandomId('finance-expense'),
+        accountId: account.id,
+        accountType: account.id === 'bank-gcash' ? 'BANK' : 'SAFE',
+        sourceAccountId: account.id,
+        destinationAccountId: null,
+        movementKind: 'PAY_OUT',
+        reasonCategory: [category.name, subcategory?.name].filter(Boolean).join(' / '),
+        amount,
+        note: financeExpenseDraft.note.trim() || null,
+        relatedBillId: null,
+        createdBy: 'Admin Web',
+        createdAtEpochMillis: Date.now(),
+      }])
+      await refreshFinanceData()
+      setCashControlNotice(`Logged ${formatPhp(amount)} expense from ${account.name}.`)
+      setFinanceExpenseDraft((current) => ({ ...current, amount: '', note: '' }))
+      resetCashControlState()
+    } catch (error) { setCashControlError(error instanceof Error ? error.message : 'Could not log expense.') }
+  }
+
   function handleCashPullSubmit() {
     const amount = Number(cashPullDraft.amount)
     const sourceAccount = visibleCashAccounts.find((entry) => entry.id === cashPullDraft.fromAccountId)
@@ -3049,6 +3118,7 @@ function AdminShell() {
             onClearDailyLogs={() => void handleClearDailyLogsReset()}
             onClearExpensesLog={() => void handleClearExpensesLogReset()}
             onClearInventory={() => void handleClearInventoryReset()}
+            onClearWorkVault={() => void handleClearWorkVaultReset()}
           />
         ) : null}
 
@@ -3060,6 +3130,7 @@ function AdminShell() {
             category={activeCategoryItem}
             categories={orderedCategories}
             halfOrderPriceSupported={halfOrderPriceSupported}
+            onUploadProductImage={uploadProductImage}
             onClose={() => setProductModal(null)}
             onSaveMenuItem={handleSaveMenuItem}
             onRemoveMenuItem={handleRemoveMenuItem}
@@ -3075,15 +3146,19 @@ function AdminShell() {
             movements={cashMovementsView}
             transferDraft={transferDraft}
             adjustDraft={adjustDraft}
+            expenseDraft={financeExpenseDraft}
+            expenseCategories={financeExpenseCategories}
             cashPullDraft={cashPullDraft}
             error={cashControlError}
             activeMovement={activeLogMovement}
             onClose={resetCashControlState}
             onTransferDraftChange={setTransferDraft}
             onAdjustDraftChange={setAdjustDraft}
+            onExpenseDraftChange={setFinanceExpenseDraft}
             onCashPullDraftChange={setCashPullDraft}
             onSubmitTransfer={handleTransferSubmit}
             onSubmitAdjust={handleAdjustSubmit}
+            onSubmitExpense={() => void handleFinanceExpenseSubmit()}
             onSubmitCashPull={handleCashPullSubmit}
             onOpenLogDetail={(movementId) => setCashControlModal({ type: 'log_detail', movementId })}
           />
@@ -3217,19 +3292,21 @@ function OrderEditRequestPopup({
   onDismiss: () => void
 }) {
   const shortOrderNumber = formatShortOrderNumber(request.displayOrderId || request.deviceOrderId)
+  const isCancelRequest = request.requestedBy.toLowerCase().includes('cancel order')
+  const requesterName = request.requestedBy.replace(/\s*[·•]\s*Cancel order\s*$/i, '')
   return (
     <div className="admin-request-modal-backdrop" role="presentation">
-      <section className="admin-request-modal" role="dialog" aria-modal="true" aria-label="Pending edit order request">
+      <section className="admin-request-modal" role="dialog" aria-modal="true" aria-label={isCancelRequest ? 'Pending cancel order request' : 'Pending edit order request'}>
         <div className="admin-request-modal-head">
           <div>
             <span>Pending Request</span>
-            <strong>Edit Order #{shortOrderNumber}</strong>
+            <strong>{isCancelRequest ? 'Cancel' : 'Edit'} Order #{shortOrderNumber}</strong>
           </div>
           <span className="system-badge is-synced">{pendingCount}</span>
         </div>
         <p>
-          {request.requestedBy || 'POS'} is asking to edit this order from {request.deviceId || 'POS Web'}.
-          Approving here unlocks the edit screen on that POS.
+          {requesterName || 'POS'} is asking to {isCancelRequest ? 'cancel' : 'edit'} this order from {request.deviceId || 'POS Web'}.
+          {isCancelRequest ? ' Approving here authorizes the POS to void the order.' : ' Approving here unlocks the edit screen on that POS.'}
         </p>
         <div className="admin-request-meta">
           <span>{formatFullDateTime(request.requestedAt)}</span>
@@ -3239,7 +3316,7 @@ function OrderEditRequestPopup({
         <div className="admin-request-actions">
           <button type="button" className="ghost-pill" onClick={onDismiss} disabled={busy}>Not Now</button>
           <button type="button" className="save-changes-button" onClick={onApprove} disabled={busy}>
-            {busy ? 'Approving...' : 'Yes, Approve'}
+            {busy ? 'Approving...' : isCancelRequest ? 'Confirm Cancellation' : 'Yes, Approve'}
           </button>
         </div>
       </section>
@@ -3249,6 +3326,57 @@ function OrderEditRequestPopup({
 
 function ShiftAdjustmentRequestPopup({ request, pendingCount, busy, error, onApprove, onReject, onDismiss }: { request: ShiftAdjustment; pendingCount: number; busy: boolean; error: string; onApprove: () => void; onReject: () => void; onDismiss: () => void }) {
   return <div className="admin-request-modal-backdrop" role="presentation"><section className="admin-request-modal" role="dialog" aria-modal="true" aria-label="Pending shift adjustment request"><div className="admin-request-modal-head"><div><span>Pending Adjustment</span><strong>{request.direction} {formatPhp(request.amount)} • {request.account}</strong></div><span className="system-badge is-synced">{pendingCount}</span></div><p>{request.requestedBy} requested this adjustment for {request.shiftId}. Totals will not change until it is approved.</p><div className="admin-request-meta"><span>{formatFullDateTime(request.requestedAt)}</span><span>{request.reason}</span></div>{error ? <div className="admin-request-error">{error}</div> : null}<div className="admin-request-actions"><button type="button" className="ghost-pill" onClick={onDismiss} disabled={busy}>Not Now</button><button type="button" className="ghost-pill" onClick={onReject} disabled={busy}>Reject</button><button type="button" className="save-changes-button" onClick={onApprove} disabled={busy}>{busy ? 'Updating...' : 'Approve'}</button></div></section></div>
+}
+
+async function prepareMenuImage(file: File) {
+  const image = await createImageBitmap(file)
+  const targetSize = 800
+  const cropSize = Math.min(image.width, image.height)
+  const sourceX = Math.max(0, (image.width - cropSize) / 2)
+  const sourceY = Math.max(0, (image.height - cropSize) / 2)
+  const canvas = document.createElement('canvas')
+  canvas.width = targetSize
+  canvas.height = targetSize
+  const context = canvas.getContext('2d')
+  if (!context) {
+    image.close()
+    throw new Error('This browser could not prepare the picture.')
+  }
+
+  context.drawImage(image, sourceX, sourceY, cropSize, cropSize, 0, 0, targetSize, targetSize)
+  image.close()
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.86))
+  if (!blob) throw new Error('This browser could not resize the picture.')
+  const baseName = file.name.replace(/\.[^.]+$/, '') || 'menu-item'
+  return new File([blob], `${baseName}.webp`, { type: 'image/webp' })
+}
+
+type FinanceExpenseDraft = {
+  accountId: 'main-safe' | 'bank-gcash'
+  amount: string
+  categoryId: string
+  subcategoryId: string
+  note: string
+}
+
+type SalaryAttendanceRecord = {
+  id: string
+  businessDate: string
+  shiftType: ShiftType
+  employeeId: string
+  employeeName: string
+  dailyRate: number
+  recordedAt: string
+}
+
+type ScheduledEmployeeRecord = {
+  id: string
+  businessDate: string
+  shiftType: ShiftType
+  employeeId: string
+  employeeName: string
+  dailyRate: number
+  attendanceStatus: 'scheduled' | 'present' | 'absent'
 }
 
 function buildLinePath(values: number[], width: number, height: number) {
@@ -4472,12 +4600,6 @@ function SettingsMoreScreen({
           onClick={() => onNavigate('orders')}
         />
         <ActionRow
-          icon={<FinanceOverviewIcon />}
-          title="Sales Range"
-          subtitle="Sales totals for a custom date range"
-          onClick={() => onNavigate('sales-range')}
-        />
-        <ActionRow
           icon={<OrderHistoryIcon />}
           title="Shift Reports"
           subtitle="First and Second Shift summaries, expenses, and adjustments"
@@ -4491,6 +4613,12 @@ function SettingsMoreScreen({
           title="Employee Management"
           subtitle="Employee names, daily rates, and POS cashier access"
           onClick={() => onNavigate('employees')}
+        />
+        <ActionRow
+          icon={<OrderHistoryIcon />}
+          title="WorkVault"
+          subtitle="Schedule shifts and track salary currently owed to your team"
+          onClick={() => onNavigate('salary-tracker')}
         />
         <ActionRow
           icon={<SyncLogsIcon />}
@@ -4518,6 +4646,12 @@ function SettingsMoreScreen({
       <MoreSection title="FINANCE">
         <ActionRow
           icon={<FinanceOverviewIcon />}
+          title="Sales Range"
+          subtitle="Sales totals for a custom date range"
+          onClick={() => onNavigate('sales-range')}
+        />
+        <ActionRow
+          icon={<FinanceOverviewIcon />}
           title="Cash Overview"
           subtitle="Tablet cash sales, GCash sales, and total sales intake"
           onClick={() => onNavigate('finance-overview')}
@@ -4525,7 +4659,13 @@ function SettingsMoreScreen({
         <ActionRow
           icon={<CashDrawerIcon />}
           title="Main Safe"
-          subtitle="Audited shift cash received into the safe"
+          subtitle="Safe and GCash balances, expenses, logs, and adjustments"
+          onClick={() => onNavigate('cash-drawer')}
+        />
+        <ActionRow
+          icon={<BillsIcon />}
+          title="Log Expense"
+          subtitle="Record an expense against Main Safe or GCash"
           onClick={() => onNavigate('cash-drawer')}
         />
         <ActionRow
@@ -4536,12 +4676,6 @@ function SettingsMoreScreen({
         />
         {appMode === 'full-admin' ? (
           <>
-            <ActionRow
-              icon={<BillsIcon />}
-              title="Bills & Payables"
-              subtitle="Vendor invoices, due dates, outstanding bills, and payment tracking"
-              onClick={() => onNavigate('payables')}
-            />
             <ActionRow
               icon={<ProfitInsightsIcon />}
               title="Profit Insights"
@@ -4991,6 +5125,10 @@ function MoreDetailScreen({
 
   if (route === 'employees') {
     return <EmployeeManagementScreen onBack={onBack} />
+  }
+
+  if (route === 'salary-tracker') {
+    return <WorkVault onBack={onBack} />
   }
 
   if (route === 'turnover-settings') return <TurnoverSettingsScreen onBack={onBack} />
@@ -5514,6 +5652,400 @@ function EmployeeManagementScreen({ onBack }: { onBack: () => void }) {
       </section>
     </div>
   )
+}
+
+export function ScheduleTrackerScreen({ onBack }: { onBack: () => void }) {
+  const today = new Date().toISOString().slice(0, 10)
+  const [businessDate, setBusinessDate] = useState(today)
+  const [rangeStart, setRangeStart] = useState(`${today.slice(0, 8)}01`)
+  const [rangeEnd, setRangeEnd] = useState(today)
+  const [employees, setEmployees] = useState<EmployeeRecord[]>([])
+  const [schedule, setSchedule] = useState<ScheduledEmployeeRecord[]>([])
+  const [attendance, setAttendance] = useState<SalaryAttendanceRecord[]>([])
+  const [status, setStatus] = useState('Loading schedule...')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    Promise.all([fetchAdminSetting('employees'), fetchAdminSetting('salary_tracker')])
+      .then(([employeeSetting, trackerSetting]) => {
+        if (!active) return
+        const nextEmployees = normalizeEmployeeSetting(employeeSetting)
+        const nextSchedule = normalizeScheduledEmployees(trackerSetting)
+        const nextAttendance = normalizeSalaryAttendance(trackerSetting)
+        setEmployees(nextEmployees)
+        setSchedule(nextSchedule)
+        setAttendance(nextAttendance)
+        writeLocalScheduleTracker(nextSchedule, nextAttendance)
+        setStatus(nextEmployees.length ? 'Schedule and salary vaults loaded.' : 'Add employees in Employee Management first.')
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        const local = readLocalScheduleTracker()
+        setEmployees(readLocalEmployeeSetting())
+        setSchedule(local.schedule)
+        setAttendance(local.attendance)
+        setStatus(error instanceof Error ? `Loaded browser records. ${error.message}` : 'Loaded browser records.')
+      })
+    return () => { active = false }
+  }, [])
+
+  const activeEmployees = employees.filter((employee) => employee.isActive)
+  const selectedDaySchedule = schedule.filter((record) => record.businessDate === businessDate)
+  const firstShift = selectedDaySchedule.filter((record) => record.shiftType === 'FIRST')
+  const secondShift = selectedDaySchedule.filter((record) => record.shiftType === 'SECOND')
+  const rangeAttendance = attendance.filter((record) => record.businessDate >= rangeStart && record.businessDate <= rangeEnd)
+  const vaults = activeEmployees.map((employee) => ({
+    employee,
+    balance: attendance.filter((record) => record.employeeId === employee.id).reduce((sum, record) => sum + record.dailyRate, 0),
+    rangeEarnings: rangeAttendance.filter((record) => record.employeeId === employee.id).reduce((sum, record) => sum + record.dailyRate, 0),
+    paidDays: new Set(attendance.filter((record) => record.employeeId === employee.id).map((record) => record.businessDate)).size,
+  }))
+  const totalVaultBalance = vaults.reduce((sum, item) => sum + item.balance, 0)
+  const rangeTotal = vaults.reduce((sum, item) => sum + item.rangeEarnings, 0)
+
+  async function persist(nextSchedule: ScheduledEmployeeRecord[], nextAttendance: SalaryAttendanceRecord[], message: string) {
+    setSaving(true)
+    setSchedule(nextSchedule)
+    setAttendance(nextAttendance)
+    writeLocalScheduleTracker(nextSchedule, nextAttendance)
+    try {
+      await saveAdminSetting('salary_tracker', { schedule: nextSchedule, attendance: nextAttendance })
+      setStatus(message)
+    } catch (error) {
+      setStatus(error instanceof Error ? `${message} Saved in this browser only: ${error.message}` : `${message} Saved in this browser only.`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function toggleScheduledEmployee(employee: EmployeeRecord, shiftType: ShiftType) {
+    const existing = schedule.find((record) => record.businessDate === businessDate && record.shiftType === shiftType && record.employeeId === employee.id)
+    if (existing) {
+      void persist(schedule.filter((record) => record.id !== existing.id), attendance, `${employee.name} removed from ${shiftLabel(shiftType)}.`)
+      return
+    }
+    const record: ScheduledEmployeeRecord = {
+      id: createRandomId('scheduled-employee'), businessDate, shiftType,
+      employeeId: employee.id, employeeName: employee.name, dailyRate: employee.dailyRate,
+      attendanceStatus: 'scheduled',
+    }
+    void persist([...schedule, record], attendance, `${employee.name} scheduled for ${shiftLabel(shiftType)}.`)
+  }
+
+  function confirmAttendance(record: ScheduledEmployeeRecord, nextStatus: 'present' | 'absent') {
+    const nextSchedule = schedule.map((item) => item.id === record.id ? { ...item, attendanceStatus: nextStatus } : item)
+    const existingAttendance = attendance.find((item) => item.employeeId === record.employeeId && item.businessDate === record.businessDate)
+    let nextAttendance = attendance
+    if (nextStatus === 'present' && !existingAttendance) {
+      nextAttendance = [...attendance, {
+        id: createRandomId('salary-credit'), businessDate: record.businessDate, shiftType: record.shiftType,
+        employeeId: record.employeeId, employeeName: record.employeeName, dailyRate: record.dailyRate, recordedAt: new Date().toISOString(),
+      }]
+    }
+    if (nextStatus === 'absent' && existingAttendance) {
+      const presentOnAnotherShift = nextSchedule.some((item) => item.id !== record.id && item.businessDate === record.businessDate && item.employeeId === record.employeeId && item.attendanceStatus === 'present')
+      if (!presentOnAnotherShift) nextAttendance = attendance.filter((item) => item.id !== existingAttendance.id)
+    }
+    void persist(nextSchedule, nextAttendance, nextStatus === 'present'
+      ? `${record.employeeName} marked present. ${formatPhp(record.dailyRate)} credited to the salary vault.`
+      : `${record.employeeName} marked absent. No salary was credited.`)
+  }
+
+  function renderShift(shiftType: ShiftType, assigned: ScheduledEmployeeRecord[]) {
+    const assignedIds = new Set(assigned.map((record) => record.employeeId))
+    return <section className="surface-card schedule-shift-card">
+      <div className="schedule-shift-head"><div><span>{shiftLabel(shiftType)}</span><strong>{assigned.length ? assigned.map((record) => record.employeeName).join(', ') : 'No employee scheduled'}</strong></div><em>{assigned.length} staff</em></div>
+      <div className="schedule-employee-picker">{activeEmployees.map((employee) => <button key={employee.id} type="button" disabled={saving} className={assignedIds.has(employee.id) ? 'is-selected' : ''} onClick={() => toggleScheduledEmployee(employee, shiftType)}><span>{assignedIds.has(employee.id) ? '✓' : '+'}</span><strong>{employee.name}</strong><small>{formatPhp(employee.dailyRate)} / day</small></button>)}</div>
+    </section>
+  }
+
+  return <div className="record-screen shift-admin-screen schedule-tracker-screen">
+    <header className="record-header shift-report-header"><button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back"><span aria-hidden="true">&lt;</span></button><div><p className="section-kicker">Staff Planning</p><h1>Schedule Tracker</h1><p>Schedule any date, then confirm who actually worked before salary reaches their vault.</p></div></header>
+    <section className="surface-card schedule-date-card"><label><span>Schedule Date</span><input type="date" value={businessDate} onChange={(event) => setBusinessDate(event.target.value)} /></label><div><strong>{formatScheduleDate(businessDate)}</strong><span>{firstShift.length + secondShift.length} scheduled employees</span></div><span className="shift-live-status"><i aria-hidden="true">✓</i>{saving ? 'Saving...' : status}</span></section>
+    <div className="schedule-shift-grid">{renderShift('FIRST', firstShift)}{renderShift('SECOND', secondShift)}</div>
+    <section className="surface-card attendance-review-card"><div className="section-head"><div><p className="section-kicker">Daily Check</p><h2>Attendance for {formatScheduleDate(businessDate)}</h2><p>Salary is credited only after Present is selected.</p></div><span className="saved-pill">{selectedDaySchedule.filter((record) => record.attendanceStatus === 'present').length} present</span></div><div className="attendance-review-list">{selectedDaySchedule.map((record) => <article key={record.id}><div><strong>{record.employeeName}</strong><span>{shiftLabel(record.shiftType)} • {formatPhp(record.dailyRate)}</span></div><em className={`attendance-status is-${record.attendanceStatus}`}>{record.attendanceStatus}</em><div><button type="button" className={record.attendanceStatus === 'present' ? 'is-active' : ''} disabled={saving} onClick={() => confirmAttendance(record, 'present')}>Present</button><button type="button" className={record.attendanceStatus === 'absent' ? 'is-absent' : ''} disabled={saving} onClick={() => confirmAttendance(record, 'absent')}>Absent</button></div></article>)}{selectedDaySchedule.length === 0 ? <p>No employees scheduled for this date.</p> : null}</div></section>
+    <section className="surface-card salary-vault-card"><div className="salary-vault-head"><div><p className="section-kicker">Accrued Salary</p><h2>Employee Salary Vaults</h2><p>Earnings stay here until a future payday payout or advance deduction is recorded.</p></div><div><span>Total in Vaults</span><strong>{formatPhp(totalVaultBalance)}</strong></div></div><div className="vault-date-range"><label><span>Custom From</span><input type="date" value={rangeStart} onChange={(event) => setRangeStart(event.target.value)} /></label><label><span>Custom To</span><input type="date" value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} /></label><div><span>Range Earnings</span><strong>{formatPhp(rangeTotal)}</strong></div></div><div className="salary-vault-list">{vaults.map(({ employee, balance, rangeEarnings, paidDays }) => <article key={employee.id}><div><strong>{employee.name}</strong><span>{paidDays} credited days</span></div><div><small>Custom range</small><strong>{formatPhp(rangeEarnings)}</strong></div><div><small>Vault balance</small><em>{formatPhp(balance)}</em></div></article>)}</div></section>
+  </div>
+}
+
+export function SalaryTrackerScreen({ onBack }: { onBack: () => void }) {
+  const [businessDate, setBusinessDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [shiftType, setShiftType] = useState<ShiftType>('FIRST')
+  const [summaryPeriod, setSummaryPeriod] = useState<'week' | 'month'>('week')
+  const [employees, setEmployees] = useState<EmployeeRecord[]>([])
+  const [attendance, setAttendance] = useState<SalaryAttendanceRecord[]>([])
+  const [status, setStatus] = useState('Loading salary tracker...')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    Promise.all([fetchAdminSetting('employees'), fetchAdminSetting('salary_tracker')])
+      .then(([employeeSetting, salarySetting]) => {
+        if (!active) return
+        const nextEmployees = normalizeEmployeeSetting(employeeSetting)
+        const nextAttendance = normalizeSalaryAttendance(salarySetting)
+        setEmployees(nextEmployees)
+        setAttendance(nextAttendance)
+        writeLocalSalaryAttendance(nextAttendance)
+        setStatus(nextEmployees.length > 0 ? 'Salary tracker loaded.' : 'Add employees in Employee Management first.')
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        const localEmployees = readLocalEmployeeSetting()
+        const localAttendance = readLocalSalaryAttendance()
+        setEmployees(localEmployees)
+        setAttendance(localAttendance)
+        setStatus(localEmployees.length > 0
+          ? 'Loaded salary records from this browser.'
+          : error instanceof Error ? error.message : 'Could not load salary tracker.')
+      })
+    return () => { active = false }
+  }, [])
+
+  const activeEmployees = employees.filter((employee) => employee.isActive)
+  const shiftAttendance = attendance.filter((record) => record.businessDate === businessDate && record.shiftType === shiftType)
+  const selectedEmployeeIds = new Set(shiftAttendance.map((record) => record.employeeId))
+  const shiftTotal = shiftAttendance.reduce((sum, record) => sum + record.dailyRate, 0)
+  const dayAttendance = attendance.filter((record) => record.businessDate === businessDate)
+  const firstShiftTotal = dayAttendance.filter((record) => record.shiftType === 'FIRST').reduce((sum, record) => sum + record.dailyRate, 0)
+  const secondShiftTotal = dayAttendance.filter((record) => record.shiftType === 'SECOND').reduce((sum, record) => sum + record.dailyRate, 0)
+  const summaryRange = salaryPeriodRange(businessDate, summaryPeriod)
+  const summaryAttendance = attendance.filter((record) => record.businessDate >= summaryRange.start && record.businessDate <= summaryRange.end)
+  const employeePayroll = Array.from(summaryAttendance.reduce((payroll, record) => {
+    const current = payroll.get(record.employeeId) ?? { employeeId: record.employeeId, employeeName: record.employeeName, dates: new Map<string, number>(), shifts: 0 }
+    current.employeeName = record.employeeName
+    current.shifts += 1
+    current.dates.set(record.businessDate, Math.max(current.dates.get(record.businessDate) ?? 0, record.dailyRate))
+    payroll.set(record.employeeId, current)
+    return payroll
+  }, new Map<string, { employeeId: string; employeeName: string; dates: Map<string, number>; shifts: number }>()).values())
+    .map((item) => ({
+      employeeId: item.employeeId,
+      employeeName: item.employeeName,
+      days: item.dates.size,
+      shifts: item.shifts,
+      total: Array.from(item.dates.values()).reduce((sum, rate) => sum + rate, 0),
+    }))
+    .sort((left, right) => left.employeeName.localeCompare(right.employeeName))
+  const periodPayrollTotal = employeePayroll.reduce((sum, employee) => sum + employee.total, 0)
+
+  async function persist(nextAttendance: SalaryAttendanceRecord[], message: string) {
+    setSaving(true)
+    setAttendance(nextAttendance)
+    writeLocalSalaryAttendance(nextAttendance)
+    try {
+      await saveAdminSetting('salary_tracker', { attendance: nextAttendance })
+      setStatus(message)
+    } catch (error) {
+      setStatus(error instanceof Error ? `${message} Saved in this browser only: ${error.message}` : `${message} Saved in this browser only.`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function toggleEmployee(employee: EmployeeRecord) {
+    const existing = shiftAttendance.find((record) => record.employeeId === employee.id)
+    if (existing) {
+      void persist(attendance.filter((record) => record.id !== existing.id), `${employee.name} removed from ${shiftLabel(shiftType)}.`)
+      return
+    }
+    const record: SalaryAttendanceRecord = {
+      id: createRandomId('salary-attendance'),
+      businessDate,
+      shiftType,
+      employeeId: employee.id,
+      employeeName: employee.name,
+      dailyRate: employee.dailyRate,
+      recordedAt: new Date().toISOString(),
+    }
+    void persist([...attendance, record], `${employee.name} added to ${shiftLabel(shiftType)} at ${formatPhp(employee.dailyRate)}.`)
+  }
+
+  return (
+    <div className="record-screen shift-admin-screen salary-tracker-screen">
+      <header className="record-header shift-report-header">
+        <button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back"><span aria-hidden="true">&lt;</span></button>
+        <div>
+          <p className="section-kicker">Staff Payroll</p>
+          <h1>Salary Tracker</h1>
+          <p>Select the employees who worked each shift. Pay uses the daily salary saved in Employee Management.</p>
+        </div>
+      </header>
+
+      <section className="surface-card shift-report-controls salary-tracker-controls">
+        <div className="shift-control-row">
+          <label><span>Business Date</span><input type="date" value={businessDate} onChange={(event) => setBusinessDate(event.target.value)} /></label>
+          <div className="segmented-control shift-selector">
+            <button type="button" className={shiftType === 'FIRST' ? 'is-active' : ''} onClick={() => setShiftType('FIRST')}>First Shift</button>
+            <button type="button" className={shiftType === 'SECOND' ? 'is-active' : ''} onClick={() => setShiftType('SECOND')}>Second Shift</button>
+          </div>
+        </div>
+        <span className="shift-live-status"><i aria-hidden="true">✓</i>{saving ? 'Saving salary records...' : status}</span>
+      </section>
+
+      <section className="salary-summary-grid">
+        <article className="surface-card"><span>Employees This Shift</span><strong>{shiftAttendance.length}</strong><small>{shiftLabel(shiftType)}</small></article>
+        <article className="surface-card"><span>Shift Payroll</span><strong>{formatPhp(shiftTotal)}</strong><small>Snapshot of configured daily salaries</small></article>
+        <article className="surface-card"><span>First Shift</span><strong>{formatPhp(firstShiftTotal)}</strong><small>{dayAttendance.filter((record) => record.shiftType === 'FIRST').length} employees</small></article>
+        <article className="surface-card"><span>Second Shift</span><strong>{formatPhp(secondShiftTotal)}</strong><small>{dayAttendance.filter((record) => record.shiftType === 'SECOND').length} employees</small></article>
+      </section>
+
+      <section className="surface-card salary-attendance-card">
+        <div className="section-head">
+          <div><h2>Who worked this shift?</h2><p>Click an employee to add or remove them from the selected shift.</p></div>
+          <span className="saved-pill">{shiftAttendance.length} selected</span>
+        </div>
+        <div className="salary-employee-grid">
+          {activeEmployees.map((employee) => {
+            const selected = selectedEmployeeIds.has(employee.id)
+            return (
+              <button key={employee.id} type="button" className={`salary-employee-card ${selected ? 'is-selected' : ''}`} disabled={saving} onClick={() => toggleEmployee(employee)}>
+                <span className="salary-check" aria-hidden="true">{selected ? '✓' : '+'}</span>
+                <span><strong>{employee.name}</strong><small>{employee.isCashier ? 'Cashier' : 'Employee'}</small></span>
+                <em>{formatPhp(employee.dailyRate)}</em>
+              </button>
+            )
+          })}
+          {activeEmployees.length === 0 ? <div className="sync-empty-state"><strong>No active employees.</strong><p>Add employee names and salaries in Employee Management first.</p></div> : null}
+        </div>
+      </section>
+
+      <section className="surface-card salary-shift-roster">
+        <div className="section-head"><h2>{shiftLabel(shiftType)} Roster</h2><strong>{formatPhp(shiftTotal)}</strong></div>
+        <div className="salary-roster-list">
+          {shiftAttendance.map((record) => <article key={record.id}><div><strong>{record.employeeName}</strong><small>Rate saved {new Date(record.recordedAt).toLocaleString()}</small></div><em>{formatPhp(record.dailyRate)}</em></article>)}
+          {shiftAttendance.length === 0 ? <p>No employees recorded for this shift.</p> : null}
+        </div>
+      </section>
+
+      <section className="surface-card salary-period-summary">
+        <div className="salary-period-head">
+          <div>
+            <p className="section-kicker">Payroll Summary</p>
+            <h2>{summaryPeriod === 'week' ? 'Weekly' : 'Monthly'} Employee Salaries</h2>
+            <span>{formatSalaryDateRange(summaryRange.start, summaryRange.end)}</span>
+          </div>
+          <div className="segmented-control salary-period-selector">
+            <button type="button" className={summaryPeriod === 'week' ? 'is-active' : ''} onClick={() => setSummaryPeriod('week')}>Week</button>
+            <button type="button" className={summaryPeriod === 'month' ? 'is-active' : ''} onClick={() => setSummaryPeriod('month')}>Month</button>
+          </div>
+        </div>
+        <div className="salary-period-total">
+          <span>Total Payroll</span>
+          <strong>{formatPhp(periodPayrollTotal)}</strong>
+          <small>{employeePayroll.length} employees • daily salary counted once per date</small>
+        </div>
+        <div className="salary-payroll-table">
+          <div className="salary-payroll-table-head"><span>Employee</span><span>Days</span><span>Shift entries</span><span>Total Salary</span></div>
+          {employeePayroll.map((employee) => (
+            <article key={employee.employeeId}>
+              <strong>{employee.employeeName}</strong>
+              <span>{employee.days}</span>
+              <span>{employee.shifts}</span>
+              <em>{formatPhp(employee.total)}</em>
+            </article>
+          ))}
+          {employeePayroll.length === 0 ? <p>No salary attendance recorded in this {summaryPeriod}.</p> : null}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function normalizeSalaryAttendance(setting: Record<string, unknown> | null): SalaryAttendanceRecord[] {
+  const rawAttendance = Array.isArray(setting?.attendance) ? setting.attendance : []
+  return rawAttendance.map((rawRecord, index) => {
+    const record = typeof rawRecord === 'object' && rawRecord !== null ? rawRecord as Record<string, unknown> : {}
+    const shiftType: ShiftType = String(record.shiftType ?? record.shift_type).toUpperCase() === 'SECOND' ? 'SECOND' : 'FIRST'
+    return {
+      id: String(record.id ?? createRandomId(`salary-attendance-${index}`)),
+      businessDate: String(record.businessDate ?? record.business_date ?? new Date().toISOString().slice(0, 10)),
+      shiftType,
+      employeeId: String(record.employeeId ?? record.employee_id ?? ''),
+      employeeName: String(record.employeeName ?? record.employee_name ?? 'Employee'),
+      dailyRate: Math.max(0, Number(record.dailyRate ?? record.daily_rate ?? 0) || 0),
+      recordedAt: String(record.recordedAt ?? record.recorded_at ?? new Date().toISOString()),
+    }
+  }).filter((record) => record.employeeId && record.businessDate)
+}
+
+function normalizeScheduledEmployees(setting: Record<string, unknown> | null): ScheduledEmployeeRecord[] {
+  const rawSchedule = Array.isArray(setting?.schedule) ? setting.schedule : []
+  return rawSchedule.map((rawRecord, index) => {
+    const record = typeof rawRecord === 'object' && rawRecord !== null ? rawRecord as Record<string, unknown> : {}
+    const rawStatus = String(record.attendanceStatus ?? record.attendance_status ?? 'scheduled').toLowerCase()
+    const attendanceStatus: ScheduledEmployeeRecord['attendanceStatus'] = rawStatus === 'present' ? 'present' : rawStatus === 'absent' ? 'absent' : 'scheduled'
+    const shiftType: ShiftType = String(record.shiftType ?? record.shift_type).toUpperCase() === 'SECOND' ? 'SECOND' : 'FIRST'
+    return {
+      id: String(record.id ?? createRandomId(`scheduled-employee-${index}`)),
+      businessDate: String(record.businessDate ?? record.business_date ?? ''),
+      shiftType,
+      employeeId: String(record.employeeId ?? record.employee_id ?? ''),
+      employeeName: String(record.employeeName ?? record.employee_name ?? 'Employee'),
+      dailyRate: Math.max(0, Number(record.dailyRate ?? record.daily_rate ?? 0) || 0),
+      attendanceStatus,
+    }
+  }).filter((record) => record.businessDate && record.employeeId)
+}
+
+function readLocalScheduleTracker() {
+  if (typeof window === 'undefined') return { schedule: [] as ScheduledEmployeeRecord[], attendance: [] as SalaryAttendanceRecord[] }
+  try {
+    const setting = JSON.parse(window.localStorage.getItem('admin-web-salary-tracker') ?? '{}') as Record<string, unknown>
+    return { schedule: normalizeScheduledEmployees(setting), attendance: normalizeSalaryAttendance(setting) }
+  } catch {
+    return { schedule: [] as ScheduledEmployeeRecord[], attendance: [] as SalaryAttendanceRecord[] }
+  }
+}
+
+function writeLocalScheduleTracker(schedule: ScheduledEmployeeRecord[], attendance: SalaryAttendanceRecord[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem('admin-web-salary-tracker', JSON.stringify({ schedule, attendance }))
+}
+
+function formatScheduleDate(value: string) {
+  const [year, month, day] = value.split('-').map(Number)
+  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+}
+
+function readLocalSalaryAttendance(): SalaryAttendanceRecord[] {
+  if (typeof window === 'undefined') return []
+  try { return normalizeSalaryAttendance(JSON.parse(window.localStorage.getItem('admin-web-salary-tracker') ?? '{}') as Record<string, unknown>) }
+  catch { return [] }
+}
+
+function writeLocalSalaryAttendance(attendance: SalaryAttendanceRecord[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem('admin-web-salary-tracker', JSON.stringify({ attendance }))
+}
+
+function shiftLabel(shiftType: ShiftType) {
+  return shiftType === 'FIRST' ? 'First Shift' : 'Second Shift'
+}
+
+function salaryPeriodRange(businessDate: string, period: 'week' | 'month') {
+  const [year, month, day] = businessDate.split('-').map(Number)
+  const selected = new Date(Date.UTC(year, Math.max(0, month - 1), day || 1))
+  const start = new Date(selected)
+  const end = new Date(selected)
+  if (period === 'week') {
+    const mondayOffset = (selected.getUTCDay() + 6) % 7
+    start.setUTCDate(selected.getUTCDate() - mondayOffset)
+    end.setUTCDate(start.getUTCDate() + 6)
+  } else {
+    start.setUTCDate(1)
+    end.setUTCMonth(start.getUTCMonth() + 1, 0)
+  }
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) }
+}
+
+function formatSalaryDateRange(start: string, end: string) {
+  const format = (value: string) => {
+    const [year, month, day] = value.split('-').map(Number)
+    return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+  }
+  return `${format(start)} – ${format(end)}`
 }
 
 function normalizeAdminExpenseCategories(setting: Record<string, unknown> | null): AdminExpenseCategory[] {
@@ -6421,8 +6953,14 @@ function CashControlScreen({
       </section>
 
       <div className="cash-action-grid">
+        <button type="button" className="finance-primary-button" onClick={() => onOpenAction({ type: 'expense' })}>
+          Log Expense
+        </button>
+        <button type="button" className="finance-secondary-button" onClick={() => onOpenAction({ type: 'adjust' })}>
+          Adjust Main Safe / GCash
+        </button>
         <button type="button" className="finance-secondary-button" onClick={() => onOpenAction({ type: 'logs' })}>
-          View Safe Audit Log
+          View Finance Log
         </button>
       </div>
     </div>
@@ -6435,15 +6973,19 @@ type CashControlModalSheetProps = {
   movements: CashMovement[]
   transferDraft: TransferDraft
   adjustDraft: AdjustDraft
+  expenseDraft: FinanceExpenseDraft
+  expenseCategories: AdminExpenseCategory[]
   cashPullDraft: CashPullDraft
   error: string
   activeMovement: CashMovement | null
   onClose: () => void
   onTransferDraftChange: (value: TransferDraft | ((current: TransferDraft) => TransferDraft)) => void
   onAdjustDraftChange: (value: AdjustDraft | ((current: AdjustDraft) => AdjustDraft)) => void
+  onExpenseDraftChange: (value: FinanceExpenseDraft | ((current: FinanceExpenseDraft) => FinanceExpenseDraft)) => void
   onCashPullDraftChange: (value: CashPullDraft | ((current: CashPullDraft) => CashPullDraft)) => void
   onSubmitTransfer: () => void
   onSubmitAdjust: () => void
+  onSubmitExpense: () => void
   onSubmitCashPull: () => void
   onOpenLogDetail: (movementId: string) => void
 }
@@ -6454,19 +6996,25 @@ function CashControlModalSheet({
   movements,
   transferDraft,
   adjustDraft,
+  expenseDraft,
+  expenseCategories,
   cashPullDraft,
   error,
   activeMovement,
   onClose,
   onTransferDraftChange,
   onAdjustDraftChange,
+  onExpenseDraftChange,
   onCashPullDraftChange,
   onSubmitTransfer,
   onSubmitAdjust,
+  onSubmitExpense,
   onSubmitCashPull,
   onOpenLogDetail,
 }: CashControlModalSheetProps) {
   const tabletAccounts = accounts.filter((account) => account.type === 'tablet')
+  const adjustableAccounts = accounts.filter((account) => account.id === 'main-safe' || account.id === 'bank-gcash')
+  const selectedExpenseCategory = expenseCategories.find((category) => category.id === expenseDraft.categoryId)
 
   if (modal.type === 'logs') {
     return (
@@ -6557,7 +7105,7 @@ function CashControlModalSheet({
       <section className="bottom-sheet cash-sheet" role="dialog" aria-modal="true" aria-label="Cash control action">
         <div className="sheet-handle" />
         <header className="product-modal-header">
-          <h2>{modal.type === 'transfer' ? 'Transfer' : modal.type === 'adjust' ? 'Adjust' : 'Cash Pull'}</h2>
+          <h2>{modal.type === 'transfer' ? 'Transfer' : modal.type === 'adjust' ? 'Adjust Main Safe / GCash' : modal.type === 'expense' ? 'Log Expense' : 'Cash Pull'}</h2>
           <button type="button" className="sheet-close-button" onClick={onClose} aria-label="Close">
             <CloseIcon />
           </button>
@@ -6623,7 +7171,7 @@ function CashControlModalSheet({
                   value={adjustDraft.accountId}
                   onChange={(event) => onAdjustDraftChange((current) => ({ ...current, accountId: event.target.value }))}
                 >
-                  {accounts.map((account) => (
+                  {adjustableAccounts.map((account) => (
                     <option key={account.id} value={account.id}>
                       {account.name}
                     </option>
@@ -6663,6 +7211,16 @@ function CashControlModalSheet({
                   onChange={(event) => onAdjustDraftChange((current) => ({ ...current, note: event.target.value }))}
                 />
               </label>
+            </div>
+          ) : null}
+
+          {modal.type === 'expense' ? (
+            <div className="cash-form-stack">
+              <label className="input-field"><span>Paid From</span><select className="cash-select" value={expenseDraft.accountId} onChange={(event) => onExpenseDraftChange((current) => ({ ...current, accountId: event.target.value as FinanceExpenseDraft['accountId'] }))}><option value="main-safe">Main Safe</option><option value="bank-gcash">GCash</option></select></label>
+              <label className="input-field"><span>Amount</span><input className="text-input" inputMode="decimal" value={expenseDraft.amount} onChange={(event) => onExpenseDraftChange((current) => ({ ...current, amount: event.target.value }))} /></label>
+              <section className="finance-expense-choice"><span>Main Category <em>Required</em></span>{expenseCategories.length ? <div>{expenseCategories.map((category) => <button key={category.id} type="button" className={category.id === expenseDraft.categoryId ? 'is-selected' : ''} onClick={() => onExpenseDraftChange((current) => ({ ...current, categoryId: category.id, subcategoryId: '' }))}>{category.name}</button>)}</div> : <p>No expense categories configured. Add them in Finance → Expense Categories.</p>}</section>
+              {selectedExpenseCategory ? <section className="finance-expense-choice"><span>Subcategory <em>Optional</em></span>{selectedExpenseCategory.subcategories.length ? <div>{selectedExpenseCategory.subcategories.map((subcategory) => <button key={subcategory.id} type="button" className={subcategory.id === expenseDraft.subcategoryId ? 'is-selected' : ''} onClick={() => onExpenseDraftChange((current) => ({ ...current, subcategoryId: subcategory.id }))}>{subcategory.name}</button>)}</div> : <p>No subcategories for {selectedExpenseCategory.name}.</p>}</section> : null}
+              <label className="input-field"><span>Note / Reason (Optional)</span><textarea className="text-area" value={expenseDraft.note} onChange={(event) => onExpenseDraftChange((current) => ({ ...current, note: event.target.value }))} /></label>
             </div>
           ) : null}
 
@@ -6709,7 +7267,7 @@ function CashControlModalSheet({
           <button
             type="button"
             className="finance-primary-button"
-            onClick={modal.type === 'transfer' ? onSubmitTransfer : modal.type === 'adjust' ? onSubmitAdjust : onSubmitCashPull}
+            onClick={modal.type === 'transfer' ? onSubmitTransfer : modal.type === 'adjust' ? onSubmitAdjust : modal.type === 'expense' ? onSubmitExpense : onSubmitCashPull}
           >
             Save
           </button>
@@ -6896,7 +7454,12 @@ function MenuSettingsScreen({
       <div className="menu-card-list">
         {items.map((item) => (
           <article key={item.id} className="surface-card menu-item-card">
-            <SafeMenuImage className="menu-item-thumb" imagePath={item.imagePath} name={item.name} />
+            <div className="menu-item-image-column">
+              <SafeMenuImage className="menu-item-thumb" imagePath={item.imagePath} name={item.name} />
+              <button type="button" className="menu-image-add-button" onClick={() => onEditItem(item.id)}>
+                {item.imagePath ? 'Change' : '+ Add'}
+              </button>
+            </div>
             <div className="menu-item-copy">
               <strong>{item.name}</strong>
               <small>{item.category} • {item.description}</small>
@@ -7291,7 +7854,12 @@ function MenuSettingsScreenV2({
       <div className="menu-card-list">
         {items.map((item) => (
           <article key={item.id} className="surface-card menu-item-card">
-            <SafeMenuImage className="menu-item-thumb" imagePath={item.imagePath} name={item.name} />
+            <div className="menu-item-image-column">
+              <SafeMenuImage className="menu-item-thumb" imagePath={item.imagePath} name={item.name} />
+              <button type="button" className="menu-image-add-button" onClick={() => onEditItem(item.id)} aria-label={`${item.imagePath ? 'Change' : 'Add'} picture for ${item.name}`}>
+                {item.imagePath ? 'Change' : '+ Add'}
+              </button>
+            </div>
             <div className="menu-item-copy">
               <strong>{item.name}</strong>
               <small>{item.category} • {formatPhp(item.price)} default • {item.halfPrice > 0 ? `${formatPhp(item.halfPrice)} half` : 'No half-order price'}</small>
@@ -7501,6 +8069,7 @@ type ProductEditModalV2Props = {
   category: CategoryItem | null
   categories: CategoryItem[]
   halfOrderPriceSupported: boolean
+  onUploadProductImage: (file: File, nameHint: string) => Promise<string | null>
   onClose: () => void
   onSaveMenuItem: (item: MenuItem) => Promise<void>
   onRemoveMenuItem: (itemId: string) => Promise<void>
@@ -7514,6 +8083,7 @@ function ProductEditModalV2({
   category,
   categories,
   halfOrderPriceSupported,
+  onUploadProductImage,
   onClose,
   onSaveMenuItem,
   onRemoveMenuItem,
@@ -7543,6 +8113,7 @@ function ProductEditModalV2({
   )
   const [menuFormError, setMenuFormError] = useState('')
   const [menuSubmitting, setMenuSubmitting] = useState(false)
+  const [imageUploading, setImageUploading] = useState(false)
   const [categoryDraft, setCategoryDraft] = useState({
     id: category?.id ?? null,
     name: category?.name ?? '',
@@ -7608,8 +8179,33 @@ function ProductEditModalV2({
     }
   }
 
+  async function uploadMenuImage(file: File) {
+    if (!menuDraft) return
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setMenuFormError('Use a JPG, PNG, or WebP image.')
+      return
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      setMenuFormError('The original picture must be 25 MB or smaller.')
+      return
+    }
+
+    setImageUploading(true)
+    setMenuFormError('')
+    try {
+      const preparedFile = await prepareMenuImage(file)
+      const imagePath = await onUploadProductImage(preparedFile, menuDraft.name || 'menu-item')
+      if (!imagePath) throw new Error('Image upload is unavailable. Check the Supabase connection.')
+      setMenuDraft((current) => (current ? { ...current, imagePath } : current))
+    } catch (error) {
+      setMenuFormError(error instanceof Error ? error.message : 'Failed to upload picture.')
+    } finally {
+      setImageUploading(false)
+    }
+  }
+
   if (modal.type === 'menu-item' && menuDraft) {
-    const canSave = menuDraft.name.trim().length > 0 && menuDraft.category.trim().length > 0 && !menuSubmitting
+    const canSave = menuDraft.name.trim().length > 0 && menuDraft.category.trim().length > 0 && !menuSubmitting && !imageUploading
     return (
       <div className="modal-overlay" role="presentation">
         <div className="sheet-backdrop" onClick={onClose} />
@@ -7630,6 +8226,39 @@ function ProductEditModalV2({
             }}
           >
           <div className="product-modal-scroll">
+            <section className="product-modal-section">
+              <h3>Product Picture</h3>
+              <div className="product-image-editor">
+                <SafeMenuImage className="item-preview-thumb" imagePath={menuDraft.imagePath} name={menuDraft.name || 'Menu Item'} />
+                <div className="product-image-controls">
+                  <label className={`image-upload-button ${imageUploading ? 'is-disabled' : ''}`}>
+                    <input
+                      className="sr-only"
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      disabled={imageUploading}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0]
+                        if (file) void uploadMenuImage(file)
+                        event.target.value = ''
+                      }}
+                    />
+                    {imageUploading ? 'Uploading...' : menuDraft.imagePath ? 'Change picture' : '+ Add picture'}
+                  </label>
+                  {menuDraft.imagePath ? (
+                    <button
+                      type="button"
+                      className="image-remove-button"
+                      onClick={() => setMenuDraft((current) => current ? { ...current, imagePath: null } : current)}
+                    >
+                      Remove
+                    </button>
+                  ) : null}
+                  <p className="image-size-helper"><strong>Automatically resized to 800 × 800 px.</strong> Choose any JPG, PNG, or WebP photo up to 25 MB; the center will be cropped into a square.</p>
+                </div>
+              </div>
+            </section>
+
             <section className="product-modal-section">
               <h3>Product Details</h3>
               <div className="cash-form-stack">
@@ -8077,6 +8706,7 @@ type ResetOptionsModalProps = {
   onClearDailyLogs: () => void
   onClearExpensesLog: () => void
   onClearInventory: () => void
+  onClearWorkVault: () => void
 }
 
 function ResetOptionsModal({
@@ -8095,6 +8725,7 @@ function ResetOptionsModal({
   onClearDailyLogs,
   onClearExpensesLog,
   onClearInventory,
+  onClearWorkVault,
 }: ResetOptionsModalProps) {
   const resetConfirmed = value.trim().toUpperCase() === 'RESET'
 
@@ -8151,6 +8782,7 @@ function ResetOptionsModal({
           {renderResetAction('clear-daily-logs', 'Daily Logs', 'Clear ingredient price logs and saved accounting logs.', 'Clear Logs', onClearDailyLogs)}
           {renderResetAction('clear-expenses-log', 'Expenses Log', 'Clear expense entries while keeping other cash movement history.', 'Clear Expenses', onClearExpensesLog, true)}
           {renderResetAction('clear-inventory', 'Inventory', 'Delete inventory items and count history, then zero active sellable stock in Supabase.', 'Clear Inventory', onClearInventory)}
+          {renderResetAction('clear-workvault', 'Schedule & Employee Earnings', 'Clear all WorkVault schedules, attendance confirmations, advances, payments, and employee vault balances. Employee profiles are kept.', 'Clear Schedule & Earnings', onClearWorkVault, true)}
         </div>
 
         {statusMessage ? <p className="reset-status-message">{statusMessage}</p> : null}

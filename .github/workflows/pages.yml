@@ -31,10 +31,22 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
+      - name: Build Android app
+        run: |
+          npm run android:sync
+          ./android/gradlew -p android assembleDebug
+          cp android/app/build/outputs/apk/debug/app-debug.apk public/downloads/ooh-pos-tablet-debug.apk
+
+      - name: Build web app with current APK
         run: npm run build
 
       - name: Configure Pages

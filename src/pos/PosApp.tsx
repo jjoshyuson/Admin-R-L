@@ -16,6 +16,7 @@ import {
   MapPin,
   Pencil,
   Plus,
+  RefreshCw,
   Settings,
   Shirt,
   ShoppingCart,
@@ -26,7 +27,7 @@ import {
   WalletCards,
   X,
 } from 'lucide-react'
-import { fetchAdminSetting, fetchCashMovements, fetchOrders, upsertCashMovements } from '../lib/adminApi'
+import { fetchAdminSetting, fetchCashMovements, fetchOrders, upsertCashMovements, voidOrder } from '../lib/adminApi'
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
 import { fetchPosMenu, getPreviewPosMenu } from '../lib/pos/menuService'
 import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ServiceMode } from '../lib/pos/posTypes'
@@ -38,7 +39,7 @@ import {
   subscribeToOrderEditRequest,
 } from '../lib/orderEditRequests'
 import { hasSupabaseConfig, requireSupabase } from '../lib/supabase/client'
-import { closeOpenShiftSession, createShiftAdjustment, fetchOpenShiftSession, fetchShiftAdjustments, fetchShiftSchedule, openShiftSession, resolveShiftWindow } from '../lib/shiftService'
+import { closeOpenShiftSession, createShiftAdjustment, fetchOpenShiftSession, fetchShiftAdjustments, fetchShiftSchedule, openShiftSession } from '../lib/shiftService'
 import type { ShiftAdjustment, ShiftSchedule, ShiftSession } from '../lib/adminTypes'
 
 type MainTab = 'new-order' | 'ongoing' | 'kitchen' | 'sale-tracker' | 'settings'
@@ -62,6 +63,7 @@ type ReceiptPrintSettings = {
 type EditApprovalRequest = {
   requestId: string | null
   orderId: string
+  action: 'edit' | 'cancel'
   status: 'creating' | 'pending' | 'approved' | 'error'
   message: string
 }
@@ -174,6 +176,7 @@ export function PosApp() {
   const [activeShiftSession, setActiveShiftSession] = useState<ShiftSession | null>(null)
   const [shiftBusy, setShiftBusy] = useState(false)
   const [statusMessage, setStatusMessage] = useState('Loading menu...')
+  const [refreshing, setRefreshing] = useState(false)
   const [nextOrderNumber, setNextOrderNumber] = useState(1)
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
   const [checkoutTarget, setCheckoutTarget] = useState<CheckoutTarget | null>(null)
@@ -254,18 +257,6 @@ export function PosApp() {
     }).catch((error: unknown) => setStatusMessage(error instanceof Error ? error.message : 'Could not load shift status.'))
     return () => { active = false }
   }, [deviceId])
-
-  useEffect(() => {
-    if (!activeShiftSession || !shiftSchedule) return
-    const timer = window.setInterval(() => {
-      if (resolveShiftWindow(new Date(), shiftSchedule).shiftId === activeShiftSession.shiftId) return
-      void closeOpenShiftSession(deviceId).then(() => {
-        setActiveShiftSession(null); setActiveEmployeeId('')
-        setStatusMessage('Scheduled turnover reached. Select the next cashier to clock in.')
-      })
-    }, 30_000)
-    return () => window.clearInterval(timer)
-  }, [activeShiftSession, deviceId, shiftSchedule])
 
   useEffect(() => {
     window.localStorage.setItem('pos-web-auto-print-receipt', autoPrintReceipt ? '1' : '0')
@@ -419,7 +410,11 @@ export function PosApp() {
     if (!editApprovalRequest?.requestId || editApprovalRequest.status !== 'pending') return undefined
     return subscribeToOrderEditRequest(editApprovalRequest.requestId, (request) => {
       if (request.status === 'approved') {
-        beginApprovedEditOrder(editApprovalRequest.orderId, request.approvedBy ?? 'Admin Web')
+        if (editApprovalRequest.action === 'cancel') {
+          void completeApprovedCancellation(editApprovalRequest.orderId, request.approvedBy ?? 'Admin Web')
+        } else {
+          beginApprovedEditOrder(editApprovalRequest.orderId, request.approvedBy ?? 'Admin Web')
+        }
       } else if (request.status === 'cancelled' || request.status === 'expired') {
         setStatusMessage(`Edit request for ${formatPosOrderRef(editApprovalRequest.orderId)} was ${request.status}.`)
         setEditApprovalRequest(null)
@@ -620,7 +615,7 @@ export function PosApp() {
     setEditOrderId(null)
     setSelectedOrderId(orderId)
     setTicketItems([])
-    setStatusMessage(`Adding items to ${formatPosOrderRef(orderId)}. Choose products, then send to kitchen.`)
+    setStatusMessage(`Adding items to ${formatPosOrderRef(orderId)}. Choose products, then prepare the order.`)
     setActiveTab('new-order')
   }
 
@@ -635,6 +630,7 @@ export function PosApp() {
       setEditApprovalRequest({
         requestId: null,
         orderId,
+        action: 'edit',
         status: 'error',
         message: 'Online admin approval is required. This POS cannot approve its own edit request.',
       })
@@ -643,6 +639,7 @@ export function PosApp() {
     setEditApprovalRequest({
       requestId: null,
       orderId,
+      action: 'edit',
       status: 'creating',
       message: 'Sending approval request to Admin Web...',
     })
@@ -657,6 +654,7 @@ export function PosApp() {
       setEditApprovalRequest({
         requestId: request.id,
         orderId,
+        action: 'edit',
         status: 'pending',
         message: 'Waiting for the admin app to approve. Keep this POS online.',
       })
@@ -666,9 +664,79 @@ export function PosApp() {
       setEditApprovalRequest({
         requestId: null,
         orderId,
+        action: 'edit',
         status: 'error',
         message,
       })
+    }
+  }
+
+  async function requestCancelOrder(orderId: string) {
+    const order = orders.find((item) => item.id === orderId)
+    if (!order) {
+      setStatusMessage(`${formatPosOrderRef(orderId)} could not be found for cancellation.`)
+      return
+    }
+    if (!hasSupabaseConfig) {
+      setStatusMessage('Cancel order approval requires online Supabase sync.')
+      setEditApprovalRequest({
+        requestId: null,
+        orderId,
+        action: 'cancel',
+        status: 'error',
+        message: 'Online admin confirmation is required. This POS cannot cancel an order by itself.',
+      })
+      return
+    }
+    setEditApprovalRequest({
+      requestId: null,
+      orderId,
+      action: 'cancel',
+      status: 'creating',
+      message: 'Sending cancellation request to Admin Web...',
+    })
+    try {
+      const request = await createOrderEditRequest({
+        deviceOrderId: order.deviceOrderId,
+        displayOrderId: order.id,
+        deviceId,
+        requestedBy: `${activeEmployeeName} · Cancel order`,
+      })
+      setStatusMessage(`Cancellation request sent for ${formatPosOrderRef(order.id)}. Waiting for Admin Web confirmation.`)
+      setEditApprovalRequest({
+        requestId: request.id,
+        orderId,
+        action: 'cancel',
+        status: 'pending',
+        message: 'Waiting for an admin to confirm cancellation. Keep this POS online.',
+      })
+    } catch (error) {
+      const message = describeOrderEditRequestError(error)
+      setStatusMessage(message)
+      setEditApprovalRequest({ requestId: null, orderId, action: 'cancel', status: 'error', message })
+    }
+  }
+
+  async function completeApprovedCancellation(orderId: string, approvedBy: string) {
+    const order = orders.find((item) => item.id === orderId)
+    if (!order) {
+      setEditApprovalRequest(null)
+      return
+    }
+    try {
+      await voidOrder({
+        deviceOrderId: order.deviceOrderId,
+        voidReason: 'Cancelled from POS after admin confirmation',
+        voidedBy: approvedBy,
+      })
+      setOrders((current) => current.filter((item) => item.id !== orderId))
+      setSelectedOrderId(null)
+      setStatusMessage(`${formatPosOrderRef(order.id)} cancelled with confirmation from ${approvedBy}.`)
+      setEditApprovalRequest(null)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not cancel the approved order.'
+      setStatusMessage(message)
+      setEditApprovalRequest({ requestId: null, orderId, action: 'cancel', status: 'error', message })
     }
   }
 
@@ -836,6 +904,28 @@ export function PosApp() {
     })
   }
 
+  async function refreshPosData() {
+    if (refreshing) return
+    setRefreshing(true)
+    setStatusMessage('Refreshing POS data...')
+
+    try {
+      const [menu, syncedOrders] = await Promise.all([fetchPosMenu(), fetchOrders()])
+      const mappedOrders = syncedOrders.map(mapAdminOrderToRestaurantOrder)
+      const activeOrders = mappedOrders.filter((order) => !order.paid)
+
+      setCategories(menu.categories)
+      setProducts(menu.products)
+      setOrders(activeOrders)
+      setHistory(mappedOrders.filter((order) => order.paid))
+      setStatusMessage(`POS refreshed. ${activeOrders.length} active order${activeOrders.length === 1 ? '' : 's'} loaded.`)
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? `Refresh failed: ${error.message}` : 'Refresh failed. Please try again.')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   return (
     <main className={`pos-shell is-${activeTab} ${primaryNavCollapsed ? 'is-nav-collapsed' : ''} ${activeTab === 'ongoing' || activeTab === 'kitchen' ? 'is-ongoing-screen' : ''}`}>
       <aside className="pos-sidebar">
@@ -930,6 +1020,16 @@ export function PosApp() {
                 >
                   Half
                 </button>
+                <button
+                  type="button"
+                  className="header-icon-button"
+                  aria-label="Refresh POS data"
+                  title="Refresh POS data"
+                  disabled={refreshing}
+                  onClick={() => void refreshPosData()}
+                >
+                  <RefreshCw size={18} className={refreshing ? 'is-spinning' : undefined} aria-hidden="true" />
+                </button>
                 <button type="button" className="header-icon-button" aria-label="Settings" onClick={() => setActiveTab('settings')}><Settings size={18} aria-hidden="true" /></button>
               </div>
             </header>
@@ -998,6 +1098,7 @@ export function PosApp() {
             onGoToPayment={markPaid}
             onViewDetails={requestEditOrder}
             onAddOrder={startAddOrder}
+            onCancelOrder={requestCancelOrder}
           />
         </section>
       ) : null}
@@ -1067,6 +1168,7 @@ export function PosApp() {
       {editApprovalRequest ? (
         <AdminApprovalModal
           orderId={editApprovalRequest.orderId}
+          action={editApprovalRequest.action}
           status={editApprovalRequest.status}
           message={editApprovalRequest.message}
           onCancel={closeEditApprovalRequest}
@@ -1167,11 +1269,11 @@ function SendToKitchenModal({
           <div className="kitchen-note-title">
             <span className="kitchen-note-icon"><Utensils size={22} strokeWidth={1.8} aria-hidden="true" /></span>
             <div>
-              <h2 id="send-kitchen-title">Send to Kitchen</h2>
+              <h2 id="send-kitchen-title">Prepare Order</h2>
               <span>Order {formatPosOrderRef(target.orderNumber)} - {target.itemCount} items</span>
             </div>
           </div>
-          <button type="button" className="modal-close kitchen-note-close" onClick={onCancel} aria-label="Close Send to Kitchen modal">
+          <button type="button" className="modal-close kitchen-note-close" onClick={onCancel} aria-label="Close Prepare Order modal">
             <X size={18} strokeWidth={1.8} aria-hidden="true" />
           </button>
         </header>
@@ -1311,7 +1413,7 @@ function SendToKitchenModal({
           <button type="button" className="modal-secondary" onClick={onCancel}>Cancel</button>
           <button type="button" className="modal-primary" disabled={!canSend} onClick={() => onSend(note)}>
             <Utensils className="send-kitchen-modal__footer-icon" size={18} strokeWidth={1.8} aria-hidden="true" />
-            Send to Kitchen
+            Prepare Order
           </button>
         </footer>
       </section>
@@ -1321,11 +1423,13 @@ function SendToKitchenModal({
 
 function AdminApprovalModal({
   orderId,
+  action,
   status,
   message,
   onCancel,
 }: {
   orderId: string
+  action: EditApprovalRequest['action']
   status: EditApprovalRequest['status']
   message: string
   onCancel: () => void
@@ -1337,13 +1441,15 @@ function AdminApprovalModal({
         <header>
           <div>
             <span>Admin Access</span>
-            <h2 id="admin-approval-title">Edit Request Pending</h2>
+            <h2 id="admin-approval-title">{action === 'cancel' ? 'Cancel Order Request' : 'Edit Request Pending'}</h2>
           </div>
           <button type="button" className="modal-close" onClick={onCancel} aria-label="Close">x</button>
         </header>
         <div className="admin-approval-body">
           <strong>{formatPosOrderRef(orderId)}</strong>
-          <p>Editing an existing order can change kitchen and payment records. Approval must come from Admin Web while both apps are online.</p>
+          <p>{action === 'cancel'
+            ? 'Cancelling removes this order from active sales. An admin must confirm the request from Admin Web.'
+            : 'Editing an existing order can change kitchen and payment records. Approval must come from Admin Web while both apps are online.'}</p>
           <div className="admin-approval-card">
             <span>{isPending ? 'Waiting for admin confirmation' : 'Request not sent'}</span>
             <small>{message}</small>
@@ -1704,11 +1810,11 @@ function OrderTicketPanel({
           <div>
             <span className="ticket-status-icon"><Utensils size={18} aria-hidden="true" /></span>
             <div>
-              <strong>Not Sent</strong>
-              <small>Order has not been sent to kitchen</small>
+              <strong>Not Prepared</strong>
+              <small>Order has not been prepared yet</small>
             </div>
           </div>
-          <button type="button" disabled={ticketItems.length === 0} onClick={onSaveOrder}>Send to Kitchen</button>
+          <button type="button" disabled={ticketItems.length === 0} onClick={onSaveOrder}>Prepare Order</button>
         </article>
         {mode !== 'add' ? (
           <article>
@@ -1764,6 +1870,7 @@ type OngoingOrdersPageProps = {
   onViewDetails: (orderId: string) => void
   onGoToPayment: (orderId: string) => void
   onAddOrder?: (orderId: string) => void
+  onCancelOrder?: (orderId: string) => void
   onApplyPayment?: (orderId: string, payment: OrderPaymentInput) => void
 }
 
@@ -1785,19 +1892,13 @@ function OngoingOrdersBoard({
   onMarkAllServed,
   onViewDetails,
   onAddOrder,
+  onCancelOrder,
 }: OngoingOrdersPageProps) {
-  const [filter, setFilter] = useState<OrderFilter>('all')
   const [sort, setSort] = useState<OrderSort>('oldest')
+  const [viewMode, setViewMode] = useState<'tiles' | 'list'>('tiles')
   const filteredOrders = useMemo(() => {
-    const base = filter === 'all' ? orders : orders.filter((order) => order.status === filter)
-    return [...base].sort((left, right) => sort === 'oldest' ? left.createdAt - right.createdAt : right.createdAt - left.createdAt)
-  }, [filter, orders, sort])
-  const counts = {
-    all: orders.length,
-    preparing: orders.filter((order) => order.status === 'preparing').length,
-    served: orders.filter((order) => order.status === 'served').length,
-    paid: orders.filter((order) => order.status === 'paid').length,
-  }
+    return [...orders].sort((left, right) => sort === 'oldest' ? left.createdAt - right.createdAt : right.createdAt - left.createdAt)
+  }, [orders, sort])
 
   return (
     <section className="ongoing-dashboard">
@@ -1805,24 +1906,18 @@ function OngoingOrdersBoard({
         <div className="ongoing-toolbar">
           <div className="filter-block">
             <p className="eyebrow">Ongoing Orders</p>
-            <div className="filter-pills">
-              <button type="button" className={filter === 'all' ? 'is-active' : ''} onClick={() => setFilter('all')}>All ({counts.all})</button>
-              <button type="button" className={filter === 'preparing' ? 'is-active is-preparing' : 'is-preparing'} onClick={() => setFilter('preparing')}>Preparing ({counts.preparing})</button>
-              <button type="button" className={filter === 'served' ? 'is-active is-served' : 'is-served'} onClick={() => setFilter('served')}>Served ({counts.served})</button>
-              <button type="button" className={filter === 'paid' ? 'is-active is-paid-filter' : 'is-paid-filter'} onClick={() => setFilter('paid')}>Paid ({counts.paid})</button>
-            </div>
           </div>
           <div className="sort-control">
             <span>Sort by:</span>
             <button type="button" className="sort-select" onClick={() => setSort(sort === 'oldest' ? 'newest' : 'oldest')}>
               {sort === 'oldest' ? 'Oldest First' : 'Newest First'} v
             </button>
-            <button type="button" className="grid-mode is-active" aria-label="Grid view"><LayoutGrid size={16} /></button>
-            <button type="button" className="grid-mode" aria-label="List view"><List size={16} /></button>
+            <button type="button" className={`grid-mode ${viewMode === 'tiles' ? 'is-active' : ''}`} aria-label="Tile view" onClick={() => setViewMode('tiles')}><LayoutGrid size={16} /> Tiles</button>
+            <button type="button" className={`grid-mode ${viewMode === 'list' ? 'is-active' : ''}`} aria-label="List view" onClick={() => setViewMode('list')}><List size={16} /> List</button>
           </div>
         </div>
 
-        <div className="ongoing-grid">
+        <div className={`ongoing-grid ${viewMode === 'list' ? 'is-list-view' : ''}`}>
           {filteredOrders.length === 0 ? <EmptyState text="No ongoing orders match this filter." /> : null}
           {filteredOrders.map((order) => (
             <OngoingTrackingCard
@@ -1842,6 +1937,7 @@ function OngoingOrdersBoard({
         onMarkAllServed={onMarkAllServed}
         onViewDetails={onViewDetails}
         onAddOrder={onAddOrder}
+        onCancelOrder={onCancelOrder}
       />
     </section>
   )
@@ -1874,6 +1970,7 @@ function OngoingTrackingCard({
         </div>
         <footer>
           <span>{minutesAgo(order.createdAt)} mins ago</span>
+          <strong className="ongoing-card-price">{formatPhp(orderTotal(order))}</strong>
           <span className="order-card-chevron"><ChevronRight size={18} aria-hidden="true" /></span>
         </footer>
       </div>
@@ -1887,12 +1984,14 @@ function OngoingTrackingDetailPanel({
   onMarkAllServed,
   onViewDetails,
   onAddOrder,
+  onCancelOrder,
 }: {
   order: RestaurantOrder | null
   onToggleItem: (orderId: string, itemId: string, served: boolean) => void
   onMarkAllServed: (orderId: string) => void
   onViewDetails: (orderId: string) => void
   onAddOrder?: (orderId: string) => void
+  onCancelOrder?: (orderId: string) => void
 }) {
   if (!order) {
     return (
@@ -1930,6 +2029,7 @@ function OngoingTrackingDetailPanel({
                 <strong>{item.name}</strong>
                 <small>{item.isHalfOrder ? 'Half Order - ' : ''}{itemCategory(item.name)} - {formatOrderType(item.orderType)}</small>
               </div>
+              <em>{formatPhp(item.price * item.quantity)}</em>
             </label>
           ))}
         </div>
@@ -1942,9 +2042,9 @@ function OngoingTrackingDetailPanel({
         <button type="button" className="send-kitchen" onClick={() => onMarkAllServed(order.id)}>
           <CircleCheckBig size={16} /> {allReady ? 'Mark as Served' : 'Mark All Ready'}
         </button>
-        <button type="button"><Eye size={16} /> View Details</button>
         <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
         <button type="button" className="edit-order-action" onClick={() => onViewDetails(order.id)}><Pencil size={16} /> Edit Order</button>
+        <button type="button" className="cancel-order-action" onClick={() => onCancelOrder?.(order.id)}><X size={16} /> Cancel Order</button>
       </section>
     </aside>
   )
@@ -1959,6 +2059,7 @@ function FinishOrdersBoard({
 }: OngoingOrdersPageProps) {
   const [filter, setFilter] = useState<PaymentFilter>('all')
   const [sort, setSort] = useState<OrderSort>('oldest')
+  const [viewMode, setViewMode] = useState<'tiles' | 'list'>('tiles')
   const filteredOrders = useMemo(() => {
     const base = filter === 'all' ? orders : orders.filter((order) => paymentStatus(order) === filter)
     return [...base].sort((left, right) => sort === 'oldest' ? left.createdAt - right.createdAt : right.createdAt - left.createdAt)
@@ -1988,12 +2089,12 @@ function FinishOrdersBoard({
             <button type="button" className="sort-select" onClick={() => setSort(sort === 'oldest' ? 'newest' : 'oldest')}>
               {sort === 'oldest' ? 'Oldest First' : 'Newest First'} v
             </button>
-            <button type="button" className="grid-mode is-active" aria-label="Grid view">Grid</button>
-            <button type="button" className="grid-mode" aria-label="List view">List</button>
+            <button type="button" className={`grid-mode ${viewMode === 'tiles' ? 'is-active' : ''}`} aria-label="Tile view" onClick={() => setViewMode('tiles')}><LayoutGrid size={16} /> Tiles</button>
+            <button type="button" className={`grid-mode ${viewMode === 'list' ? 'is-active' : ''}`} aria-label="List view" onClick={() => setViewMode('list')}><List size={16} /> List</button>
           </div>
         </div>
 
-        <div className="ongoing-grid">
+        <div className={`ongoing-grid ${viewMode === 'list' ? 'is-list-view' : ''}`}>
           {filteredOrders.length === 0 ? <EmptyState text="No pending payment orders match this filter." /> : null}
           {filteredOrders.map((order) => (
             <FinishOrderCard
@@ -2001,7 +2102,6 @@ function FinishOrdersBoard({
               order={order}
               selected={selectedOrder?.id === order.id}
               onSelect={() => onSelectOrder(order.id)}
-              onToggleItem={onToggleItem}
             />
           ))}
         </div>
@@ -2021,45 +2121,36 @@ function FinishOrderCard({
   order,
   selected,
   onSelect,
-  onToggleItem,
 }: {
   order: RestaurantOrder
   selected: boolean
   onSelect: () => void
-  onToggleItem: (orderId: string, itemId: string, served: boolean) => void
 }) {
   const ready = allItemsServed(order)
   const total = orderTotal(order)
   const balance = orderBalance(order)
   const payStatus = paymentStatus(order)
   return (
-    <article className={`mini-order-card payment-${payStatus} ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''}`} onClick={onSelect}>
-      <header>
-        <strong>{formatPosOrderRef(order.id)}</strong>
-        <time>{formatOrderTime(order.createdAt)}</time>
-      </header>
-      <div className="mini-subhead">
-        <span>Table {tableNumber(order.id)}</span>
-        <span>{formatOrderType(order.orderType)}</span>
-        <span className={`status-pill payment-${payStatus}`}>{paymentStatusLabel(payStatus)}</span>
+    <article className={`mini-order-card payment-order-card payment-${payStatus} ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''}`} onClick={onSelect}>
+      <span className="order-card-icon"><WalletCards size={22} aria-hidden="true" /></span>
+      <div className="order-card-copy">
+        <header>
+          <div>
+            <strong>{formatPosOrderRef(order.id)}</strong>
+            <span>{order.items.length} items • Table {tableNumber(order.id)}</span>
+          </div>
+          <time>{formatOrderTime(order.createdAt)}</time>
+        </header>
+        <div className="mini-subhead">
+          <span>{formatOrderType(order.orderType)}</span>
+          <span className={`status-pill payment-${payStatus}`}>{paymentStatusLabel(payStatus)}</span>
+        </div>
+        <footer>
+          <span>{minutesAgo(order.createdAt)} mins ago</span>
+          <strong className="ongoing-card-price">{payStatus === 'partial' ? `${formatPhp(balance)} due` : formatPhp(total)}</strong>
+          <span className="order-card-chevron"><ChevronRight size={18} aria-hidden="true" /></span>
+        </footer>
       </div>
-      <div className="mini-item-list">
-        {order.items.map((item) => (
-          <label key={item.id} onClick={(event) => event.stopPropagation()}>
-            <input checked={item.served} type="checkbox" onChange={(event) => onToggleItem(order.id, item.id, event.target.checked)} />
-            <span>{item.quantity}</span>
-            <strong>{item.name}<small>{item.isHalfOrder ? 'Half Order - ' : ''}{formatPhp(item.price * item.quantity)}</small></strong>
-          </label>
-        ))}
-      </div>
-      <div className="mini-payment-total">
-        <div><span>Total</span><strong>{formatPhp(total)}</strong></div>
-        {order.paymentReceived > 0 ? <div><span>Paid</span><strong>{formatPhp(order.paymentReceived)}</strong></div> : null}
-        {payStatus === 'partial' ? <div><span>Balance</span><strong>{formatPhp(balance)}</strong></div> : null}
-      </div>
-      <footer>
-        <span>{minutesAgo(order.createdAt)} mins ago</span>
-      </footer>
     </article>
   )
 }
@@ -2780,6 +2871,7 @@ function SaleTrackerPage({
   const [showFinancialHistory, setShowFinancialHistory] = useState(false)
   const [shiftExpenses, setShiftExpenses] = useState<CashMovement[]>([])
   const [shiftAdjustments, setShiftAdjustments] = useState<ShiftAdjustment[]>([])
+  const [refreshRequest, setRefreshRequest] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -2798,7 +2890,8 @@ function SaleTrackerPage({
         setPayments(rows)
         setShiftExpenses(movements.filter((item) => shiftSession && item.movementKind === 'PAY_OUT' && cashMovementBelongsToShift(item, shiftSession)))
         setShiftAdjustments(adjustments.filter((item) => shiftSession && shiftAdjustmentBelongsToShift(item, shiftSession)))
-        setTrackerStatus(`Live Supabase payments synced. ${rows.length} records loaded.`)
+        const currentShiftCount = shiftSession ? rows.filter((payment) => salePaymentBelongsToShift(payment, shiftSession)).length : 0
+        setTrackerStatus(`Live Supabase payments synced. ${currentShiftCount} current-shift records loaded.`)
       } catch (error) {
         if (!active) return
         setTrackerStatus(error instanceof Error ? error.message : 'Could not load payments.')
@@ -2830,7 +2923,7 @@ function SaleTrackerPage({
       active = false
       void supabase.removeChannel(channel)
     }
-  }, [shiftSession?.id])
+  }, [shiftSession?.id, refreshRequest])
 
   const shiftPayments = shiftSession
     ? payments.filter((payment) => salePaymentBelongsToShift(payment, shiftSession))
@@ -2937,7 +3030,7 @@ function SaleTrackerPage({
                 <h2>Transactions</h2>
                 <span>{trackerStatus}</span>
               </div>
-              <button type="button" onClick={() => setTrackerStatus('Real-time payments are listening for Supabase changes.')}>Refresh Status</button>
+              <button type="button" onClick={() => { setTrackerStatus('Refreshing payments...'); setRefreshRequest((value) => value + 1) }}>Refresh Status</button>
             </header>
             <div className="sale-simple-table">
               <div className="sale-simple-table-head">
@@ -3389,8 +3482,6 @@ function SettingsPage({
 
   const settingSections: Array<{ id: SettingsSection; title: string; subtitle: string }> = [
     { id: 'menu', title: 'Menu List', subtitle: `${products.length} products` },
-    { id: 'history', title: 'Order History', subtitle: `${history.length} closed this shift` },
-    { id: 'money', title: 'Money Movements', subtitle: hasSupabaseConfig ? 'Supabase connected' : 'Needs Supabase env' },
     { id: 'printing', title: 'Printing', subtitle: 'Receipt print setup' },
   ]
 
@@ -3618,7 +3709,7 @@ function SettingsPage({
                 <h3>Tablet Printer App</h3>
                 <p>Install this Android wrapper on the tablet for silent Bluetooth thermal receipt printing.</p>
               </div>
-              <a className="settings-primary-button" href="/downloads/ooh-pos-tablet-debug.apk" download>
+              <a className="settings-primary-button" href={`${import.meta.env.BASE_URL}downloads/ooh-pos-tablet-debug.apk`} download>
                 Download APK
               </a>
             </div>
@@ -4335,6 +4426,7 @@ function countProductsForCategory(products: PosMenuProduct[], category: string) 
 async function fetchSalePayments() {
   const supabase = requireSupabase()
   const orderRows = await fetchSalePaymentsFromOrders()
+  const eventRows = await fetchSalePaymentsFromShiftEvents(orderRows)
   const { data, error } = await supabase
     .from('payments')
     .select('id,order_id,customer_name,amount,method,status,created_at,collection_shift_id,shift_session_id')
@@ -4342,12 +4434,43 @@ async function fetchSalePayments() {
 
   if (error) {
     if (isMissingTableError(error)) {
-      return orderRows
+      return mergeSalePaymentRows(eventRows, orderRows)
     }
     throw error
   }
   const paymentRows = (data ?? []).map(mapSalePaymentRow)
-  return mergeSalePaymentRows(paymentRows, orderRows)
+  return mergeSalePaymentRows([...eventRows, ...paymentRows], orderRows)
+}
+
+async function fetchSalePaymentsFromShiftEvents(orderRows: SalePayment[]) {
+  const supabase = requireSupabase()
+  const { data, error } = await supabase
+    .from('shift_payment_events')
+    .select('id,order_id,collection_shift_id,shift_session_id,method,amount,collected_by,collected_at')
+    .order('collected_at', { ascending: false })
+
+  if (error) {
+    if (isMissingTableError(error)) return []
+    throw error
+  }
+
+  const orderById = new Map(orderRows.map((row) => [row.orderId, row]))
+  return (data ?? []).map((row): SalePayment => {
+    const order = orderById.get(String(row.order_id ?? ''))
+    const method = String(row.method ?? 'other').toLowerCase()
+    return {
+      id: String(row.id ?? ''),
+      orderId: String(row.order_id ?? ''),
+      customerName: String(row.collected_by ?? order?.customerName ?? ''),
+      amount: Number(row.amount ?? 0) || 0,
+      method: method === 'cash' || method === 'gcash' ? method : 'other',
+      status: 'paid',
+      createdAt: String(row.collected_at ?? order?.createdAt ?? new Date().toISOString()),
+      items: order?.items ?? [],
+      shiftId: row.collection_shift_id ? String(row.collection_shift_id) : null,
+      shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
+    }
+  })
 }
 
 async function fetchSalePaymentsFromOrders() {
@@ -4380,7 +4503,8 @@ function mapSalePaymentRow(row: Record<string, unknown>): SalePayment {
 
 function mergeSalePaymentRows(paymentRows: SalePayment[], orderRows: SalePayment[]) {
   const orderRowsByOrderId = new Map(orderRows.map((row) => [row.orderId, row]))
-  const merged = paymentRows.map((payment) => {
+  const uniquePaymentRows = paymentRows.filter((payment, index, rows) => rows.findIndex((candidate) => salePaymentKey(candidate) === salePaymentKey(payment)) === index)
+  const merged = uniquePaymentRows.map((payment) => {
     const order = orderRowsByOrderId.get(payment.orderId)
     if (!order) return payment
     return {
@@ -4407,21 +4531,20 @@ function salePaymentKey(payment: SalePayment) {
 
 function salePaymentBelongsToShift(payment: SalePayment, shiftSession: ShiftSession) {
   if (payment.shiftId === shiftSession.shiftId || payment.shiftSessionId === shiftSession.id) return true
-  return recordCreatedDuringShift(payment.createdAt, payment.shiftId, payment.shiftSessionId, shiftSession)
+  return recordCreatedDuringShift(payment.createdAt, shiftSession)
 }
 
 function cashMovementBelongsToShift(movement: CashMovement, shiftSession: ShiftSession) {
   if (movement.shiftId === shiftSession.shiftId || movement.shiftSessionId === shiftSession.id) return true
-  return recordCreatedDuringShift(new Date(movement.createdAtEpochMillis).toISOString(), movement.shiftId, movement.shiftSessionId, shiftSession)
+  return recordCreatedDuringShift(new Date(movement.createdAtEpochMillis).toISOString(), shiftSession)
 }
 
 function shiftAdjustmentBelongsToShift(adjustment: ShiftAdjustment, shiftSession: ShiftSession) {
   if (adjustment.shiftId === shiftSession.shiftId || adjustment.shiftSessionId === shiftSession.id) return true
-  return recordCreatedDuringShift(adjustment.requestedAt, adjustment.shiftId, adjustment.shiftSessionId, shiftSession)
+  return recordCreatedDuringShift(adjustment.requestedAt, shiftSession)
 }
 
-function recordCreatedDuringShift(createdAt: string, shiftId: string | null | undefined, shiftSessionId: string | null | undefined, shiftSession: ShiftSession) {
-  if (shiftId || shiftSessionId) return false
+function recordCreatedDuringShift(createdAt: string, shiftSession: ShiftSession) {
   const created = Date.parse(createdAt)
   const opened = Date.parse(shiftSession.clockedInAt)
   const closed = shiftSession.clockedOutAt ? Date.parse(shiftSession.clockedOutAt) : Date.now()
