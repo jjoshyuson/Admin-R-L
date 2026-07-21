@@ -511,7 +511,12 @@ export function PosApp() {
       setSelectedOrderId(targetEditOrderId)
       setStatusMessage(`${formatPosOrderRef(targetEditOrderId)} edited and sent to kitchen.`)
       setActiveTab('ongoing')
-      printSentKitchenTicket(updatedOrder)
+      const kitchenPrintDelta = buildKitchenPrintDelta(existingOrder, updatedOrder)
+      if (kitchenPrintDelta.items.length > 0) {
+        printSentKitchenTicket(kitchenPrintDelta)
+      } else {
+        setStatusMessage(`${formatPosOrderRef(targetEditOrderId)} updated. No new kitchen items to print.`)
+      }
       await syncOrderSnapshot(updatedOrder, setStatusMessage)
       return
     }
@@ -808,30 +813,31 @@ export function PosApp() {
   }
 
   function updateOrderItem(orderId: string, itemId: string, served: boolean) {
-    let updatedOrder: RestaurantOrder | null = null
-    setOrders((current) => current.map((order) => {
-      if (order.id !== orderId) return order
-      const items = order.items.map((item) => item.id === itemId ? { ...item, served } : item)
-      const isServed = items.every((item) => item.served)
-      updatedOrder = { ...order, items, readyForPayment: isServed, status: isServed ? 'served' : 'preparing' }
-      return updatedOrder
-    }))
-    if (updatedOrder) void syncOrderSnapshot(updatedOrder, setStatusMessage)
+    const order = orders.find((item) => item.id === orderId)
+    if (!order) return
+    const items = order.items.map((item) => item.id === itemId ? { ...item, served } : item)
+    const isServed = items.every((item) => item.served)
+    const updatedOrder: RestaurantOrder = {
+      ...order,
+      items,
+      readyForPayment: isServed,
+      status: isServed ? 'served' : 'preparing',
+    }
+    setOrders((current) => current.map((item) => item.id === orderId ? updatedOrder : item))
+    void syncOrderSnapshot(updatedOrder, setStatusMessage)
   }
 
   function markAllServed(orderId: string) {
-    let updatedOrder: RestaurantOrder | null = null
-    setOrders((current) => current.map((order) => {
-      if (order.id !== orderId) return order
-      updatedOrder = {
-        ...order,
-        status: 'served',
-        readyForPayment: true,
-        items: order.items.map((item) => ({ ...item, served: true })),
-      }
-      return updatedOrder
-    }))
-    if (updatedOrder) void syncOrderSnapshot(updatedOrder, setStatusMessage)
+    const order = orders.find((item) => item.id === orderId)
+    if (!order) return
+    const updatedOrder: RestaurantOrder = {
+      ...order,
+      status: 'served',
+      readyForPayment: true,
+      items: order.items.map((item) => ({ ...item, served: true })),
+    }
+    setOrders((current) => current.map((item) => item.id === orderId ? updatedOrder : item))
+    void syncOrderSnapshot(updatedOrder, setStatusMessage)
     setSelectedOrderId(orderId)
     setActiveTab('kitchen')
     closeCompletedOrders()
@@ -4442,6 +4448,18 @@ async function fetchSalePayments() {
   return mergeSalePaymentRows([...eventRows, ...paymentRows], orderRows)
 }
 
+function buildKitchenPrintDelta(previousOrder: RestaurantOrder, updatedOrder: RestaurantOrder): RestaurantOrder {
+  const previousQuantityByItemId = new Map(previousOrder.items.map((item) => [item.id, item.quantity]))
+  const items = updatedOrder.items.flatMap((item) => {
+    const addedQuantity = item.quantity - (previousQuantityByItemId.get(item.id) ?? 0)
+    return addedQuantity > 0 ? [{ ...item, quantity: addedQuantity }] : []
+  })
+  return {
+    ...updatedOrder,
+    items,
+  }
+}
+
 async function fetchSalePaymentsFromShiftEvents(orderRows: SalePayment[]) {
   const supabase = requireSupabase()
   const { data, error } = await supabase
@@ -4986,7 +5004,9 @@ function buildSupabaseOrderPayload(order: RestaurantOrder, includeWorkflowFields
 
 function orderStatusForSupabase(order: RestaurantOrder) {
   if (order.paid || order.status === 'paid') return 'PAID'
-  if (allItemsServed(order) || order.readyForPayment || order.status === 'served') return 'PENDING_PAYMENT'
+  // The shared schema uses SERVED for orders awaiting payment. The POS mapper
+  // presents SERVED as Pending Payment when the order is loaded on any device.
+  if (allItemsServed(order) || order.readyForPayment || order.status === 'served') return 'SERVED'
   return 'PREPARING'
 }
 
