@@ -124,6 +124,7 @@ type OrderItem = {
   price: number
   served: boolean
   paidQuantity: number
+  kitchenPrintedQuantity: number
   orderType: OrderType
   isHalfOrder: boolean
 }
@@ -146,6 +147,7 @@ type RestaurantOrder = {
 }
 
 const defaultCategoryNames = ['Meals', 'Drinks', 'Add-ons', 'Others']
+const posAppVersion = 'vA03'
 const taxRate = 0
 const paymentModeTiles = [
   { id: 'full', label: 'Full Payment', helper: 'Pay full amount', icon: '$' },
@@ -466,16 +468,20 @@ export function PosApp() {
   }
 
   function printSentKitchenTicket(order: RestaurantOrder) {
-    printOrderDocument(order, 'kitchen-ticket', setStatusMessage, 1, receiptPrintSettings, menuCategoriesEnabled, categoryByProductId)
+    return printOrderDocument(order, 'kitchen-ticket', setStatusMessage, 1, receiptPrintSettings, menuCategoriesEnabled, categoryByProductId)
   }
 
   function reprintKitchenTicket(orderId: string) {
     const order = orders.find((item) => item.id === orderId)
     if (!order) return
-    printSentKitchenTicket({
+    const printed = printSentKitchenTicket({
       ...order,
       paymentNotes: ['REPRINT', order.paymentNotes].filter(Boolean).join(' · '),
     })
+    if (!printed) return
+    const printedOrder = markKitchenItemsPrinted(order)
+    setOrders((current) => current.map((item) => item.id === orderId ? printedOrder : item))
+    void syncOrderSnapshot(printedOrder, setStatusMessage)
   }
 
   async function saveOrder(note: string) {
@@ -496,6 +502,7 @@ export function PosApp() {
           price: item.price,
           served: existing?.served ?? false,
           paidQuantity: existing ? Math.min(existing.paidQuantity, item.quantity) : 0,
+          kitchenPrintedQuantity: existing ? Math.min(existing.kitchenPrintedQuantity, item.quantity) : 0,
           orderType: item.orderType,
           isHalfOrder: item.isHalfOrder,
         }
@@ -524,7 +531,11 @@ export function PosApp() {
       const kitchenPrintDelta = buildKitchenPrintDelta(existingOrder, updatedOrder)
       await syncOrderSnapshot(updatedOrder, setStatusMessage)
       if (kitchenPrintDelta.items.length > 0) {
-        printSentKitchenTicket(kitchenPrintDelta)
+        if (printSentKitchenTicket(kitchenPrintDelta)) {
+          const printedOrder = markKitchenItemsPrinted(updatedOrder, new Set(kitchenPrintDelta.items.map((item) => item.id)))
+          setOrders((current) => current.map((item) => item.id === targetEditOrderId ? printedOrder : item))
+          await syncOrderSnapshot(printedOrder, setStatusMessage)
+        }
       } else {
         setStatusMessage(`${formatPosOrderRef(targetEditOrderId)} updated. No new kitchen items to print.`)
       }
@@ -545,6 +556,7 @@ export function PosApp() {
         price: item.price,
         served: false,
         paidQuantity: 0,
+        kitchenPrintedQuantity: 0,
         orderType: item.orderType,
         isHalfOrder: item.isHalfOrder,
       }))
@@ -579,11 +591,16 @@ export function PosApp() {
       setStatusMessage(`${formatPosOrderRef(targetOrderId)} add order sent to kitchen.`)
       setActiveTab('ongoing')
       await syncOrderSnapshot(updatedOrder, setStatusMessage)
-      printSentKitchenTicket({
+      const appendedTicket = {
         ...updatedOrder,
         items: appendedItems,
         paymentNotes: note ? `Add order: ${note}` : 'Add order',
-      })
+      }
+      if (printSentKitchenTicket(appendedTicket)) {
+        const printedOrder = markKitchenItemsPrinted(updatedOrder, new Set(appendedItems.map((item) => item.id)))
+        setOrders((current) => current.map((item) => item.id === targetOrderId ? printedOrder : item))
+        await syncOrderSnapshot(printedOrder, setStatusMessage)
+      }
       return
     }
     const createdAt = Date.now()
@@ -599,6 +616,7 @@ export function PosApp() {
         price: item.price,
         served: false,
         paidQuantity: 0,
+        kitchenPrintedQuantity: 0,
         orderType: item.orderType,
         isHalfOrder: item.isHalfOrder,
       })),
@@ -622,7 +640,11 @@ export function PosApp() {
     setActiveTab('ongoing')
     await syncOrderSnapshot(order, setStatusMessage)
     await syncPaymentSnapshot(order, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
-    printSentKitchenTicket(order)
+    if (printSentKitchenTicket(order)) {
+      const printedOrder = markKitchenItemsPrinted(order)
+      setOrders((current) => current.map((item) => item.id === order.id ? printedOrder : item))
+      await syncOrderSnapshot(printedOrder, setStatusMessage)
+    }
   }
 
   function startAddOrder(orderId: string) {
@@ -797,6 +819,7 @@ export function PosApp() {
         price: item.price,
         served: true,
         paidQuantity: item.quantity,
+        kitchenPrintedQuantity: 0,
         orderType: item.orderType,
         isHalfOrder: item.isHalfOrder,
       })),
@@ -957,6 +980,7 @@ export function PosApp() {
           <span className="pos-logo-mark"><ShoppingCart size={20} aria-hidden="true" /></span>
           <div>
             <span>OOH POS</span>
+            <em className="pos-app-version">{posAppVersion}</em>
             <strong>{tabTitle(activeTab)}</strong>
             <small>{statusMessage}</small>
           </div>
@@ -1973,6 +1997,7 @@ function OngoingTrackingCard({
   onSelect: () => void
 }) {
   const ready = allItemsServed(order)
+  const kitchenPrinted = order.items.length > 0 && order.items.every((item) => item.kitchenPrintedQuantity >= item.quantity)
   return (
     <article className={`mini-order-card ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''}`} onClick={onSelect}>
       <span className="order-card-icon"><Utensils size={24} aria-hidden="true" /></span>
@@ -1987,6 +2012,7 @@ function OngoingTrackingCard({
         <div className="mini-subhead">
           <span>{formatOrderType(order.orderType)}</span>
           <span className={`status-pill status-${order.status}`}>{statusLabel(order.status)}</span>
+          {!kitchenPrinted ? <span className="print-status-pill is-not-printed">NOT PRINTED</span> : null}
         </div>
         <footer>
           <span>{minutesAgo(order.createdAt)} mins ago</span>
@@ -4212,6 +4238,7 @@ function mapAdminOrderToRestaurantOrder(order: OrderRecord): RestaurantOrder {
       price,
       served: itemServed,
       paidQuantity: paid ? quantity : 0,
+      kitchenPrintedQuantity: Math.min(quantity, Math.max(0, Number(item.kitchenPrintedQuantity) || 0)),
       orderType: normalizeOrderType(item.serviceMode || order.serviceMode),
       isHalfOrder: Boolean(item.isHalfOrder),
     }
@@ -4377,22 +4404,24 @@ function printOrderDocument(
   settings: ReceiptPrintSettings = readReceiptPrintSettings(),
   kitchenCategorySettings: Record<string, boolean> = readKitchenPrintCategorySettings(),
   categoryByProductId: Map<string, string> = new Map(),
-) {
+): boolean {
   try {
     const printOrder = toCompletedPrintOrder(order, documentType === 'kitchen-ticket' ? { kitchenCategorySettings, categoryByProductId } : undefined)
     if (documentType === 'kitchen-ticket' && printOrder.items.length === 0) {
       setStatusMessage(`${formatPosOrderRef(order.id)} has no items in the selected kitchen print categories.`)
-      return
+      return false
     }
     printPosDocument(printOrder, documentType, { copies, ...settings })
     const copyLabel = documentType === 'customer-receipt' && copies > 1 ? ` (${copies} copies)` : ''
     setStatusMessage(`${formatPosOrderRef(order.id)} ${documentType === 'kitchen-ticket' ? 'kitchen ticket' : 'receipt'} sent to printer${copyLabel}.`)
+    return true
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Could not print order.'
     setStatusMessage(message)
     if (message.toLowerCase().includes('paper is out')) {
       window.alert(message)
     }
+    return false
   }
 }
 
@@ -4539,6 +4568,15 @@ function buildKitchenPrintDelta(previousOrder: RestaurantOrder, updatedOrder: Re
   return {
     ...updatedOrder,
     items,
+  }
+}
+
+function markKitchenItemsPrinted(order: RestaurantOrder, itemIds?: Set<string>): RestaurantOrder {
+  return {
+    ...order,
+    items: order.items.map((item) => itemIds && !itemIds.has(item.id)
+      ? item
+      : { ...item, kitchenPrintedQuantity: item.quantity }),
   }
 }
 
@@ -5062,6 +5100,7 @@ function buildSupabaseOrderPayload(order: RestaurantOrder, includeWorkflowFields
       kitchenStatus: item.served ? 'SERVED' : 'PREPARING',
       isChecked: item.served,
       paidQuantity: item.paidQuantity,
+      kitchenPrintedQuantity: item.kitchenPrintedQuantity,
     })),
     created_at: new Date(order.createdAt).toISOString(),
     uploaded_at: new Date().toISOString(),

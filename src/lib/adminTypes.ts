@@ -35,6 +35,7 @@ export type OrderItemRecord = {
   lineTotal: number
   kitchenStatus?: string
   isChecked?: boolean
+  kitchenPrintedQuantity?: number
 }
 
 export type OrderRecord = {

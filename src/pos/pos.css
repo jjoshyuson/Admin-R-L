@@ -5752,6 +5752,16 @@ h1 {
   display: none;
 }
 
+.pos-sidebar-brand .pos-app-version {
+  color: rgba(255, 255, 255, 0.72);
+  display: block;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin-top: 2px;
+}
+
 .pos-section-nav {
   gap: 10px;
   margin-top: 22px;
@@ -6551,6 +6561,19 @@ h1 {
   justify-content: space-between;
   margin-top: 2px;
   padding-top: 9px;
+}
+
+.pos-shell.is-ongoing .print-status-pill {
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 4px 8px;
+}
+
+.pos-shell.is-ongoing .print-status-pill.is-not-printed {
+  background: #fee2e2;
+  color: #b91c1c;
 }
 
 .pos-shell.is-ongoing .ongoing-card-price {

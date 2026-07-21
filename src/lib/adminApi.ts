@@ -269,6 +269,7 @@ export async function fetchOrders(): Promise<OrderRecord[]> {
               if (item.price != null) mapped.price = Number(item.price)
               if (item.kitchenStatus != null) mapped.kitchenStatus = String(item.kitchenStatus)
               if (item.isChecked != null) mapped.isChecked = Boolean(item.isChecked)
+              if (item.kitchenPrintedQuantity != null) mapped.kitchenPrintedQuantity = Number(item.kitchenPrintedQuantity)
               return mapped
             })
           : [],
