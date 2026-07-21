@@ -890,6 +890,26 @@ h1 {
   color: #ffffff;
 }
 
+.table-grid button.is-occupied {
+  background: #e5e7eb;
+  border-color: #cbd5e1;
+  color: #64748b;
+  opacity: 0.82;
+}
+
+.table-grid button.is-occupied small {
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.table-grid button.is-occupied.is-selected {
+  background: #6b7280;
+  border-color: #4b5563;
+  color: #ffffff;
+  opacity: 1;
+}
+
 .color-grid .send-kitchen-modal__shirt-icon {
   fill: currentColor;
 }

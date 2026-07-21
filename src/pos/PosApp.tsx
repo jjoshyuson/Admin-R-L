@@ -147,7 +147,7 @@ type RestaurantOrder = {
 }
 
 const defaultCategoryNames = ['Meals', 'Drinks', 'Add-ons', 'Others']
-const posAppVersion = 'vA03'
+const posAppVersion = 'vA04'
 const taxRate = 0
 const paymentModeTiles = [
   { id: 'full', label: 'Full Payment', helper: 'Pay full amount', icon: '$' },
@@ -1200,6 +1200,7 @@ export function PosApp() {
       {kitchenNoteTarget ? (
         <SendToKitchenModal
           target={kitchenNoteTarget}
+          occupiedTables={buildOccupiedTableMap(orders, kitchenNoteTarget.editOrderId ?? kitchenNoteTarget.appendToOrderId)}
           onCancel={() => setKitchenNoteTarget(null)}
           onSend={(note) => {
             void saveOrder(note)
@@ -1272,10 +1273,12 @@ const kitchenIdentifierTags = ['Glasses']
 
 function SendToKitchenModal({
   target,
+  occupiedTables,
   onCancel,
   onSend,
 }: {
   target: KitchenNoteTarget
+  occupiedTables: Record<string, 'Preparing' | 'Pending Payment'>
   onCancel: () => void
   onSend: (note: string) => void
 }) {
@@ -1295,6 +1298,7 @@ function SendToKitchenModal({
     kitchenNoteValue ? `Kitchen: ${kitchenNoteValue}` : '',
   ].filter(Boolean).join(' | ')
   const canSend = selectedNotes.length > 0 || customNoteValue.length > 0 || kitchenNoteValue.length > 0
+  const selectedTableStatus = selectedTable ? occupiedTables[selectedTable] : undefined
 
   function addCustomElement() {
     const value = customElementDraft.trim()
@@ -1322,7 +1326,9 @@ function SendToKitchenModal({
         <div className="kitchen-note-body">
           <div className="kitchen-note-warning">
             <CircleAlert className="send-kitchen-modal__warning-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
-            <p>Please add a note before sending to the kitchen.</p>
+            <p>{selectedTableStatus
+              ? `${selectedTable} already has an order under ${selectedTableStatus}. You may continue, but confirm this is the correct table.`
+              : 'Please add a note before sending to the kitchen.'}</p>
           </div>
 
           <div className="kitchen-note-section">
@@ -1331,17 +1337,22 @@ function SendToKitchenModal({
               <span>Table <em>(Location)</em></span>
             </strong>
             <div className="kitchen-option-grid table-grid" aria-label="Table location">
-              {kitchenTableTags.map((tag) => (
-                <button
-                  key={tag}
-                  type="button"
-                  className={selectedTable === tag ? 'is-selected' : ''}
-                  onClick={() => setSelectedTable((current) => current === tag ? '' : tag)}
-                >
-                  <TableIcon className="send-kitchen-modal__option-icon" size={22} strokeWidth={1.8} aria-hidden="true" />
-                  <span>{tag}</span>
-                </button>
-              ))}
+              {kitchenTableTags.map((tag) => {
+                const occupiedStatus = occupiedTables[tag]
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    className={`${selectedTable === tag ? 'is-selected' : ''} ${occupiedStatus ? 'is-occupied' : ''}`}
+                    onClick={() => setSelectedTable((current) => current === tag ? '' : tag)}
+                    aria-label={`${tag}${occupiedStatus ? `, occupied, ${occupiedStatus}` : ', available'}`}
+                  >
+                    <TableIcon className="send-kitchen-modal__option-icon" size={22} strokeWidth={1.8} aria-hidden="true" />
+                    <span>{tag}</span>
+                    {occupiedStatus ? <small>{occupiedStatus}</small> : null}
+                  </button>
+                )
+              })}
             </div>
           </div>
 
@@ -4525,6 +4536,18 @@ function clampAmount(value: string, max: number) {
 function tableNumber(orderId: string) {
   const numeric = Number(orderId.replace(/\D/g, '')) || 1
   return (numeric % 6) + 1
+}
+
+function buildOccupiedTableMap(orders: RestaurantOrder[], excludedOrderId?: string): Record<string, 'Preparing' | 'Pending Payment'> {
+  return orders.reduce<Record<string, 'Preparing' | 'Pending Payment'>>((occupied, order) => {
+    if (order.id === excludedOrderId || order.paid) return occupied
+    const match = order.paymentNotes.match(/\bTable\s+([1-6])\b/i)
+    if (!match) return occupied
+    const table = `Table ${match[1]}`
+    const status = order.readyForPayment ? 'Pending Payment' : 'Preparing'
+    if (!occupied[table] || status === 'Pending Payment') occupied[table] = status
+    return occupied
+  }, {})
 }
 
 function itemCategory(itemName: string) {
