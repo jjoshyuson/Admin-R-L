@@ -13,6 +13,15 @@ export type PrintOptions = {
 type NativePrinterBridge = {
   printReceipt?: (orderJson: string) => string | void
   printKitchenTicket?: (orderJson: string) => string | void
+  checkPrinterStatus?: () => string | void
+}
+
+export type NativePrinterStatus = {
+  supported: boolean
+  state: 'READY' | 'PAPER_LOW' | 'PAPER_OUT' | 'UNSUPPORTED' | 'ERROR' | 'WEB_ONLY'
+  rawStatus?: number
+  printer?: string
+  message: string
 }
 
 declare global {
@@ -42,6 +51,26 @@ export function printPosDocument(order: CompletedOrder, documentType: PrintDocum
   }
 
   openPrintDocument(order, documentType, copies, options)
+}
+
+export function checkNativePrinterStatus(): NativePrinterStatus {
+  const nativePrinter = window.OohPrinter ?? window.AndroidPrinter
+  if (!nativePrinter?.checkPrinterStatus) {
+    return {
+      supported: false,
+      state: 'WEB_ONLY',
+      message: 'Paper-sensor checks require the latest Android printer app.',
+    }
+  }
+  const response = nativePrinter.checkPrinterStatus()
+  if (typeof response !== 'string') {
+    return { supported: false, state: 'ERROR', message: 'Printer returned no diagnostic response.' }
+  }
+  try {
+    return JSON.parse(response) as NativePrinterStatus
+  } catch {
+    return { supported: false, state: 'ERROR', message: 'Printer returned an unreadable diagnostic response.' }
+  }
 }
 
 function buildNativePrintOrder(order: CompletedOrder, options: PrintOptions) {

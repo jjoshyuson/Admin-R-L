@@ -31,7 +31,7 @@ import { fetchAdminSetting, fetchCashMovements, fetchOrders, upsertCashMovements
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
 import { fetchPosMenu, getPreviewPosMenu } from '../lib/pos/menuService'
 import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ServiceMode } from '../lib/pos/posTypes'
-import { printPosDocument, type PrintDocumentType, type ReceiptDetailMode, type ReceiptPaperWidth } from '../lib/pos/printService'
+import { checkNativePrinterStatus, printPosDocument, type NativePrinterStatus, type PrintDocumentType, type ReceiptDetailMode, type ReceiptPaperWidth } from '../lib/pos/printService'
 import {
   cancelOrderEditRequest,
   createOrderEditRequest,
@@ -43,6 +43,7 @@ import { closeOpenShiftSession, createShiftAdjustment, fetchOpenShiftSession, fe
 import type { ShiftAdjustment, ShiftSchedule, ShiftSession } from '../lib/adminTypes'
 
 type MainTab = 'new-order' | 'ongoing' | 'kitchen' | 'sale-tracker' | 'settings'
+type PrinterDetectionLogEntry = NativePrinterStatus & { checkedAt: string }
 type OrderStatus = 'preparing' | 'served' | 'paid'
 type OrderType = Extract<ServiceMode, 'DINE IN' | 'TAKE OUT'>
 type OrderFilter = 'all' | OrderStatus
@@ -3409,6 +3410,7 @@ function SettingsPage({
   const [movementAmount, setMovementAmount] = useState('')
   const [movementNote, setMovementNote] = useState('')
   const [printSettingsStatus, setPrintSettingsStatus] = useState('Receipt settings are saved on this POS browser.')
+  const [printerDetectionLog, setPrinterDetectionLog] = useState<PrinterDetectionLogEntry[]>(readPrinterDetectionLog)
   const [activeMenuListCategory, setActiveMenuListCategory] = useState('All Items')
 
   useEffect(() => {
@@ -3427,6 +3429,10 @@ function SettingsPage({
       active = false
     }
   }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem('pos-web-printer-detection-log', JSON.stringify(printerDetectionLog))
+  }, [printerDetectionLog])
 
   const cashMovements = movements.filter((movement) => movement.accountId !== 'bank-gcash')
   const gcashMovements = movements.filter((movement) => movement.accountId === 'bank-gcash')
@@ -3484,6 +3490,13 @@ function SettingsPage({
     } catch (error) {
       setPrintSettingsStatus(error instanceof Error ? error.message : 'Could not open test receipt.')
     }
+  }
+
+  function checkPaperSensor() {
+    const result = checkNativePrinterStatus()
+    const entry: PrinterDetectionLogEntry = { ...result, checkedAt: new Date().toISOString() }
+    setPrinterDetectionLog((current) => [entry, ...current].slice(0, 10))
+    setPrintSettingsStatus(`${result.state}: ${result.message}`)
   }
 
   const settingSections: Array<{ id: SettingsSection; title: string; subtitle: string }> = [
@@ -3707,8 +3720,23 @@ function SettingsPage({
               </div>
             </div>
             <div className="settings-card">
-              <h3>Web Printer Notes</h3>
-              <p>POS Web uses the browser print window. Select the thermal printer there, then keep the browser's saved printer preferences for daily cashier use.</p>
+              <h3>Paper Sensor Diagnostic</h3>
+              <p>Remove the paper, close the printer cover, then run the check. Some printer models do not return sensor data over Bluetooth.</p>
+              <div className="settings-action-row">
+                <button type="button" className="settings-primary-button" onClick={checkPaperSensor}>Check Paper Sensor</button>
+                <span>{printerDetectionLog[0]?.state ?? 'Not checked yet'}</span>
+              </div>
+              <div className="movement-list">
+                {printerDetectionLog.map((entry) => (
+                  <article key={entry.checkedAt}>
+                    <div>
+                      <strong>{entry.state} · {entry.printer || 'No printer identified'}</strong>
+                      <span>{entry.message}</span>
+                    </div>
+                    <em>{entry.rawStatus == null ? 'No raw byte' : `0x${entry.rawStatus.toString(16).padStart(2, '0').toUpperCase()}`}</em>
+                  </article>
+                ))}
+              </div>
             </div>
             <div className="settings-card tablet-app-download-card">
               <div>
@@ -3967,6 +3995,15 @@ function readReceiptPrintSettings(): ReceiptPrintSettings {
       detailMode: 'standard',
       includeOrderNote: true,
     }
+  }
+}
+
+function readPrinterDetectionLog(): PrinterDetectionLogEntry[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem('pos-web-printer-detection-log') ?? '[]')
+    return Array.isArray(parsed) ? parsed.slice(0, 10) as PrinterDetectionLogEntry[] : []
+  } catch {
+    return []
   }
 }
 
@@ -4444,6 +4481,7 @@ async function fetchSalePayments() {
     }
     throw error
   }
+
   const paymentRows = (data ?? []).map(mapSalePaymentRow)
   return mergeSalePaymentRows([...eventRows, ...paymentRows], orderRows)
 }

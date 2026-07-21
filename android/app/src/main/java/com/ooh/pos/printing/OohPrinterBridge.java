@@ -27,6 +27,22 @@ public class OohPrinterBridge {
         return status(printer.printKitchenTicket(orderJson));
     }
 
+    @JavascriptInterface
+    public String checkPrinterStatus() {
+        BluetoothEscPosPrinter.PrinterStatusResult result = printer.checkPrinterStatus();
+        try {
+            JSONObject json = new JSONObject()
+                .put("supported", result.supported)
+                .put("state", result.state)
+                .put("printer", result.printer)
+                .put("message", result.message);
+            if (result.rawStatus != null) json.put("rawStatus", result.rawStatus);
+            return json.toString();
+        } catch (Exception ignored) {
+            return "{\"supported\":false,\"state\":\"ERROR\",\"message\":\"Printer status response failed.\"}";
+        }
+    }
+
     private String status(BluetoothEscPosPrinter.PrintResult result) {
         return status(result.success, result.message);
     }

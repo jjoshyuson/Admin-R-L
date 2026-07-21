@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.util.Log;
 
 import androidx.core.content.ContextCompat;
 
@@ -16,6 +17,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.text.NumberFormat;
 import java.text.SimpleDateFormat;
@@ -24,6 +26,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 public class BluetoothEscPosPrinter {
+    private static final String LOG_TAG = "OohPrinterStatus";
     private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
     private static final String KEY_PRINTER_ADDRESS = "printer-address";
     private static final int PAPER_COLUMNS_58MM = 32;
@@ -49,6 +52,28 @@ public class BluetoothEscPosPrinter {
 
     public PrintResult printKitchenTicket(String orderJson) {
         return print(orderJson, DocumentType.KITCHEN);
+    }
+
+    public PrinterStatusResult checkPrinterStatus() {
+        if (!hasBluetoothConnectPermission()) {
+            return statusError("Bluetooth permission is required before checking printer status.");
+        }
+        BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+        if (adapter == null) return statusError("This device does not support Bluetooth.");
+        if (!adapter.isEnabled()) return statusError("Bluetooth is turned off.");
+
+        try {
+            BluetoothDevice printer = findPrinter(adapter);
+            if (printer == null) return statusError("No paired Bluetooth printer found.");
+            PrinterStatusResult result = readPaperStatus(printer);
+            Log.i(LOG_TAG, "printer=" + result.printer + " state=" + result.state + " raw=" + result.rawStatus + " message=" + result.message);
+            return result;
+        } catch (Exception error) {
+            String message = error.getMessage();
+            PrinterStatusResult result = statusError(message == null || message.isEmpty() ? "Printer status check failed." : message);
+            Log.e(LOG_TAG, result.message, error);
+            return result;
+        }
     }
 
     private PrintResult print(String orderJson, DocumentType type) {
@@ -117,6 +142,38 @@ public class BluetoothEscPosPrinter {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private PrinterStatusResult readPaperStatus(BluetoothDevice device) throws Exception {
+        BluetoothSocket socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
+        String printer = printerLabel(device);
+        try {
+            socket.connect();
+            socket.getOutputStream().write(new byte[] { 0x10, 0x04, 0x04 });
+            socket.getOutputStream().flush();
+            InputStream input = socket.getInputStream();
+            long deadline = System.currentTimeMillis() + 1500;
+            while (input.available() == 0 && System.currentTimeMillis() < deadline) {
+                Thread.sleep(25);
+            }
+            if (input.available() == 0) {
+                return new PrinterStatusResult(false, "UNSUPPORTED", null, printer,
+                    "Printer did not return paper-sensor status. This model may not support two-way Bluetooth status.");
+            }
+            int rawStatus = input.read() & 0xFF;
+            boolean paperOut = (rawStatus & 0x60) == 0x60;
+            boolean paperLow = (rawStatus & 0x0C) == 0x0C;
+            if (paperOut) return new PrinterStatusResult(true, "PAPER_OUT", rawStatus, printer, "Paper is out.");
+            if (paperLow) return new PrinterStatusResult(true, "PAPER_LOW", rawStatus, printer, "Paper is almost out.");
+            return new PrinterStatusResult(true, "READY", rawStatus, printer, "Paper sensor reports ready.");
+        } finally {
+            try { socket.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private PrinterStatusResult statusError(String message) {
+        return new PrinterStatusResult(false, "ERROR", null, "", message);
     }
 
     private boolean hasBluetoothConnectPermission() {
@@ -305,6 +362,22 @@ public class BluetoothEscPosPrinter {
 
         public PrintResult(boolean success, String message) {
             this.success = success;
+            this.message = message;
+        }
+    }
+
+    public static class PrinterStatusResult {
+        public final boolean supported;
+        public final String state;
+        public final Integer rawStatus;
+        public final String printer;
+        public final String message;
+
+        public PrinterStatusResult(boolean supported, String state, Integer rawStatus, String printer, String message) {
+            this.supported = supported;
+            this.state = state;
+            this.rawStatus = rawStatus;
+            this.printer = printer;
             this.message = message;
         }
     }
