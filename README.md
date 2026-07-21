@@ -65,8 +65,11 @@ The command builds the web app, copies it into the native Android project, and o
 project in Android Studio. Use Android Studio to run it on a POS device or create a signed
 APK/AAB. After web-code changes, run `npm run android:sync` before rebuilding Android.
 
-The Android app is a separate release artifact: `git push` deploys the website, but it does
-not automatically publish a new APK to devices or Google Play.
+The Android app is a native Bluetooth-printing shell that loads the production POS from
+`https://admin-r-l.vercel.app/pos.html`. After installing a shell build with this setting,
+normal web UI and receipt-layout deployments appear without reinstalling the APK. Changes
+to native Android behavior, permissions, or Bluetooth communication still require a new
+APK installation.
 
 ## Cloud Dev Option
 
