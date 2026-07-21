@@ -469,6 +469,20 @@ export function PosApp() {
     printOrderDocument(order, 'kitchen-ticket', setStatusMessage, 1, receiptPrintSettings, menuCategoriesEnabled, categoryByProductId)
   }
 
+  function reprintKitchenTicket(orderId: string) {
+    const order = orders.find((item) => item.id === orderId)
+    if (!order) return
+    const paperStatus = checkNativePrinterStatus()
+    if (paperStatus.state === 'PAPER_OUT') {
+      setStatusMessage(`${formatPosOrderRef(order.id)} not reprinted: replace the printer paper first.`)
+      return
+    }
+    printSentKitchenTicket({
+      ...order,
+      paymentNotes: ['REPRINT', order.paymentNotes].filter(Boolean).join(' · '),
+    })
+  }
+
   async function saveOrder(note: string) {
     if (ticketItems.length === 0) return
     const targetEditOrderId = kitchenNoteTarget?.editOrderId ?? editOrderId
@@ -1106,6 +1120,7 @@ export function PosApp() {
             onViewDetails={requestEditOrder}
             onAddOrder={startAddOrder}
             onCancelOrder={requestCancelOrder}
+            onReprintOrder={reprintKitchenTicket}
           />
         </section>
       ) : null}
@@ -1878,6 +1893,7 @@ type OngoingOrdersPageProps = {
   onGoToPayment: (orderId: string) => void
   onAddOrder?: (orderId: string) => void
   onCancelOrder?: (orderId: string) => void
+  onReprintOrder?: (orderId: string) => void
   onApplyPayment?: (orderId: string, payment: OrderPaymentInput) => void
 }
 
@@ -1900,6 +1916,7 @@ function OngoingOrdersBoard({
   onViewDetails,
   onAddOrder,
   onCancelOrder,
+  onReprintOrder,
 }: OngoingOrdersPageProps) {
   const [sort, setSort] = useState<OrderSort>('oldest')
   const [viewMode, setViewMode] = useState<'tiles' | 'list'>('tiles')
@@ -1945,6 +1962,7 @@ function OngoingOrdersBoard({
         onViewDetails={onViewDetails}
         onAddOrder={onAddOrder}
         onCancelOrder={onCancelOrder}
+        onReprintOrder={onReprintOrder}
       />
     </section>
   )
@@ -1992,6 +2010,7 @@ function OngoingTrackingDetailPanel({
   onViewDetails,
   onAddOrder,
   onCancelOrder,
+  onReprintOrder,
 }: {
   order: RestaurantOrder | null
   onToggleItem: (orderId: string, itemId: string, served: boolean) => void
@@ -1999,7 +2018,14 @@ function OngoingTrackingDetailPanel({
   onViewDetails: (orderId: string) => void
   onAddOrder?: (orderId: string) => void
   onCancelOrder?: (orderId: string) => void
+  onReprintOrder?: (orderId: string) => void
 }) {
+  const [confirmingReprint, setConfirmingReprint] = useState(false)
+
+  useEffect(() => {
+    setConfirmingReprint(false)
+  }, [order?.id])
+
   if (!order) {
     return (
       <aside className="order-detail-panel">
@@ -2051,8 +2077,26 @@ function OngoingTrackingDetailPanel({
         </button>
         <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
         <button type="button" className="edit-order-action" onClick={() => onViewDetails(order.id)}><Pencil size={16} /> Edit Order</button>
+        <button type="button" onClick={() => setConfirmingReprint(true)}><RefreshCw size={16} /> Reprint</button>
         <button type="button" className="cancel-order-action" onClick={() => onCancelOrder?.(order.id)}><X size={16} /> Cancel Order</button>
       </section>
+      {confirmingReprint ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="expense-modal" role="dialog" aria-modal="true" aria-labelledby="reprint-confirm-title">
+            <header>
+              <div><span>Kitchen Ticket</span><h2 id="reprint-confirm-title">Confirm Reprint</h2></div>
+              <button type="button" className="modal-close" onClick={() => setConfirmingReprint(false)} aria-label="Close">x</button>
+            </header>
+            <div className="expense-body">
+              <p>Reprint every item from {formatPosOrderRef(order.id)}? The ticket will be marked REPRINT.</p>
+            </div>
+            <footer>
+              <button type="button" className="modal-secondary" onClick={() => setConfirmingReprint(false)}>Cancel</button>
+              <button type="button" className="modal-primary" onClick={() => { setConfirmingReprint(false); onReprintOrder?.(order.id) }}>Confirm Reprint</button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </aside>
   )
 }
@@ -3724,6 +3768,7 @@ function SettingsPage({
               <p>Remove the paper, close the printer cover, then run the check. Some printer models do not return sensor data over Bluetooth.</p>
               <div className="settings-action-row">
                 <button type="button" className="settings-primary-button" onClick={checkPaperSensor}>Check Paper Sensor</button>
+                <button type="button" onClick={() => setPrinterDetectionLog([])}>Clear Log</button>
                 <span>{printerDetectionLog[0]?.state ?? 'Not checked yet'}</span>
               </div>
               <div className="movement-list">
