@@ -41,6 +41,8 @@ jobs:
         run: npm ci
 
       - name: Build Android app
+        env:
+          VITE_BASE_PATH: /
         run: |
           npm run android:sync
           chmod +x android/gradlew
