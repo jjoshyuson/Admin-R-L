@@ -9,12 +9,12 @@ describe('WorkVault salary rules', () => {
     expect(calculateShiftAmount(800, 'full', 2)).toBe(1000)
   })
 
-  it('adds shifts and subtracts advances and payments without rewriting history', () => {
+  it('adds shifts and advances, then subtracts payments without rewriting history', () => {
     let ledger = appendTransaction([], { id: '1', employeeId: 'e1', date: '2026-07-21', type: 'shift', amount: 800, shiftId: 's1', note: '', createdAt: '' })
-    ledger = appendTransaction(ledger, { id: '2', employeeId: 'e1', date: '2026-07-21', type: 'advance', amount: -150, shiftId: null, note: '', createdAt: '' })
+    ledger = appendTransaction(ledger, { id: '2', employeeId: 'e1', date: '2026-07-21', type: 'advance', amount: 150, shiftId: null, note: '', createdAt: '' })
     ledger = appendTransaction(ledger, { id: '3', employeeId: 'e1', date: '2026-07-22', type: 'payment', amount: -250, shiftId: null, note: '', createdAt: '' })
-    expect(ledger.map((item) => item.resultingBalance)).toEqual([800, 650, 400])
-    expect(employeeBalance(ledger, 'e1')).toBe(400)
+    expect(ledger.map((item) => item.resultingBalance)).toEqual([800, 950, 700])
+    expect(employeeBalance(ledger, 'e1')).toBe(700)
     expect(ledger).toHaveLength(3)
   })
 

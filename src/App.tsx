@@ -63,6 +63,7 @@ type MoreRoute =
   | 'orders'
   | 'sales-range'
   | 'employees'
+  | 'staff-consumption'
   | 'salary-tracker'
   | 'menu-settings'
   | 'category-settings'
@@ -125,6 +126,7 @@ type EmployeeRecord = {
   dailyRate: number
   isCashier: boolean
   isActive: boolean
+  pin: string
 }
 
 type CategoryItem = {
@@ -2338,7 +2340,13 @@ function AdminShell() {
   }
 
   async function refreshAllAdminData() {
-    await Promise.all([refreshSyncData(), refreshMenuCatalog(), refreshRecipesAccounting(), refreshFinanceData()])
+    const refreshers = new Set([
+      refreshSyncData,
+      refreshMenuCatalog,
+      refreshRecipesAccounting,
+      refreshFinanceData,
+    ])
+    await Promise.all(Array.from(refreshers, (refresh) => refresh()))
   }
 
   async function runResetAction(action: ResetActionId, task: () => Promise<void>, successMessage: string) {
@@ -2874,8 +2882,8 @@ function AdminShell() {
     if (manualRefreshBusy) return
     setManualRefreshBusy(true)
     try {
-      await refreshSyncData()
-      setFlashMessage(source === 'navbar' ? 'Live admin data refreshed from the sync button.' : 'Sync data refreshed from Supabase.')
+      await refreshAllAdminData()
+      setFlashMessage(source === 'navbar' ? 'All live admin data refreshed.' : 'All data refreshed from Supabase.')
     } finally {
       setManualRefreshBusy(false)
     }
@@ -2982,6 +2990,7 @@ function AdminShell() {
                 onRefreshSync={() => {
                   void handleManualSyncRefresh('screen')
                 }}
+                onRefreshFinance={refreshFinanceData}
                 refreshBusy={manualRefreshBusy || syncLoading}
                 onSeedSyncData={handleSeedSyncData}
                 seedSyncBusy={seedSyncBusy}
@@ -4638,6 +4647,12 @@ function SettingsMoreScreen({
           onClick={() => onNavigate('salary-tracker')}
         />
         <ActionRow
+          icon={<FinanceOverviewIcon />}
+          title="Staff Consumption"
+          subtitle="Employee meals and other orders charged to staff"
+          onClick={() => onNavigate('staff-consumption')}
+        />
+        <ActionRow
           icon={<SyncLogsIcon />}
           title="Turnover Settings"
           subtitle="Configure automatic First and Second Shift boundaries"
@@ -4908,6 +4923,7 @@ type MoreDetailScreenProps = {
   flashMessage: string
   syncStatus: SyncStatusPanel
   onRefreshSync: () => void
+  onRefreshFinance: () => Promise<void>
   refreshBusy: boolean
   onSeedSyncData: () => void
   seedSyncBusy: boolean
@@ -4977,6 +4993,7 @@ function MoreDetailScreen({
   flashMessage,
   syncStatus,
   onRefreshSync,
+  onRefreshFinance,
   refreshBusy,
   onSeedSyncData,
   seedSyncBusy,
@@ -5149,12 +5166,16 @@ function MoreDetailScreen({
     return <EmployeeManagementScreen onBack={onBack} />
   }
 
+  if (route === 'staff-consumption') {
+    return <StaffConsumptionScreen onBack={onBack} />
+  }
+
   if (route === 'salary-tracker') {
     return <WorkVault onBack={onBack} />
   }
 
   if (route === 'turnover-settings') return <TurnoverSettingsScreen onBack={onBack} />
-  if (route === 'shift-reports') return <ShiftReportsScreen onBack={onBack} />
+  if (route === 'shift-reports') return <ShiftReportsScreen onBack={onBack} onRefreshFinance={onRefreshFinance} />
 
   if (route === 'cash-drawer') {
     return (
@@ -5259,7 +5280,7 @@ function TurnoverSettingsScreen({ onBack }: { onBack: () => void }) {
 }
 
 
-function ShiftReportsScreen({ onBack }: { onBack: () => void }) {
+function ShiftReportsScreen({ onBack, onRefreshFinance }: { onBack: () => void; onRefreshFinance: () => Promise<void> }) {
   const [businessDate, setBusinessDate] = useState(() => new Date().toISOString().slice(0, 10))
   const [shiftType, setShiftType] = useState<ShiftType>('FIRST')
   const [page, setPage] = useState<'summary' | 'expenses' | 'adjustments'>('summary')
@@ -5287,7 +5308,12 @@ function ShiftReportsScreen({ onBack }: { onBack: () => void }) {
     setAuditBusy(true)
     try {
       await approveShiftAudit({ businessDate, shiftType, countedCash, verifiedGcash, notes: auditDraft.notes.trim(), varianceReason: auditDraft.varianceReason.trim(), auditedBy: auditDraft.auditedBy.trim() || 'Admin Web' })
-      setStatus('Shift audited. Counted cash was transferred into Main Safe.'); await load()
+      setStatus('Shift audited. Counted cash was transferred into Main Safe.')
+      try {
+        await Promise.all([load(), onRefreshFinance()])
+      } catch {
+        setStatus('Shift audited and transferred into Main Safe, but the screen refresh failed. Use Sync to reload the updated balance.')
+      }
     } catch (error) { setStatus(error instanceof Error ? error.message : 'Could not approve shift audit.') }
     finally { setAuditBusy(false) }
   }
@@ -5499,12 +5525,55 @@ function ExpenseCategorySettingsScreen({ onBack }: { onBack: () => void }) {
   )
 }
 
+type StaffConsumptionRecord = {
+  id: string
+  employeeId: string
+  employeeName: string
+  orderId: string
+  displayOrderId: string
+  amount: number
+  recordedAt: string
+}
+
+function StaffConsumptionScreen({ onBack }: { onBack: () => void }) {
+  const [records, setRecords] = useState<StaffConsumptionRecord[]>([])
+  const [status, setStatus] = useState('Loading staff consumption...')
+  useEffect(() => {
+    fetchAdminSetting('employee_consumption').then((setting) => {
+      let raw = Array.isArray(setting?.records) ? setting.records : []
+      if (!raw.length) {
+        try { raw = JSON.parse(window.localStorage.getItem('admin-web-employee-consumption') ?? '{"records":[]}').records ?? [] } catch { raw = [] }
+      }
+      const next = raw.map((item) => item as StaffConsumptionRecord).filter((item) => item.id && item.employeeId)
+      setRecords(next)
+      setStatus(next.length ? 'Staff consumption loaded.' : 'No employee payments recorded yet.')
+    }).catch((error) => setStatus(error instanceof Error ? error.message : 'Could not load staff consumption.'))
+  }, [])
+  const summaries = Array.from(records.reduce((map, record) => {
+    const current = map.get(record.employeeId) ?? { employeeId: record.employeeId, employeeName: record.employeeName, total: 0, count: 0 }
+    current.total += Number(record.amount) || 0
+    current.count += 1
+    map.set(record.employeeId, current)
+    return map
+  }, new Map<string, { employeeId: string; employeeName: string; total: number; count: number }>()).values())
+    .sort((left, right) => right.total - left.total)
+  const total = records.reduce((sum, record) => sum + (Number(record.amount) || 0), 0)
+  return <div className="record-screen expense-settings-screen">
+    <header className="record-header"><button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back"><span aria-hidden="true">&lt;</span></button><div><p className="section-kicker">Staff</p><h1>Staff Consumption</h1><p>Orders confirmed as employee payments are tracked here and kept separate from collected sales payments.</p></div></header>
+    <section className="surface-card"><div className="section-head"><div><h2>Consumption by Employee</h2><p>{status}</p></div><span className="saved-pill">Total {formatPhp(total)}</span></div><div className="salary-summary-list">{summaries.map((employee) => <article key={employee.employeeId}><strong>{employee.employeeName}</strong><span>{employee.count} order{employee.count === 1 ? '' : 's'}</span><em>{formatPhp(employee.total)}</em></article>)}{summaries.length === 0 ? <p>No staff consumption recorded.</p> : null}</div></section>
+    <section className="surface-card"><div className="section-head"><div><h2>Recent Records</h2><p>Newest employee payments first.</p></div><span className="saved-pill">{records.length} records</span></div><div className="salary-summary-list">{records.map((record) => <article key={record.id}><div><strong>{record.employeeName}</strong><small>{record.displayOrderId || record.orderId} • {new Date(record.recordedAt).toLocaleString()}</small></div><em>{formatPhp(record.amount)}</em></article>)}</div></section>
+  </div>
+}
+
 function EmployeeManagementScreen({ onBack }: { onBack: () => void }) {
   const [employees, setEmployees] = useState<EmployeeRecord[]>([])
   const [status, setStatus] = useState('Loading employees...')
   const [name, setName] = useState('')
   const [dailyRate, setDailyRate] = useState('')
   const [isCashier, setIsCashier] = useState(true)
+  const [pin, setPin] = useState('')
+  const [confirmPin, setConfirmPin] = useState('')
+  const [visiblePins, setVisiblePins] = useState<Record<string, boolean>>({})
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -5562,17 +5631,28 @@ function EmployeeManagementScreen({ onBack }: { onBack: () => void }) {
       setStatus('Enter a valid daily rate.')
       return
     }
+    if (!/^\d{4,6}$/.test(pin)) {
+      setStatus('Login PIN must contain 4 to 6 digits.')
+      return
+    }
+    if (pin !== confirmPin) {
+      setStatus('Login PINs do not match.')
+      return
+    }
     const nextEmployee: EmployeeRecord = {
       id: createRandomId('employee'),
       name: employeeName,
       dailyRate: Math.round(parsedRate * 100) / 100,
       isCashier,
       isActive: true,
+      pin,
     }
     void persist([...employees, nextEmployee], `${employeeName} added.`)
     setName('')
     setDailyRate('')
     setIsCashier(true)
+    setPin('')
+    setConfirmPin('')
   }
 
   function updateEmployee(employeeId: string, patch: Partial<EmployeeRecord>) {
@@ -5596,17 +5676,17 @@ function EmployeeManagementScreen({ onBack }: { onBack: () => void }) {
         <div>
           <p className="section-kicker">Staff Settings</p>
           <h1>Employee Management</h1>
-          <p>Employees added here appear in POS Web for cashier shift selection.</p>
+          <p>Manage staff access for POS login and cashier shift selection.</p>
         </div>
       </header>
 
-      <div className="finance-notice-banner">{status}</div>
+      <div className="finance-notice-banner">ⓘ {status}</div>
 
       <section className="surface-card expense-admin-grid employee-admin-grid">
         <div className="product-modal-section">
           <div className="section-head">
-            <h3>Add Employee</h3>
-            <span className="saved-pill">{activeCashierCount} POS cashiers</span>
+            <h3><span className="employee-add-mark">+</span> Add New Employee</h3>
+            <span className="saved-pill">New</span>
           </div>
           <div className="cash-form-stack">
             <label className="input-field">
@@ -5614,12 +5694,16 @@ function EmployeeManagementScreen({ onBack }: { onBack: () => void }) {
               <input className="text-input" value={name} onChange={(event) => setName(event.target.value)} placeholder="Juan Dela Cruz" />
             </label>
             <label className="input-field">
-              <span>Daily Rate</span>
+              <span>Daily Rate (Optional)</span>
               <input className="text-input" inputMode="decimal" value={dailyRate} onChange={(event) => setDailyRate(normalizeMoneyInput(event.target.value))} placeholder="0.00" />
             </label>
+            <div className="employee-pin-grid">
+              <label className="input-field"><span>Login PIN (4–6 digits)</span><input className="text-input" type="password" inputMode="numeric" maxLength={6} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Enter PIN" /><small className="employee-field-guide">Enter 4–6 numbers only.</small></label>
+              <label className="input-field"><span>Confirm PIN</span><input className="text-input" type="password" inputMode="numeric" maxLength={6} value={confirmPin} onChange={(event) => setConfirmPin(event.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="Repeat PIN" /><small className="employee-field-guide">Enter the same PIN again.</small></label>
+            </div>
             <label className="employee-check-row">
               <input type="checkbox" checked={isCashier} onChange={(event) => setIsCashier(event.target.checked)} />
-              <span>Can work as POS cashier</span>
+              <span><strong>Can work as POS cashier</strong><small>Enable to allow this employee to log in and use POS.</small></span>
             </label>
             <button type="button" className="save-changes-button" disabled={saving} onClick={addEmployee}>Add Employee</button>
           </div>
@@ -5628,7 +5712,7 @@ function EmployeeManagementScreen({ onBack }: { onBack: () => void }) {
         <div className="product-modal-section">
           <div className="section-head">
             <h3>Employees</h3>
-            <span className="saved-pill">{employees.length} total</span>
+            <span className="saved-pill">{employees.length} total · {activeCashierCount} cashiers</span>
           </div>
           <div className="employee-list">
             {employees.map((employee) => (
@@ -5650,6 +5734,14 @@ function EmployeeManagementScreen({ onBack }: { onBack: () => void }) {
                     value={String(employee.dailyRate)}
                     onChange={(event) => updateEmployee(employee.id, { dailyRate: Number(normalizeMoneyInput(event.target.value)) || 0 })}
                   />
+                </label>
+                <label className="input-field">
+                  <span>Login PIN</span>
+                  <span className="employee-pin-input">
+                    <input className="text-input" type={visiblePins[employee.id] ? 'text' : 'password'} inputMode="numeric" maxLength={6} value={employee.pin} onChange={(event) => { const nextPin = event.target.value.replace(/\D/g, '').slice(0, 6); setEmployees((current) => current.map((item) => item.id === employee.id ? { ...item, pin: nextPin } : item)) }} onBlur={(event) => { if (/^\d{4,6}$/.test(event.target.value)) updateEmployee(employee.id, { pin: event.target.value }); else setStatus('Login PIN must contain 4 to 6 digits.') }} />
+                    <button type="button" onClick={() => setVisiblePins((current) => ({ ...current, [employee.id]: !current[employee.id] }))}>{visiblePins[employee.id] ? 'Hide' : 'Show'}</button>
+                  </span>
+                  <small className="employee-field-guide">Use 4–6 numbers for POS login.</small>
                 </label>
                 <div className="employee-toggle-row">
                   <label>
@@ -6111,6 +6203,7 @@ function normalizeEmployeeSetting(setting: Record<string, unknown> | null): Empl
         dailyRate: Math.max(0, Number(employee.dailyRate ?? employee.daily_rate ?? 0) || 0),
         isCashier: employee.isCashier !== false && employee.is_cashier !== false,
         isActive: employee.isActive !== false && employee.is_active !== false,
+        pin: String(employee.pin ?? employee.loginPin ?? employee.login_pin ?? '').replace(/\D/g, '').slice(0, 6),
       }
     })
     .filter((employee): employee is EmployeeRecord => Boolean(employee))
@@ -6391,6 +6484,13 @@ function OrderDetailModal({ order, voidRecord, onClose, onVoid }: OrderDetailMod
                 </div>
               </div>
             ))}
+          </article>
+
+          <article className="surface-card cash-log-detail-card">
+            <div className="finance-row order-note-row">
+              <span>Order Notes</span>
+              <strong>{order.orderNote?.trim() || 'No order notes recorded.'}</strong>
+            </div>
           </article>
 
           <article className="surface-card cash-log-detail-card">
@@ -8771,9 +8871,8 @@ function ResetOptionsModal({
     description: string,
     buttonLabel: string,
     onClick: () => void,
-    requiresConfirmation = false,
   ) {
-    const disabled = workingAction !== null || (requiresConfirmation && !resetConfirmed)
+    const disabled = workingAction !== null || !resetConfirmed
     return (
       <article className="surface-card reset-action-card">
         <div className="reset-action-copy">
@@ -8782,7 +8881,7 @@ function ResetOptionsModal({
         </div>
         <button
           type="button"
-          className={requiresConfirmation ? 'danger-button compact-submit' : 'secondary-button compact-submit'}
+          className="danger-button compact-submit"
           disabled={disabled}
           onClick={onClick}
         >
@@ -8809,16 +8908,16 @@ function ResetOptionsModal({
         </label>
 
         <div className="reset-action-list">
-          {renderResetAction('testing-reset', 'Testing Reset', 'Clear the current workspace, then repopulate troubleshooting sample data.', 'Testing Reset', onTestingReset, true)}
-          {renderResetAction('empty-everything', 'Empty Everything', 'Clear orders, menu, recipes, logs, finance rows, and current synced workspace data.', 'Empty Everything', onEmptyEverything, true)}
-          {renderResetAction('safe-state', 'Safe State', 'Clear operational history while keeping the current menu catalog in place.', 'Safe State', onSafeState, true)}
+          {renderResetAction('testing-reset', 'Testing Reset', 'Clear the current workspace, then repopulate troubleshooting sample data.', 'Testing Reset', onTestingReset)}
+          {renderResetAction('empty-everything', 'Empty Everything', 'Clear orders, menu, recipes, logs, finance rows, and current synced workspace data.', 'Empty Everything', onEmptyEverything)}
+          {renderResetAction('safe-state', 'Safe State', 'Clear operational history while keeping the current menu catalog in place.', 'Safe State', onSafeState)}
           {renderResetAction('clear-orders', 'Queue / Orders', 'Clear orders, void records, and derived accounting totals.', 'Clear Orders', onClearOrders)}
-          {renderResetAction('clear-menu', 'Menu', 'Clear categories and menu products.', 'Clear Menu', onClearMenu, true)}
+          {renderResetAction('clear-menu', 'Menu', 'Clear categories and menu products.', 'Clear Menu', onClearMenu)}
           {renderResetAction('clear-recipes', 'Recipes', 'Clear recipes and recipe ingredient links.', 'Clear Recipes', onClearRecipes)}
           {renderResetAction('clear-daily-logs', 'Daily Logs', 'Clear ingredient price logs and saved accounting logs.', 'Clear Logs', onClearDailyLogs)}
-          {renderResetAction('clear-expenses-log', 'Expenses Log', 'Clear expense entries while keeping other cash movement history.', 'Clear Expenses', onClearExpensesLog, true)}
+          {renderResetAction('clear-expenses-log', 'Expenses Log', 'Clear expense entries while keeping other cash movement history.', 'Clear Expenses', onClearExpensesLog)}
           {renderResetAction('clear-inventory', 'Inventory', 'Delete inventory items and count history, then zero active sellable stock in Supabase.', 'Clear Inventory', onClearInventory)}
-          {renderResetAction('clear-workvault', 'Schedule & Employee Earnings', 'Clear all WorkVault schedules, attendance confirmations, advances, payments, and employee vault balances. Employee profiles are kept.', 'Clear Schedule & Earnings', onClearWorkVault, true)}
+          {renderResetAction('clear-workvault', 'Schedule & Employee Earnings', 'Clear all WorkVault schedules, attendance confirmations, advances, payments, and employee vault balances. Employee profiles are kept.', 'Clear Schedule & Earnings', onClearWorkVault)}
         </div>
 
         {statusMessage ? <p className="reset-status-message">{statusMessage}</p> : null}

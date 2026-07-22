@@ -2,6 +2,8 @@
 import type { ReactNode } from 'react'
 import {
   ChartNoAxesColumnIncreasing,
+  Banknote,
+  Check,
   ChevronLeft,
   ChevronRight,
   CircleCheckBig,
@@ -21,17 +23,18 @@ import {
   Shirt,
   ShoppingCart,
   Table as TableIcon,
-  Tag,
+  Trash2,
   Utensils,
   User,
   WalletCards,
   X,
 } from 'lucide-react'
-import { fetchAdminSetting, fetchCashMovements, fetchOrders, upsertCashMovements, voidOrder } from '../lib/adminApi'
+import { fetchAdminSetting, fetchCashMovements, fetchOrders, saveAdminSetting, upsertCashMovements, voidOrder } from '../lib/adminApi'
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
-import { fetchPosMenu, getPreviewPosMenu } from '../lib/pos/menuService'
-import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ServiceMode } from '../lib/pos/posTypes'
+import { fetchPosMenu, getPreviewPosMenu, isProductVisibleOnPos, updatePosMenuProductStatus } from '../lib/pos/menuService'
+import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ProductStatus, ServiceMode } from '../lib/pos/posTypes'
 import { checkNativePrinterStatus, printPosDocument, type NativePrinterStatus, type PrintDocumentType, type ReceiptDetailMode, type ReceiptPaperWidth } from '../lib/pos/printService'
+import { paymentBelongsToActiveShift } from '../lib/pos/shiftFiltering'
 import {
   cancelOrderEditRequest,
   createOrderEditRequest,
@@ -50,8 +53,8 @@ type OrderFilter = 'all' | OrderStatus
 type PaymentFilter = 'all' | 'waiting' | 'partial' | 'paid'
 type OrderSort = 'oldest' | 'newest'
 type PaymentMethod = 'cash' | 'gcash' | 'split'
-type CheckoutTarget = { type: 'ticket' } | { type: 'order'; orderId: string }
-type KitchenNoteTarget = { orderNumber: string; itemCount: number; appendToOrderId?: string; editOrderId?: string }
+type CheckoutTarget = { type: 'order'; orderId: string }
+type KitchenNoteTarget = { orderNumber: string; itemCount: number; appendToOrderId?: string; editOrderId?: string; noteOrderId?: string; initialNote?: string }
 type SettingsSection = 'menu' | 'history' | 'money' | 'printing'
 type MoneyAccount = 'cash' | 'gcash'
 type MovementDirection = 'in' | 'out'
@@ -84,6 +87,7 @@ type PosEmployee = {
   dailyRate: number
   isCashier: boolean
   isActive: boolean
+  pin: string
 }
 
 type SalePayment = {
@@ -99,8 +103,23 @@ type SalePayment = {
     quantity: number
     price: number
   }>
+  orderNote?: string
   shiftId?: string | null
   shiftSessionId?: string | null
+}
+
+const saleTrackerCache: {
+  shiftId: string | null
+  payments: SalePayment[]
+  expenses: CashMovement[]
+  adjustments: ShiftAdjustment[]
+  status: string
+} = {
+  shiftId: null,
+  payments: [],
+  expenses: [],
+  adjustments: [],
+  status: 'Loading payments...',
 }
 
 type TicketItem = {
@@ -154,9 +173,7 @@ const paymentModeTiles = [
   { id: 'split-items', label: 'Split by Items', helper: 'Share items', icon: '1/2' },
   { id: 'split-people', label: 'Split by People', helper: 'Per person', icon: 'PPL' },
   { id: 'custom', label: 'Custom Amount', helper: 'Any amount', icon: 'AMT' },
-  { id: 'partial', label: 'Deposit / Partial', helper: 'Pay partial now', icon: 'DEP' },
   { id: 'combine', label: 'Combine Orders', helper: 'Pay multiple', icon: 'COM' },
-  { id: 'credit', label: 'Credit / Tab', helper: 'Pay later', icon: 'TAB' },
   { id: 'other', label: 'Other', helper: 'Other options', icon: '...' },
 ] as const
 type PaymentModeId = typeof paymentModeTiles[number]['id']
@@ -178,11 +195,14 @@ export function PosApp() {
   const [shiftSchedule, setShiftSchedule] = useState<ShiftSchedule | null>(null)
   const [activeShiftSession, setActiveShiftSession] = useState<ShiftSession | null>(null)
   const [shiftBusy, setShiftBusy] = useState(false)
+  const [pendingEmployeeId, setPendingEmployeeId] = useState('')
+  const [loginPin, setLoginPin] = useState('')
+  const [pinError, setPinError] = useState('')
   const [statusMessage, setStatusMessage] = useState('Loading menu...')
   const [refreshing, setRefreshing] = useState(false)
   const [nextOrderNumber, setNextOrderNumber] = useState(1)
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
-  const [checkoutTarget, setCheckoutTarget] = useState<CheckoutTarget | null>(null)
+  const [prepaidCheckoutOrderId, setPrepaidCheckoutOrderId] = useState<string | null>(null)
   const [kitchenNoteTarget, setKitchenNoteTarget] = useState<KitchenNoteTarget | null>(null)
   const [appendOrderId, setAppendOrderId] = useState<string | null>(null)
   const [editOrderId, setEditOrderId] = useState<string | null>(null)
@@ -210,6 +230,31 @@ export function PosApp() {
       })
     return () => {
       active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!hasSupabaseConfig) return
+    let active = true
+    const supabase = requireSupabase()
+    const refreshSharedMenu = async () => {
+      try {
+        const menu = await fetchPosMenu()
+        if (!active) return
+        setCategories(menu.categories)
+        setProducts(menu.products)
+      } catch (error) {
+        if (active) setStatusMessage(error instanceof Error ? error.message : 'Could not sync the shared menu.')
+      }
+    }
+    const channel = supabase
+      .channel('pos-shared-menu')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => void refreshSharedMenu())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, () => void refreshSharedMenu())
+      .subscribe()
+    return () => {
+      active = false
+      void supabase.removeChannel(channel)
     }
   }, [])
 
@@ -323,12 +368,13 @@ export function PosApp() {
   const visibleCategories = useMemo(() => {
     const categoryNames = new Map<string, string>()
     const sortedCategories = [...categories].sort((left, right) => left.sortOrder - right.sortOrder)
+    const menuVisibleProducts = products.filter(isProductVisibleOnPos)
 
     sortedCategories.forEach((category) => {
       categoryNames.set(normalizeCategory(category.name), category.name)
     })
 
-    products.forEach((product) => {
+    menuVisibleProducts.forEach((product) => {
       const name = product.categoryName || 'Uncategorized'
       categoryNames.set(normalizeCategory(name), name)
     })
@@ -339,7 +385,7 @@ export function PosApp() {
 
     return [...categoryNames.values()].map((category) => ({
       name: category,
-      count: products.filter((product) => sameCategory(category, product.categoryName)).length,
+      count: menuVisibleProducts.filter((product) => sameCategory(category, product.categoryName)).length,
       hasLiveMatch: categories.some((item) => sameCategory(category, item.name)),
     }))
   }, [categories, products])
@@ -354,7 +400,7 @@ export function PosApp() {
 
   const visibleProducts = useMemo(() => {
     return products
-      .filter((product) => product.status !== 'HIDDEN')
+      .filter(isProductVisibleOnPos)
       .filter((product) => selectedCategory === 'All Items' || sameCategory(selectedCategory, product.categoryName))
   }, [products, selectedCategory])
   const categoryByProductId = useMemo(
@@ -363,11 +409,23 @@ export function PosApp() {
   )
   const visibleHalfOrderAvailable = visibleProducts.some((product) => resolveHalfOrderPrice(product) != null)
 
+  async function changeMenuProductAvailability(productId: string, status: ProductStatus) {
+    const previousProducts = products
+    setProducts((current) => current.map((product) => product.id === productId ? { ...product, status } : product))
+    try {
+      await updatePosMenuProductStatus(productId, status)
+      setStatusMessage(`${products.find((product) => product.id === productId)?.name ?? 'Menu item'} is now ${status.toLowerCase()}.`)
+    } catch (error) {
+      setProducts(previousProducts)
+      throw error
+    }
+  }
+
   const subtotal = ticketItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
   const tax = subtotal * taxRate
   const total = subtotal + tax
   const ongoingOrders = orders.filter((order) => !order.readyForPayment && !(order.paid && order.readyForPayment))
-  const finishOrders = orders.filter((order) => order.readyForPayment && !order.paid)
+  const finishOrders = orders.filter((order) => (order.readyForPayment || order.id === prepaidCheckoutOrderId) && !order.paid)
   const shiftHistory = activeShiftSession
     ? history.filter((order) => order.shiftId === activeShiftSession.shiftId)
     : []
@@ -469,6 +527,31 @@ export function PosApp() {
 
   function printSentKitchenTicket(order: RestaurantOrder) {
     return printOrderDocument(order, 'kitchen-ticket', setStatusMessage, 1, receiptPrintSettings, menuCategoriesEnabled, categoryByProductId)
+  }
+
+  function requestClockIn(employeeId: string) {
+    if (!employeeId) return
+    const employee = cashierEmployees.find((item) => item.id === employeeId)
+    if (!employee) return
+    if (!employee.pin) {
+      setStatusMessage(`${employee.name} needs a login PIN. Add one in Employee Management.`)
+      return
+    }
+    setPendingEmployeeId(employeeId)
+    setLoginPin('')
+    setPinError('')
+  }
+
+  function verifyPinAndClockIn() {
+    const employee = cashierEmployees.find((item) => item.id === pendingEmployeeId)
+    if (!employee || loginPin !== employee.pin) {
+      setPinError('Incorrect PIN. Please try again.')
+      setLoginPin('')
+      return
+    }
+    setPendingEmployeeId('')
+    setPinError('')
+    void clockInEmployee(employee.id)
   }
 
   function reprintKitchenTicket(orderId: string) {
@@ -656,6 +739,68 @@ export function PosApp() {
     setActiveTab('new-order')
   }
 
+  async function quickAddRice(orderId: string) {
+    const order = orders.find((item) => item.id === orderId)
+    const riceProduct = products.find((product) => product.status === 'AVAILABLE' && product.name.trim().toLowerCase() === 'plain rice')
+    if (!order) return
+    if (!riceProduct) {
+      setStatusMessage('The Plain Rice menu item is unavailable. Refresh the POS or check Menu Settings.')
+      return
+    }
+    const riceOrderType = order.orderType === 'MIXED' ? order.items[0]?.orderType ?? 'DINE IN' : order.orderType
+    const existingRice = order.items.find((item) => item.productId === riceProduct.id && item.orderType === riceOrderType)
+    const riceItem: OrderItem = {
+      id: `${riceProduct.id}:${riceOrderType}:rice-addon:${Date.now()}`,
+      productId: riceProduct.id,
+      categoryName: riceProduct.categoryName || 'Uncategorized',
+      name: riceProduct.name,
+      quantity: 1,
+      price: riceProduct.price,
+      served: true,
+      paidQuantity: 0,
+      kitchenPrintedQuantity: 1,
+      orderType: riceOrderType,
+      isHalfOrder: false,
+    }
+    const updatedItems = existingRice
+      ? order.items.map((item) => item.id === existingRice.id ? {
+          ...item,
+          quantity: item.quantity + 1,
+          served: true,
+          kitchenPrintedQuantity: item.kitchenPrintedQuantity + 1,
+        } : item)
+      : [...order.items, riceItem]
+    const remainsReadyForPayment = updatedItems.every((item) => item.served)
+    const updatedOrder: RestaurantOrder = {
+      ...order,
+      items: updatedItems,
+      status: remainsReadyForPayment ? 'served' : 'preparing',
+      paid: false,
+      readyForPayment: remainsReadyForPayment,
+      paymentNotes: [order.paymentNotes, `Extra Rice: ${riceProduct.name}`].filter(Boolean).join(' | '),
+    }
+    setOrders((current) => current.map((item) => item.id === orderId ? updatedOrder : item))
+    setSelectedOrderId(orderId)
+    setStatusMessage(`Extra Rice added to ${formatPosOrderRef(orderId)} and marked served.`)
+    await syncOrderSnapshot(updatedOrder, setStatusMessage)
+  }
+
+  async function saveOrderNotes(orderId: string, note: string) {
+    const existingOrder = orders.find((order) => order.id === orderId)
+    if (!existingOrder) return
+    const updatedOrder = { ...existingOrder, paymentNotes: note }
+    setOrders((current) => current.map((order) => order.id === orderId ? updatedOrder : order))
+    setKitchenNoteTarget(null)
+    setStatusMessage(`${formatPosOrderRef(orderId)} notes updated.`)
+    await syncOrderSnapshot(updatedOrder, setStatusMessage)
+  }
+
+  function editOrderNotes(orderId: string) {
+    const order = orders.find((item) => item.id === orderId)
+    if (!order) return
+    setKitchenNoteTarget({ orderNumber: order.id, itemCount: order.items.reduce((sum, item) => sum + item.quantity, 0), noteOrderId: order.id, initialNote: order.paymentNotes })
+  }
+
   async function requestEditOrder(orderId: string) {
     const order = orders.find((item) => item.id === orderId)
     if (!order) {
@@ -800,104 +945,46 @@ export function PosApp() {
     setEditApprovalRequest(null)
   }
 
-  function chargeCurrentTicket() {
-    if (ticketItems.length === 0) return
-    setCheckoutTarget({ type: 'ticket' })
-  }
-
-  function completeTicketPayment() {
-    const createdAt = Date.now()
-    const order: RestaurantOrder = {
-      id: `#${String(nextOrderNumber).padStart(4, '0')}`,
-      deviceOrderId: createDeviceOrderId(deviceId, nextOrderNumber, createdAt),
-      items: ticketItems.map((item) => ({
-        id: item.lineId,
-        productId: item.productId,
-        categoryName: item.categoryName,
-        name: item.name,
-        quantity: item.quantity,
-        price: item.price,
-        served: true,
-        paidQuantity: item.quantity,
-        kitchenPrintedQuantity: 0,
-        orderType: item.orderType,
-        isHalfOrder: item.isHalfOrder,
-      })),
-      status: 'paid',
-      paid: true,
-      readyForPayment: true,
-      paymentReceived: total,
-      paymentMethod: 'cash',
-      paymentReference: '',
-      paymentNotes: '',
-      orderType: ticketOrderType(ticketItems),
-      createdAt,
-      shiftId: activeShiftSession?.shiftId ?? null,
-      shiftSessionId: activeShiftSession?.id ?? null,
-    }
-    setHistory((current) => [order, ...current])
-    setNextOrderNumber((value) => value + 1)
-    setTicketItems([])
-    setCheckoutTarget(null)
-    setStatusMessage(`${order.id} paid and closed.`)
-    if (autoPrintReceipt) printOrderDocument(order, 'customer-receipt', setStatusMessage, receiptCopies, receiptPrintSettings)
-    void syncOrderSnapshot(order, setStatusMessage)
-    void syncPaymentSnapshot(order, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
-  }
-
   function updateOrderItem(orderId: string, itemId: string, served: boolean) {
     const order = orders.find((item) => item.id === orderId)
     if (!order) return
     const items = order.items.map((item) => item.id === itemId ? { ...item, served } : item)
     const isServed = items.every((item) => item.served)
+    const isPaid = isServed && order.paymentReceived >= orderTotal({ ...order, items })
     const updatedOrder: RestaurantOrder = {
       ...order,
       items,
       readyForPayment: isServed,
-      status: isServed ? 'served' : 'preparing',
+      status: isPaid ? 'paid' : isServed ? 'served' : 'preparing',
+      paid: isPaid,
     }
     setOrders((current) => current.map((item) => item.id === orderId ? updatedOrder : item))
     void syncOrderSnapshot(updatedOrder, setStatusMessage)
+    if (isPaid) window.setTimeout(closeCompletedOrders, 0)
   }
 
   function markAllServed(orderId: string) {
     const order = orders.find((item) => item.id === orderId)
     if (!order) return
+    const isPaid = order.paymentReceived >= orderTotal(order)
     const updatedOrder: RestaurantOrder = {
       ...order,
-      status: 'served',
+      status: isPaid ? 'paid' : 'served',
+      paid: isPaid,
       readyForPayment: true,
       items: order.items.map((item) => ({ ...item, served: true })),
     }
     setOrders((current) => current.map((item) => item.id === orderId ? updatedOrder : item))
     void syncOrderSnapshot(updatedOrder, setStatusMessage)
     setSelectedOrderId(orderId)
-    setActiveTab('kitchen')
-    closeCompletedOrders()
+    setActiveTab(isPaid ? 'ongoing' : 'kitchen')
+    window.setTimeout(closeCompletedOrders, 0)
   }
 
   function markPaid(orderId: string) {
-    setCheckoutTarget({ type: 'order', orderId })
-  }
-
-  function completeOrderPayment(orderId: string) {
-    let updatedOrder: RestaurantOrder | null = null
-    setOrders((current) => current.map((order) => {
-      if (order.id !== orderId) return order
-      updatedOrder = {
-        ...order,
-        status: 'paid',
-        paid: true,
-        paymentReceived: orderTotal(order),
-      }
-      return updatedOrder
-    }))
-    setCheckoutTarget(null)
-    setStatusMessage(`${orderId} marked paid.`)
-    if (updatedOrder && autoPrintReceipt) printOrderDocument(updatedOrder, 'customer-receipt', setStatusMessage, receiptCopies, receiptPrintSettings)
-    if (updatedOrder) void syncOrderSnapshot(updatedOrder, setStatusMessage)
-    if (updatedOrder) void syncPaymentSnapshot(updatedOrder, setStatusMessage, undefined, activeShiftSession, activeEmployeeName)
-    window.setTimeout(closeCompletedOrders, 0)
+    setSelectedOrderId(orderId)
+    setPrepaidCheckoutOrderId(orderId)
+    setActiveTab('kitchen')
   }
 
   function applyOrderPayment(orderId: string, payment: OrderPaymentInput) {
@@ -916,20 +1003,58 @@ export function PosApp() {
       updatedOrder = {
         ...order,
         items: nextReceived >= totalDue ? items.map((item) => ({ ...item, paidQuantity: item.quantity })) : items,
-        status: nextReceived >= totalDue ? 'paid' : order.status,
-        paid: nextReceived >= totalDue,
+        status: nextReceived >= totalDue && order.readyForPayment ? 'paid' : order.status,
+        paid: nextReceived >= totalDue && order.readyForPayment,
         paymentReceived: nextReceived,
         paymentMethod: payment.method,
         paymentReference: payment.reference,
-        paymentNotes: payment.notes,
+        paymentNotes: nextReceived >= totalDue && !order.readyForPayment
+          ? [order.paymentNotes, 'Customer prepaid'].filter(Boolean).join(' | ')
+          : order.paymentNotes,
       }
       return updatedOrder
     }))
-    setStatusMessage(`${orderId} payment recorded.`)
     const paymentOrder = updatedOrder as RestaurantOrder | null
-    if (paymentOrder?.paid && autoPrintReceipt) printOrderDocument(paymentOrder, 'customer-receipt', setStatusMessage, receiptCopies, receiptPrintSettings)
+    const isFullyCollected = Boolean(paymentOrder && paymentOrder.paymentReceived >= orderTotal(paymentOrder))
+    setStatusMessage(`${formatPosOrderRef(orderId)} ${paymentOrder?.paid ? 'marked paid' : isFullyCollected ? 'marked prepaid' : 'payment recorded'}.`)
+    if (paymentOrder && paymentOrder.paymentReceived >= orderTotal(paymentOrder)) setPrepaidCheckoutOrderId(null)
+    if (paymentOrder && isFullyCollected && autoPrintReceipt) printOrderDocument(paymentOrder, 'customer-receipt', setStatusMessage, receiptCopies, receiptPrintSettings)
     if (paymentOrder) void syncOrderSnapshot(paymentOrder, setStatusMessage)
     if (paymentOrder) void syncPaymentSnapshot(paymentOrder, setStatusMessage, payment, activeShiftSession, activeEmployeeName)
+    window.setTimeout(closeCompletedOrders, 0)
+  }
+
+  async function applyEmployeePayment(orderId: string, employee: PosEmployee) {
+    const order = orders.find((item) => item.id === orderId)
+    if (!order) return
+    const localKey = 'admin-web-employee-consumption'
+    let records: EmployeeConsumptionRecord[] = []
+    try {
+      const remote = await fetchAdminSetting('employee_consumption')
+      const local = JSON.parse(window.localStorage.getItem(localKey) ?? '{"records":[]}') as { records?: EmployeeConsumptionRecord[] }
+      records = Array.isArray(remote?.records) ? remote.records as EmployeeConsumptionRecord[] : (local.records ?? [])
+    } catch { /* keep the new record even if old data cannot be loaded */ }
+    records = [{
+      id: `employee-consumption-${Date.now()}-${employee.id}`,
+      employeeId: employee.id,
+      employeeName: employee.name,
+      orderId: order.deviceOrderId || order.id,
+      displayOrderId: order.id,
+      amount: orderBalance(order),
+      recordedAt: new Date().toISOString(),
+    }, ...records]
+    window.localStorage.setItem(localKey, JSON.stringify({ records }))
+    await saveAdminSetting('employee_consumption', { records })
+    const updatedOrder: RestaurantOrder = {
+      ...order,
+      status: 'paid', paid: true, paymentReceived: orderTotal(order), paymentMethod: null,
+      paymentReference: `EMPLOYEE:${employee.id}`,
+      paymentNotes: `Employee payment - ${employee.name}`,
+      items: order.items.map((item) => ({ ...item, paidQuantity: item.quantity })),
+    }
+    setOrders((current) => current.map((item) => item.id === orderId ? updatedOrder : item))
+    setStatusMessage(`${formatPosOrderRef(orderId)} recorded as ${employee.name}'s staff consumption.`)
+    await syncOrderSnapshot(updatedOrder, setStatusMessage)
     window.setTimeout(closeCompletedOrders, 0)
   }
 
@@ -1003,7 +1128,7 @@ export function PosApp() {
             <select
               className="sidebar-employee-select"
               value={activeEmployeeId}
-              onChange={(event) => void clockInEmployee(event.target.value)}
+              onChange={(event) => requestClockIn(event.target.value)}
               aria-label="Select cashier on shift"
             >
               <option value="">{shiftBusy ? 'Opening shift...' : 'Select cashier to clock in'}</option>
@@ -1017,11 +1142,24 @@ export function PosApp() {
           <span>{activeShiftSession ? `${activeShiftSession.shiftType === 'FIRST' ? 'First' : 'Second'} Shift • Cash ₱0 opening` : 'No open shift'}</span>
         </div>
       </aside>
+      {pendingEmployeeId ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPendingEmployeeId('') }}>
+          <section className="admin-approval-modal cashier-pin-modal" role="dialog" aria-modal="true" aria-labelledby="cashier-pin-title">
+            <header><div><span>POS Login</span><h2 id="cashier-pin-title">Enter your PIN</h2></div><button type="button" className="modal-close" onClick={() => setPendingEmployeeId('')} aria-label="Close">×</button></header>
+            <div className="admin-approval-body">
+              <p>Logging in as <strong>{cashierEmployees.find((item) => item.id === pendingEmployeeId)?.name}</strong></p>
+              <input autoFocus className="cashier-pin-input" type="password" inputMode="numeric" autoComplete="off" maxLength={6} value={loginPin} onChange={(event) => { setLoginPin(event.target.value.replace(/\D/g, '').slice(0, 6)); setPinError('') }} onKeyDown={(event) => { if (event.key === 'Enter' && loginPin.length >= 4) verifyPinAndClockIn() }} aria-label="Cashier PIN" placeholder="••••" />
+              {pinError ? <p className="cashier-pin-error" role="alert">{pinError}</p> : <small>Your PIN is 4–6 digits.</small>}
+            </div>
+            <footer><button type="button" className="modal-secondary" onClick={() => setPendingEmployeeId('')}>Cancel</button><button type="button" className="modal-primary" disabled={loginPin.length < 4} onClick={verifyPinAndClockIn}>Log in</button></footer>
+          </section>
+        </div>
+      ) : null}
       {activeTab === 'new-order' ? (
         <>
           <aside className="pos-category-sidebar" aria-label="POS categories">
             <nav className="category-tabs" aria-label="Categories">
-              {[{ name: 'All Items', count: products.filter((product) => product.status !== 'HIDDEN').length }, ...visibleCategories].map((category) => (
+              {[{ name: 'All Items', count: products.filter(isProductVisibleOnPos).length }, ...visibleCategories].map((category) => (
                 <button
                   key={category.name}
                   type="button"
@@ -1076,10 +1214,17 @@ export function PosApp() {
             <div className="product-section-label">{selectedCategory}</div>
             <div className="product-grid">
               {visibleProducts.map((product) => (
-                <button key={product.id} type="button" className="menu-card" onClick={() => addProduct(product)}>
+                <button
+                  key={product.id}
+                  type="button"
+                  className={`menu-card ${product.status === 'UNAVAILABLE' ? 'is-unavailable' : ''}`}
+                  disabled={product.status === 'UNAVAILABLE'}
+                  onClick={() => addProduct(product)}
+                >
                   {product.imagePath ? <img src={product.imagePath} alt="" /> : <span className="menu-card-art">{initials(product.name)}</span>}
                   <strong>{product.name}</strong>
                   <span>{formatPhp(halfOrderEnabled ? resolveHalfOrderPrice(product) ?? product.price : product.price)}</span>
+                  {product.status === 'UNAVAILABLE' ? <em>Unavailable</em> : null}
                   {halfOrderEnabled && product.halfOrderPrice == null ? <em>Auto half</em> : null}
                 </button>
               ))}
@@ -1106,7 +1251,6 @@ export function PosApp() {
                 editOrderId: editOrderId ?? undefined,
               })
             }}
-            onCharge={chargeCurrentTicket}
             onClear={() => { setTicketItems([]); setAppendOrderId(null); setEditOrderId(null) }}
           />
         </>
@@ -1122,7 +1266,17 @@ export function PosApp() {
             onMarkAllServed={markAllServed}
             onGoToPayment={markPaid}
             onApplyPayment={applyOrderPayment}
+            employees={employees.filter((employee) => employee.isActive)}
+            onApplyEmployeePayment={applyEmployeePayment}
+            onEditNotes={editOrderNotes}
             onViewDetails={(orderId) => setStatusMessage(`${orderId} details selected.`)}
+            onAddOrder={startAddOrder}
+            onQuickAddRice={quickAddRice}
+            autoOpenPaymentOrderId={prepaidCheckoutOrderId}
+            onPaymentDismiss={() => {
+              setPrepaidCheckoutOrderId(null)
+              setActiveTab('ongoing')
+            }}
           />
         </section>
       ) : null}
@@ -1132,31 +1286,34 @@ export function PosApp() {
           <OngoingOrdersBoard
             orders={ongoingOrders}
             selectedOrder={selectedOrder}
+            kitchenCategorySettings={menuCategoriesEnabled}
+            categoryByProductId={categoryByProductId}
             onSelectOrder={setSelectedOrderId}
             onToggleItem={updateOrderItem}
             onMarkAllServed={markAllServed}
             onGoToPayment={markPaid}
             onViewDetails={requestEditOrder}
             onAddOrder={startAddOrder}
+            onQuickAddRice={quickAddRice}
+            onCustomerPrepaid={markPaid}
             onCancelOrder={requestCancelOrder}
             onReprintOrder={reprintKitchenTicket}
+            onEditNotes={editOrderNotes}
           />
         </section>
       ) : null}
 
-      {activeTab === 'sale-tracker' ? (
-        <section className="pos-workspace">
-          <SaleTrackerPage
-            deviceId={deviceId}
-            staffName={activeEmployeeName}
-            shiftSession={activeShiftSession}
-            orderType={orderType}
-            halfOrderEnabled={halfOrderEnabled}
-            onOrderTypeChange={setOrderType}
-            onHalfOrderToggle={() => setHalfOrderEnabled((enabled) => !enabled)}
-          />
-        </section>
-      ) : null}
+      <section className="pos-workspace" hidden={activeTab !== 'sale-tracker'}>
+        <SaleTrackerPage
+          deviceId={deviceId}
+          staffName={activeEmployeeName}
+          shiftSession={activeShiftSession}
+          orderType={orderType}
+          halfOrderEnabled={halfOrderEnabled}
+          onOrderTypeChange={setOrderType}
+          onHalfOrderToggle={() => setHalfOrderEnabled((enabled) => !enabled)}
+        />
+      </section>
       {!activeShiftSession ? <div className="shift-lock-overlay"><section><Clock3 size={38} /><h2>Clock in to start</h2><p>Select the cashier in the sidebar. Orders and financial entries are locked until a shift is open.</p></section></div> : null}
 
       {activeTab === 'settings' ? (
@@ -1173,6 +1330,7 @@ export function PosApp() {
             onAutoPrintReceiptChange={setAutoPrintReceipt}
             onReceiptCopiesChange={setReceiptCopies}
             onReceiptPrintSettingsChange={setReceiptPrintSettings}
+            onProductStatusChange={changeMenuProductAvailability}
             onToggleMenuCategory={(category) => setMenuCategoriesEnabled((current) => ({
               ...current,
               [category]: !isKitchenCategoryEnabled(current, category),
@@ -1181,29 +1339,14 @@ export function PosApp() {
         </section>
       ) : null}
 
-      {checkoutTarget ? (
-        <PaymentModal
-          target={checkoutTarget}
-          ticketItems={ticketItems}
-          order={checkoutTarget.type === 'order' ? orders.find((order) => order.id === checkoutTarget.orderId) ?? null : null}
-          onClose={() => setCheckoutTarget(null)}
-          onConfirm={(target) => {
-            if (target.type === 'ticket') {
-              completeTicketPayment()
-            } else {
-              completeOrderPayment(target.orderId)
-            }
-          }}
-        />
-      ) : null}
-
       {kitchenNoteTarget ? (
         <SendToKitchenModal
           target={kitchenNoteTarget}
           occupiedTables={buildOccupiedTableMap(orders, kitchenNoteTarget.editOrderId ?? kitchenNoteTarget.appendToOrderId)}
           onCancel={() => setKitchenNoteTarget(null)}
           onSend={(note) => {
-            void saveOrder(note)
+            if (kitchenNoteTarget.noteOrderId) void saveOrderNotes(kitchenNoteTarget.noteOrderId, note)
+            else void saveOrder(note)
           }}
         />
       ) : null}
@@ -1256,7 +1399,6 @@ type OrderTicketPanelProps = {
   onChangeQuantity: (lineId: string, delta: number) => void
   onRemoveItem: (lineId: string) => void
   onSaveOrder: () => void
-  onCharge: () => void
   onClear: () => void
 }
 
@@ -1282,30 +1424,22 @@ function SendToKitchenModal({
   onCancel: () => void
   onSend: (note: string) => void
 }) {
-  const [selectedTable, setSelectedTable] = useState('')
-  const [selectedColor, setSelectedColor] = useState('')
-  const [selectedIdentifier, setSelectedIdentifier] = useState('')
-  const [customNote, setCustomNote] = useState('')
-  const [customElementDraft, setCustomElementDraft] = useState('')
-  const [customElements, setCustomElements] = useState<string[]>([])
-  const [kitchenNote, setKitchenNote] = useState('')
+  const initial = parsePreparedOrderNote(target.initialNote ?? '')
+  const [selectedTable, setSelectedTable] = useState(initial.table)
+  const [selectedColor, setSelectedColor] = useState(initial.color)
+  const [selectedIdentifier, setSelectedIdentifier] = useState(initial.identifier)
+  const [customNote, setCustomNote] = useState(initial.customerNote)
+  const [kitchenNote, setKitchenNote] = useState(initial.kitchenNote)
   const customNoteValue = customNote.trim()
   const kitchenNoteValue = kitchenNote.trim()
-  const selectedNotes = [selectedTable, selectedColor ? `${selectedColor} shirt` : '', selectedIdentifier, ...customElements].filter(Boolean)
+  const selectedNotes = [selectedTable, selectedColor ? `${selectedColor} shirt` : '', selectedIdentifier].filter(Boolean)
   const customerNote = [...selectedNotes, customNoteValue].filter(Boolean).join(' - ')
   const note = [
     customerNote ? `Customer: ${customerNote}` : '',
     kitchenNoteValue ? `Kitchen: ${kitchenNoteValue}` : '',
   ].filter(Boolean).join(' | ')
-  const canSend = selectedNotes.length > 0 || customNoteValue.length > 0 || kitchenNoteValue.length > 0
+  const canSend = Boolean(target.noteOrderId) || selectedNotes.length > 0 || customNoteValue.length > 0 || kitchenNoteValue.length > 0
   const selectedTableStatus = selectedTable ? occupiedTables[selectedTable] : undefined
-
-  function addCustomElement() {
-    const value = customElementDraft.trim()
-    if (!value || customElements.includes(value)) return
-    setCustomElements((current) => [...current, value].slice(0, 8))
-    setCustomElementDraft('')
-  }
 
   return (
     <div className="modal-backdrop kitchen-note-backdrop" role="presentation">
@@ -1328,7 +1462,7 @@ function SendToKitchenModal({
             <CircleAlert className="send-kitchen-modal__warning-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
             <p>{selectedTableStatus
               ? `${selectedTable} already has an order under ${selectedTableStatus}. You may continue, but confirm this is the correct table.`
-              : 'Please add a note before sending to the kitchen.'}</p>
+              : 'Select a quick note or add a customer or kitchen note before preparing the order.'}</p>
           </div>
 
           <div className="kitchen-note-section">
@@ -1396,42 +1530,6 @@ function SendToKitchenModal({
             </div>
           </div>
 
-          <div className="kitchen-note-section">
-            <strong className="send-kitchen-modal__section-label">
-              <Tag className="send-kitchen-modal__section-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
-              <span>Your Tags <em>(Add your own)</em></span>
-            </strong>
-            <div className="kitchen-custom-tag-entry">
-              <input
-                maxLength={24}
-                value={customElementDraft}
-                onChange={(event) => setCustomElementDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    addCustomElement()
-                  }
-                }}
-                placeholder="e.g. red cap, outside table, senior"
-              />
-              <button type="button" onClick={addCustomElement}>Add</button>
-            </div>
-            {customElements.length > 0 ? (
-              <div className="kitchen-custom-tags">
-                {customElements.map((tag) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => setCustomElements((current) => current.filter((item) => item !== tag))}
-                  >
-                    <span>{tag}</span>
-                    <X size={12} strokeWidth={1.8} aria-hidden="true" />
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
           <label className="kitchen-note-field">
             <span className="send-kitchen-modal__field-label">
               <User className="send-kitchen-modal__section-icon" size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -1465,7 +1563,7 @@ function SendToKitchenModal({
           <button type="button" className="modal-secondary" onClick={onCancel}>Cancel</button>
           <button type="button" className="modal-primary" disabled={!canSend} onClick={() => onSend(note)}>
             <Utensils className="send-kitchen-modal__footer-icon" size={18} strokeWidth={1.8} aria-hidden="true" />
-            Prepare Order
+            {target.noteOrderId ? 'Save Notes' : 'Prepare Order'}
           </button>
         </footer>
       </section>
@@ -1517,83 +1615,41 @@ function AdminApprovalModal({
   )
 }
 
-function PaymentModal({
+export function PaymentModal({
   target,
-  ticketItems,
   order,
   onClose,
   onConfirm,
 }: {
   target: CheckoutTarget
-  ticketItems: TicketItem[]
   order: RestaurantOrder | null
   onClose: () => void
-  onConfirm: (target: CheckoutTarget) => void
+  onConfirm: (target: CheckoutTarget, payment: OrderPaymentInput) => void
 }) {
   const [method, setMethod] = useState<PaymentMethod>('cash')
   const [cashReceived, setCashReceived] = useState('')
   const [gcashReference, setGcashReference] = useState('')
-  const [splitCash, setSplitCash] = useState('')
-  const [splitGcash, setSplitGcash] = useState('')
-  const [splitField, setSplitField] = useState<'cash' | 'gcash'>('cash')
-  const [keypadTarget, setKeypadTarget] = useState<'amount' | 'reference'>('amount')
-  const items = target.type === 'ticket'
-    ? ticketItems.map((item) => ({ id: item.productId, name: item.name, quantity: item.quantity, price: item.price, served: true }))
-    : order?.items ?? []
+  const items = order?.items ?? []
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0)
   const tax = subtotal * taxRate
   const total = subtotal + tax
+  const balance = order ? orderBalance(order) : total
   const cashValue = Number(cashReceived) || 0
-  const splitCashValue = Number(splitCash) || 0
-  const splitGcashValue = Number(splitGcash) || 0
-  const paidAmount = method === 'cash' ? cashValue : method === 'gcash' ? total : splitCashValue + splitGcashValue
-  const change = method === 'cash' ? Math.max(0, cashValue - total) : method === 'split' ? Math.max(0, paidAmount - total) : 0
-  const needsReference = method === 'gcash' || method === 'split'
+  const change = method === 'cash' ? Math.max(0, cashValue - balance) : 0
   const canConfirm = items.length > 0
-    && (method !== 'cash' || cashValue >= total)
+    && balance > 0
+    && (method !== 'cash' || cashValue >= balance)
     && (method !== 'gcash' || gcashReference.trim().length === 6)
-    && (method !== 'split' || (paidAmount >= total && gcashReference.trim().length === 6 && splitGcashValue > 0))
 
-  const amountDisplay = method === 'cash'
-    ? cashReceived
-    : method === 'gcash'
-      ? String(total)
-      : splitField === 'cash'
-        ? splitCash
-        : splitGcash
   function setMethodAndDefaults(nextMethod: PaymentMethod) {
     setMethod(nextMethod)
-    setKeypadTarget(nextMethod === 'gcash' ? 'reference' : 'amount')
     if (nextMethod === 'gcash') {
       setCashReceived('')
-      setSplitCash('')
-      setSplitGcash('')
-    }
-    if (nextMethod === 'cash') {
-      setSplitCash('')
-      setSplitGcash('')
     }
   }
 
   function updateActiveAmount(value: string) {
-    if (method === 'cash') {
-      setCashReceived(value)
-    } else if (method === 'split') {
-      updateSplitAmount(splitField, value)
-    }
-  }
-
-  function updateSplitAmount(field: 'cash' | 'gcash', value: string) {
-    const numeric = normalizeAmountInput(value)
-    const clamped = clampAmount(numeric, total)
-    const remaining = clampAmount(String(total - Number(clamped || 0)), total)
-    if (field === 'cash') {
-      setSplitCash(clamped)
-      setSplitGcash(remaining)
-    } else {
-      setSplitGcash(clamped)
-      setSplitCash(remaining)
-    }
+    setCashReceived(normalizeAmountInput(value))
   }
 
   function appendReference(value: string) {
@@ -1606,19 +1662,14 @@ function PaymentModal({
 
   function appendAmount(value: string) {
     if (method === 'gcash') return
-    const current = amountDisplay || ''
+    const current = cashReceived || ''
     if (value === '.' && current.includes('.')) return
     updateActiveAmount(current === '0' && value !== '.' ? value : `${current}${value}`)
   }
 
   function backspaceAmount() {
     if (method === 'gcash') return
-    updateActiveAmount((amountDisplay || '').slice(0, -1))
-  }
-
-  function addAmount(value: number) {
-    if (method === 'gcash') return
-    updateActiveAmount(String((Number(amountDisplay) || 0) + value))
+    updateActiveAmount((cashReceived || '').slice(0, -1))
   }
 
   return (
@@ -1627,14 +1678,20 @@ function PaymentModal({
         <section className="checkout-summary-panel">
           <header>
             <h2 id="payment-title">Order Summary</h2>
-            <span>{items.length} items</span>
+            <span>{items.length} {items.length === 1 ? 'item' : 'items'}</span>
           </header>
           <div className="checkout-summary-items">
             {items.map((item) => (
               <article key={item.id}>
                 <div>
                   <strong>{item.name}</strong>
-                  <small>{target.type === 'ticket' ? 'Current order' : `Order ${target.orderId}`}</small>
+                  <small className={item.paidQuantity > 0 ? 'item-payment-note' : undefined}>
+                    {item.paidQuantity >= item.quantity
+                      ? `Paid x${item.quantity}`
+                      : item.paidQuantity > 0
+                        ? `Paid x${item.paidQuantity} · Unpaid x${item.quantity - item.paidQuantity}`
+                        : 'Unpaid'}
+                  </small>
                 </div>
                 <div>
                   <strong>{formatPhp(item.price * item.quantity)}</strong>
@@ -1644,76 +1701,36 @@ function PaymentModal({
             ))}
           </div>
           <section className="checkout-totals">
-            <div><span>Subtotal</span><strong>{formatPhp(subtotal)}</strong></div>
-            <div><span>Tax (0%)</span><strong>{formatPhp(tax)}</strong></div>
-            <div className="checkout-total"><span>Total</span><strong>{formatPhp(total)}</strong></div>
+            <div><span>Order total</span><strong>{formatPhp(total)}</strong></div>
+            {order && order.paymentReceived > 0 ? <div><span>Previously paid</span><strong>{formatPhp(Math.min(total, order.paymentReceived))}</strong></div> : null}
+            <div className="checkout-total"><span>Amount due</span><strong>{formatPhp(balance)}</strong></div>
           </section>
         </section>
 
         <section className="checkout-payment-panel">
           <header>
             <div>
-              <p className="eyebrow">Checkout</p>
-              <h2>{target.type === 'ticket' ? 'Payment' : `Payment ${target.orderId}`}</h2>
+              <p className="eyebrow">▣ &nbsp; Checkout&nbsp; • &nbsp;Full payment</p>
+              <h2>Payment {formatPosOrderRef(target.orderId)}</h2>
             </div>
-            <button type="button" className="modal-close" onClick={onClose}>Close</button>
+            <div className="checkout-header-actions">
+              <div className="payment-methods" aria-label="Payment method">
+                <button type="button" className={method === 'cash' ? 'is-active' : ''} onClick={() => setMethodAndDefaults('cash')}><Banknote size={19} /><span>Cash</span></button>
+                <button type="button" className={method === 'gcash' ? 'is-active' : ''} onClick={() => setMethodAndDefaults('gcash')}><span className="gcash-mark">G</span><span>GCash</span></button>
+              </div>
+              <button type="button" className="modal-close checkout-close" onClick={onClose}><X size={22} /><span>Close</span></button>
+            </div>
           </header>
 
           <div className="payment-body">
-            <section>
-              <p className="checkout-label">Payment Method</p>
-              <div className="payment-methods" aria-label="Payment method">
-                <button type="button" className={method === 'cash' ? 'is-active' : ''} onClick={() => setMethodAndDefaults('cash')}><span>$</span>Cash</button>
-                <button type="button" className={method === 'gcash' ? 'is-active' : ''} onClick={() => setMethodAndDefaults('gcash')}><span>G</span>GCash</button>
-                <button type="button" className={method === 'split' ? 'is-active' : ''} onClick={() => setMethodAndDefaults('split')}><span>/</span>Split</button>
-              </div>
-            </section>
-
-            {method === 'gcash' ? (
-              <section className="gcash-total-display">
-                <span>GCash Amount</span>
-                <strong>{formatPhp(total)}</strong>
-              </section>
-            ) : method === 'split' ? (
-              <div className="split-fields">
-                <label className={`payment-field ${splitField === 'cash' ? 'is-active' : ''}`}>
-                  <span>Cash Amount</span>
-                  <input
-                    type="number"
-                    min="0"
-                    inputMode="decimal"
-                    value={splitCash}
-                    onFocus={() => {
-                      setSplitField('cash')
-                      setKeypadTarget('amount')
-                    }}
-                    onChange={(event) => updateSplitAmount('cash', event.target.value)}
-                  />
-                </label>
-                <label className={`payment-field ${splitField === 'gcash' ? 'is-active' : ''}`}>
-                  <span>GCash Amount</span>
-                  <input
-                    type="number"
-                    min="0"
-                    inputMode="decimal"
-                    value={splitGcash}
-                    onFocus={() => {
-                      setSplitField('gcash')
-                      setKeypadTarget('amount')
-                    }}
-                    onChange={(event) => updateSplitAmount('gcash', event.target.value)}
-                  />
-                </label>
-              </div>
-            ) : (
+            {method === 'cash' ? (
               <div className="amount-change-row">
                 <label className="payment-field amount-tendered">
                   <span>Amount Tendered</span>
                   <input
                     type="text"
                     inputMode="decimal"
-                    value={amountDisplay}
-                    onFocus={() => setKeypadTarget('amount')}
+                    value={cashReceived}
                     onChange={(event) => updateActiveAmount(event.target.value)}
                   />
                 </label>
@@ -1722,10 +1739,8 @@ function PaymentModal({
                   <strong>{formatPhp(change)}</strong>
                 </section>
               </div>
-            )}
-
-            {needsReference ? (
-              <label className="payment-field">
+            ) : (
+              <label className="payment-field gcash-reference-field">
                 <span>Last 6 digits of GCash number</span>
                 <input
                   type="text"
@@ -1733,45 +1748,32 @@ function PaymentModal({
                   pattern="[0-9]*"
                   maxLength={6}
                   value={gcashReference}
-                  onFocus={() => setKeypadTarget('reference')}
                   onChange={(event) => setGcashReference(event.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="Last 6 digits"
+                  placeholder="—  —  —  —  —  —"
+                  aria-label="Last 6 digits of GCash number"
                 />
               </label>
-            ) : (
-              <div className="payment-field-placeholder" aria-hidden="true" />
             )}
 
-            {method !== 'gcash' && keypadTarget === 'amount' ? (
-              <div className="amount-keypad-panel">
-                <div className="keypad-grid">
-                  {['1', '2', '3'].map((key) => <button key={key} type="button" onClick={() => appendAmount(key)}>{key}</button>)}
-                  <button type="button" onClick={backspaceAmount}>Back</button>
-                  {['4', '5', '6'].map((key) => <button key={key} type="button" onClick={() => appendAmount(key)}>{key}</button>)}
-                  <button type="button" onClick={() => updateActiveAmount('')}>Clear</button>
-                  {['7', '8', '9'].map((key) => <button key={key} type="button" onClick={() => appendAmount(key)}>{key}</button>)}
-                  <button type="button" onClick={() => addAmount(1)}>+ P1</button>
-                  <button type="button" onClick={() => appendAmount('.')}>.</button>
-                  <button type="button" onClick={() => appendAmount('0')}>0</button>
-                  <button type="button" onClick={() => appendAmount('00')}>00</button>
-                  <button type="button" onClick={() => addAmount(5)}>+ P5</button>
-                </div>
-              </div>
-            ) : null}
+            <div className="checkout-keypad">
+              {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((key) => (
+                <button key={key} type="button" onClick={() => method === 'gcash' ? appendReference(key) : appendAmount(key)}>{key}</button>
+              ))}
+              <button type="button" onClick={() => method === 'gcash' ? appendReference('0') : appendAmount('0')}>0</button>
+              <button type="button" className="keypad-action" onClick={() => method === 'gcash' ? backspaceReference() : backspaceAmount()}>⌫ <span>Back</span></button>
+              <button type="button" className="keypad-action keypad-clear" onClick={() => method === 'gcash' ? setGcashReference('') : updateActiveAmount('')}><Trash2 size={24} /><span>Clear</span></button>
+            </div>
 
-            {needsReference && (method === 'gcash' || keypadTarget === 'reference') ? (
-              <div className="reference-keypad">
-                {['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'].map((key) => (
-                  <button key={key} type="button" onClick={() => appendReference(key)}>{key}</button>
-                ))}
-                <button type="button" onClick={backspaceReference}>Back</button>
-                <button type="button" onClick={() => setGcashReference('')}>Clear Ref</button>
-              </div>
-            ) : null}
-
-            <button type="button" className="modal-primary process-payment-button" disabled={!canConfirm} onClick={() => onConfirm(target)}>
-              Process Payment
-              <strong>{formatPhp(total)}</strong>
+            <button type="button" className="modal-primary process-payment-button" disabled={!canConfirm} onClick={() => onConfirm(target, {
+              method,
+              amount: balance,
+              reference: method === 'gcash' ? gcashReference : '',
+              notes: '',
+              cashAmount: method === 'cash' ? cashValue : undefined,
+              gcashAmount: method === 'gcash' ? balance : undefined,
+            })}>
+              <Check size={24} />
+              <strong>Confirm payment {formatPhp(balance)}</strong>
             </button>
           </div>
         </section>
@@ -1789,7 +1791,6 @@ function OrderTicketPanel({
   onChangeQuantity,
   onRemoveItem,
   onSaveOrder,
-  onCharge,
   onClear,
 }: OrderTicketPanelProps) {
   const emptyMessage = mode === 'add'
@@ -1868,18 +1869,6 @@ function OrderTicketPanel({
           </div>
           <button type="button" disabled={ticketItems.length === 0} onClick={onSaveOrder}>Prepare Order</button>
         </article>
-        {mode !== 'add' ? (
-          <article>
-            <div>
-              <span className="ticket-status-icon"><WalletCards size={18} aria-hidden="true" /></span>
-              <div>
-                <strong>Pay Immediately</strong>
-                <small>Collect payment now if needed</small>
-              </div>
-            </div>
-            <button type="button" disabled={ticketItems.length === 0} onClick={onCharge}>Charge / Pay</button>
-          </article>
-        ) : null}
       </section>
     </aside>
   )
@@ -1916,15 +1905,20 @@ export function KitchenOrdersPage({ orders, onToggleItem, onStatusChange }: Kitc
 type OngoingOrdersPageProps = {
   orders: RestaurantOrder[]
   selectedOrder: RestaurantOrder | null
+  kitchenCategorySettings?: Record<string, boolean>
+  categoryByProductId?: Map<string, string>
   onSelectOrder: (orderId: string) => void
   onToggleItem: (orderId: string, itemId: string, served: boolean) => void
   onMarkAllServed: (orderId: string) => void
   onViewDetails: (orderId: string) => void
   onGoToPayment: (orderId: string) => void
   onAddOrder?: (orderId: string) => void
+  onQuickAddRice?: (orderId: string) => void
+  onCustomerPrepaid?: (orderId: string) => void
   onCancelOrder?: (orderId: string) => void
   onReprintOrder?: (orderId: string) => void
   onApplyPayment?: (orderId: string, payment: OrderPaymentInput) => void
+  onEditNotes?: (orderId: string) => void
 }
 
 type OrderPaymentInput = {
@@ -1940,13 +1934,18 @@ type OrderPaymentInput = {
 function OngoingOrdersBoard({
   orders,
   selectedOrder,
+  kitchenCategorySettings = {},
+  categoryByProductId = new Map(),
   onSelectOrder,
   onToggleItem,
   onMarkAllServed,
   onViewDetails,
   onAddOrder,
+  onQuickAddRice,
+  onCustomerPrepaid,
   onCancelOrder,
   onReprintOrder,
+  onEditNotes,
 }: OngoingOrdersPageProps) {
   const [sort, setSort] = useState<OrderSort>('oldest')
   const [viewMode, setViewMode] = useState<'tiles' | 'list'>('tiles')
@@ -1977,6 +1976,8 @@ function OngoingOrdersBoard({
             <OngoingTrackingCard
               key={order.id}
               order={order}
+              kitchenCategorySettings={kitchenCategorySettings}
+              categoryByProductId={categoryByProductId}
               selected={selectedOrder?.id === order.id}
               onSelect={() => onSelectOrder(order.id)}
             />
@@ -1991,8 +1992,11 @@ function OngoingOrdersBoard({
         onMarkAllServed={onMarkAllServed}
         onViewDetails={onViewDetails}
         onAddOrder={onAddOrder}
+        onQuickAddRice={onQuickAddRice}
+        onCustomerPrepaid={onCustomerPrepaid}
         onCancelOrder={onCancelOrder}
         onReprintOrder={onReprintOrder}
+        onEditNotes={onEditNotes}
       />
     </section>
   )
@@ -2000,15 +2004,20 @@ function OngoingOrdersBoard({
 
 function OngoingTrackingCard({
   order,
+  kitchenCategorySettings,
+  categoryByProductId,
   selected,
   onSelect,
 }: {
   order: RestaurantOrder
+  kitchenCategorySettings: Record<string, boolean>
+  categoryByProductId: Map<string, string>
   selected: boolean
   onSelect: () => void
 }) {
   const ready = allItemsServed(order)
-  const kitchenPrinted = order.items.length > 0 && order.items.every((item) => item.kitchenPrintedQuantity >= item.quantity)
+  const kitchenItems = kitchenPrintableItems(order.items, kitchenCategorySettings, categoryByProductId)
+  const hasUnprintedKitchenItems = kitchenItems.some((item) => item.kitchenPrintedQuantity < item.quantity)
   return (
     <article className={`mini-order-card ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''}`} onClick={onSelect}>
       <span className="order-card-icon"><Utensils size={24} aria-hidden="true" /></span>
@@ -2023,7 +2032,8 @@ function OngoingTrackingCard({
         <div className="mini-subhead">
           <span>{formatOrderType(order.orderType)}</span>
           <span className={`status-pill status-${order.status}`}>{statusLabel(order.status)}</span>
-          {!kitchenPrinted ? <span className="print-status-pill is-not-printed">NOT PRINTED</span> : null}
+          {paymentStatus(order) === 'paid' && !order.paid ? <span className="status-pill payment-paid">PREPAID</span> : null}
+          {hasUnprintedKitchenItems ? <span className="print-status-pill is-not-printed">NOT PRINTED</span> : null}
         </div>
         <footer>
           <span>{minutesAgo(order.createdAt)} mins ago</span>
@@ -2041,16 +2051,22 @@ function OngoingTrackingDetailPanel({
   onMarkAllServed,
   onViewDetails,
   onAddOrder,
+  onQuickAddRice,
+  onCustomerPrepaid,
   onCancelOrder,
   onReprintOrder,
+  onEditNotes,
 }: {
   order: RestaurantOrder | null
   onToggleItem: (orderId: string, itemId: string, served: boolean) => void
   onMarkAllServed: (orderId: string) => void
   onViewDetails: (orderId: string) => void
   onAddOrder?: (orderId: string) => void
+  onQuickAddRice?: (orderId: string) => void
+  onCustomerPrepaid?: (orderId: string) => void
   onCancelOrder?: (orderId: string) => void
   onReprintOrder?: (orderId: string) => void
+  onEditNotes?: (orderId: string) => void
 }) {
   const [confirmingReprint, setConfirmingReprint] = useState(false)
 
@@ -2074,6 +2090,7 @@ function OngoingTrackingDetailPanel({
           <span className="detail-order-subtitle">New Order</span>
           <span>Table {tableNumber(order.id)} - {formatOrderType(order.orderType)}</span>
           <span className={`status-pill status-${order.status}`}>{statusLabel(order.status)}</span>
+          {paymentStatus(order) === 'paid' && !order.paid ? <span className="status-pill payment-paid">PREPAID</span> : null}
         </div>
         <div className="detail-time">
           <time>{formatOrderTime(order.createdAt)}</time>
@@ -2101,13 +2118,21 @@ function OngoingTrackingDetailPanel({
       </section>
       <section>
         <strong>Notes</strong>
-        <p className="notes-box">{order.paymentNotes || 'No special instructions'}</p>
+        <button type="button" className="notes-box notes-box-button" onClick={() => onEditNotes?.(order.id)} aria-label={`Edit notes for ${formatPosOrderRef(order.id)}`}>
+          <span>{order.paymentNotes || 'No special instructions'}</span><Pencil size={15} aria-hidden="true" />
+        </button>
       </section>
       <section className="detail-actions">
         <button type="button" className="send-kitchen" onClick={() => onMarkAllServed(order.id)}>
           <CircleCheckBig size={16} /> {allReady ? 'Mark as Served' : 'Mark All Ready'}
         </button>
         <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
+        <button type="button" onClick={() => onQuickAddRice?.(order.id)}><Plus size={16} /> Extra Rice</button>
+        {paymentStatus(order) === 'paid' ? (
+          <button type="button" disabled><CircleCheckBig size={16} /> Prepay</button>
+        ) : (
+          <button type="button" onClick={() => onCustomerPrepaid?.(order.id)}><WalletCards size={16} /> Prepay</button>
+        )}
         <button type="button" className="edit-order-action" onClick={() => onViewDetails(order.id)}><Pencil size={16} /> Edit Order</button>
         <button type="button" onClick={() => setConfirmingReprint(true)}><RefreshCw size={16} /> Reprint</button>
         <button type="button" className="cancel-order-action" onClick={() => onCancelOrder?.(order.id)}><X size={16} /> Cancel Order</button>
@@ -2139,7 +2164,19 @@ function FinishOrdersBoard({
   onSelectOrder,
   onToggleItem,
   onApplyPayment,
-}: OngoingOrdersPageProps) {
+  onAddOrder,
+  onQuickAddRice,
+  employees,
+  onApplyEmployeePayment,
+  onEditNotes,
+  autoOpenPaymentOrderId,
+  onPaymentDismiss,
+}: OngoingOrdersPageProps & {
+  employees: PosEmployee[]
+  onApplyEmployeePayment: (orderId: string, employee: PosEmployee) => Promise<void>
+  autoOpenPaymentOrderId?: string | null
+  onPaymentDismiss?: () => void
+}) {
   const [filter, setFilter] = useState<PaymentFilter>('all')
   const [sort, setSort] = useState<OrderSort>('oldest')
   const [viewMode, setViewMode] = useState<'tiles' | 'list'>('tiles')
@@ -2195,6 +2232,13 @@ function FinishOrdersBoard({
         order={selectedOrder}
         onToggleItem={onToggleItem}
         onApplyPayment={onApplyPayment}
+        onAddOrder={onAddOrder}
+        onQuickAddRice={onQuickAddRice}
+        employees={employees}
+        onApplyEmployeePayment={onApplyEmployeePayment}
+        onEditNotes={onEditNotes}
+        autoOpenPayment={selectedOrder?.id === autoOpenPaymentOrderId}
+        onPaymentDismiss={onPaymentDismiss}
       />
     </section>
   )
@@ -2242,10 +2286,24 @@ function FinishOrderDetailPanel({
   order,
   onToggleItem,
   onApplyPayment,
+  onAddOrder,
+  onQuickAddRice,
+  employees,
+  onApplyEmployeePayment,
+  onEditNotes,
+  autoOpenPayment = false,
+  onPaymentDismiss,
 }: {
   order: RestaurantOrder | null
   onToggleItem: (orderId: string, itemId: string, served: boolean) => void
   onApplyPayment?: (orderId: string, payment: OrderPaymentInput) => void
+  onAddOrder?: (orderId: string) => void
+  onQuickAddRice?: (orderId: string) => void
+  employees: PosEmployee[]
+  onApplyEmployeePayment: (orderId: string, employee: PosEmployee) => Promise<void>
+  onEditNotes?: (orderId: string) => void
+  autoOpenPayment?: boolean
+  onPaymentDismiss?: () => void
 }) {
   const [paymentMode, setPaymentMode] = useState<PaymentModeId>('full')
   const [method, setMethod] = useState<PaymentMethod>('cash')
@@ -2257,11 +2315,17 @@ function FinishOrderDetailPanel({
   const [splitField, setSplitField] = useState<'cash' | 'gcash'>('cash')
   const [keypadTarget, setKeypadTarget] = useState<'amount' | 'reference'>('amount')
   const [reference, setReference] = useState('')
-  const [notes, setNotes] = useState('')
   const [peopleCount, setPeopleCount] = useState(3)
-  const [customerName, setCustomerName] = useState('')
   const [splitItemQuantities, setSplitItemQuantities] = useState<Record<string, number>>({})
   const [paymentPopupOpen, setPaymentPopupOpen] = useState(false)
+  const [employeeId, setEmployeeId] = useState('')
+  const [employeePaymentBusy, setEmployeePaymentBusy] = useState(false)
+
+  useEffect(() => {
+    if (!autoOpenPayment || !order) return
+    setPaymentMode('full')
+    setPaymentPopupOpen(true)
+  }, [autoOpenPayment, order?.id])
 
   if (!order) {
     return (
@@ -2298,9 +2362,7 @@ function FinishOrderDetailPanel({
     && amountDue > 0
     && amountDue <= balance
     && (method !== 'cash' || cashReceivedValue >= amountDue)
-    && (method !== 'gcash' || gcashReceivedValue >= amountDue)
     && (method !== 'split' || splitReceivedValue >= amountDue)
-    && (paymentMode !== 'credit' || customerName.trim().length > 0)
     && (method !== 'gcash' || reference.trim().length === 6)
     && (method !== 'split' || reference.trim().length === 6)
 
@@ -2354,22 +2416,12 @@ function FinishOrderDetailPanel({
     updateActivePaymentAmount(activePaymentAmount().slice(0, -1))
   }
 
-  function addPaymentAmount(value: number) {
-    if (keypadTarget === 'reference') return
-    updateActivePaymentAmount(String(roundCurrency((Number(activePaymentAmount()) || 0) + value)))
-  }
-
   function clearPaymentAmount() {
     if (keypadTarget === 'reference') {
       setReference('')
       return
     }
     updateActivePaymentAmount('')
-  }
-
-  function exactPaymentAmount() {
-    if (keypadTarget === 'reference') return
-    updateActivePaymentAmount(String(amountDue))
   }
 
   return (
@@ -2403,6 +2455,13 @@ function FinishOrderDetailPanel({
               <div>
                 <strong>{item.name}</strong>
                 <small>{item.isHalfOrder ? 'Half Order - ' : ''}{itemCategory(item.name)} - {formatOrderType(item.orderType)}</small>
+                {item.paidQuantity > 0 ? (
+                  <small className="item-payment-note">
+                    {item.paidQuantity >= item.quantity
+                      ? `Paid x${item.quantity}`
+                      : `Paid x${item.paidQuantity} · Unpaid x${item.quantity - item.paidQuantity}`}
+                  </small>
+                ) : null}
               </div>
             </label>
           ))}
@@ -2410,7 +2469,13 @@ function FinishOrderDetailPanel({
       </section>
       <section>
         <strong>Notes</strong>
-        <p className="notes-box">{order.paymentNotes || 'No special instructions'}</p>
+        <button type="button" className="notes-box notes-box-button" onClick={() => onEditNotes?.(order.id)} aria-label={`Edit notes for ${formatPosOrderRef(order.id)}`}>
+          <span>{order.paymentNotes || 'No special instructions'}</span><Pencil size={15} aria-hidden="true" />
+        </button>
+      </section>
+      <section className="detail-actions">
+        <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
+        <button type="button" onClick={() => onQuickAddRice?.(order.id)}><Plus size={16} /> Extra Rice</button>
       </section>
       <section className="finish-payment-system">
         <strong>Payment Mode</strong>
@@ -2499,26 +2564,6 @@ function FinishOrderDetailPanel({
             </>
           ) : null}
 
-          {paymentMode === 'partial' ? (
-            <>
-              <p>Record a deposit or partial payment now.</p>
-              <label className="finish-reference-field">
-                <span>Partial Amount</span>
-                <input
-                  type="number"
-                  min="0"
-                  inputMode="decimal"
-                  value={amount}
-                  onChange={(event) => setAmount(normalizeAmountInput(event.target.value))}
-                />
-              </label>
-              <div className="finish-total-block compact">
-                <span>Remaining after payment</span>
-                <strong>{formatPhp(Math.max(0, balance - customAmount))}</strong>
-              </div>
-            </>
-          ) : null}
-
           {paymentMode === 'combine' ? (
             <>
               <p>Select orders to combine and pay together. Current order is included.</p>
@@ -2529,37 +2574,33 @@ function FinishOrderDetailPanel({
             </>
           ) : null}
 
-          {paymentMode === 'credit' ? (
-            <>
-              <p>Save this order as credit or a customer tab for later payment.</p>
-              <label className="finish-reference-field">
-                <span>Customer Name</span>
-                <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Search or enter customer..." />
-              </label>
-              <label className="finish-reference-field">
-                <span>Reason / Note</span>
-                <input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="e.g. Regular customer" />
-              </label>
-            </>
-          ) : null}
-
           {paymentMode === 'other' ? (
-            <>
-              <p>Use this for manager-approved payment handling or special cases.</p>
-              <label className="finish-reference-field">
-                <span>Instruction</span>
-                <input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Describe the payment arrangement..." />
-              </label>
-            </>
+            <label className="finish-reference-field employee-payment-field">
+              <span>Paying as Employee</span>
+              <span className="employee-select-shell">
+                <select value={employeeId} onChange={(event) => setEmployeeId(event.target.value)}>
+                  <option value="">Select employee...</option>
+                  {employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}
+                </select>
+                <i aria-hidden="true">⌄</i>
+              </span>
+            </label>
           ) : null}
         </section>
         <button
           type="button"
           className="confirm-payment-mode-button"
-          disabled={amountDue <= 0 || amountDue > balance || (paymentMode === 'credit' && customerName.trim().length === 0)}
-          onClick={() => setPaymentPopupOpen(true)}
+          disabled={amountDue <= 0 || amountDue > balance || (paymentMode === 'other' && !employeeId) || employeePaymentBusy}
+          onClick={async () => {
+            if (paymentMode !== 'other') { setPaymentPopupOpen(true); return }
+            const employee = employees.find((item) => item.id === employeeId)
+            if (!employee) return
+            setEmployeePaymentBusy(true)
+            try { await onApplyEmployeePayment(order.id, employee); setEmployeeId(''); setPaymentMode('full') }
+            finally { setEmployeePaymentBusy(false) }
+          }}
         >
-          Confirm Mode
+          {paymentMode === 'other' ? (employeePaymentBusy ? 'Recording...' : 'Confirm Employee Payment') : 'Confirm Mode'}
           <strong>{paymentModeLabel(paymentMode)} · {formatPhp(amountDue || balance)}</strong>
         </button>
       </section>
@@ -2570,14 +2611,20 @@ function FinishOrderDetailPanel({
             <section className="checkout-summary-panel">
               <header>
                 <h2 id="pending-payment-title">Order Summary</h2>
-                <span>{order.items.length} items</span>
+                <span>{order.items.length} {order.items.length === 1 ? 'item' : 'items'}</span>
               </header>
               <div className="checkout-summary-items">
                 {order.items.map((item) => (
                   <article key={item.id}>
                     <div>
                       <strong>{item.name}</strong>
-                      <small>Current order</small>
+                      <small className={item.paidQuantity > 0 ? 'item-payment-note' : undefined}>
+                        {item.paidQuantity >= item.quantity
+                          ? `Paid x${item.quantity}`
+                          : item.paidQuantity > 0
+                            ? `Paid x${item.paidQuantity} · Unpaid x${item.quantity - item.paidQuantity}`
+                            : `Unpaid x${item.quantity}`}
+                      </small>
                     </div>
                     <div>
                       <strong>{formatPhp(item.price * item.quantity)}</strong>
@@ -2588,7 +2635,7 @@ function FinishOrderDetailPanel({
               </div>
               <section className="checkout-totals">
                 <div><span>Order total</span><strong>{formatPhp(total)}</strong></div>
-                {order.paymentReceived > 0 ? <div><span>Previously paid</span><strong>{formatPhp(order.paymentReceived)}</strong></div> : null}
+                {order.paymentReceived > 0 ? <div><span>Previously paid</span><strong>{formatPhp(Math.min(total, order.paymentReceived))}</strong></div> : null}
                 <div className="checkout-total"><span>{paymentModeLabel(paymentMode)}</span><strong>{formatPhp(amountDue)}</strong></div>
               </section>
             </section>
@@ -2596,79 +2643,50 @@ function FinishOrderDetailPanel({
             <section className="checkout-payment-panel">
               <header>
                 <div>
-                  <p className="eyebrow">Checkout · {paymentModeLabel(paymentMode)}</p>
+                  <p className="eyebrow">▣ &nbsp; Checkout&nbsp; • &nbsp;{paymentModeLabel(paymentMode)}</p>
                   <h2>Payment {formatPosOrderRef(order.id)}</h2>
                 </div>
-                <button type="button" className="modal-close" onClick={() => setPaymentPopupOpen(false)}>Close</button>
+                <div className="finish-checkout-actions">
+                  <div className="finish-method-grid" aria-label="Payment method">
+                    <button type="button" className={method === 'cash' ? 'is-active' : ''} onClick={() => { setMethod('cash'); setKeypadTarget('amount') }}><Banknote size={18} />Cash</button>
+                    <button type="button" className={method === 'gcash' ? 'is-active' : ''} onClick={() => { setMethod('gcash'); setKeypadTarget('reference') }}><span className="gcash-mark">G</span>GCash</button>
+                  </div>
+                  <button type="button" className="modal-close finish-checkout-close" onClick={() => {
+                    setPaymentPopupOpen(false)
+                    if (autoOpenPayment) onPaymentDismiss?.()
+                  }}><X size={24} /><span>Close</span></button>
+                </div>
               </header>
               <div className="finish-popup-body">
-                <strong>Payment Method</strong>
-                <div className="finish-method-grid">
-          <button type="button" className={method === 'cash' ? 'is-active' : ''} onClick={() => { setMethod('cash'); setKeypadTarget('amount') }}>Cash</button>
-          <button type="button" className={method === 'gcash' ? 'is-active' : ''} onClick={() => { setMethod('gcash'); setKeypadTarget('amount') }}>GCash</button>
-          <button type="button" className={method === 'split' ? 'is-active' : ''} onClick={() => { setMethod('split'); setKeypadTarget('amount') }}>Split</button>
-                </div>
-        {method === 'split' ? (
-          <div className="finish-split-amounts">
-            <button type="button" className={splitField === 'cash' && keypadTarget === 'amount' ? 'is-active' : ''} onClick={() => { setSplitField('cash'); setKeypadTarget('amount') }}>
-              <span>Cash Amount</span>
-              <strong>{formatPhp(splitCashValue)}</strong>
-            </button>
-            <button type="button" className={splitField === 'gcash' && keypadTarget === 'amount' ? 'is-active' : ''} onClick={() => { setSplitField('gcash'); setKeypadTarget('amount') }}>
-              <span>GCash Amount</span>
-              <strong>{formatPhp(splitGcashValue)}</strong>
-            </button>
-          </div>
-        ) : (
-          <div className="finish-amount-row">
-            <label>
-              <span>{method === 'cash' ? 'Cash Received' : 'GCash Amount'}</span>
-              <input
-                type="text"
-                value={method === 'cash' ? cashReceived : gcashReceived}
-                readOnly
-                placeholder={method === 'cash' ? 'Enter cash received' : 'Enter GCash amount'}
-                onFocus={() => setKeypadTarget('amount')}
-                onClick={() => setKeypadTarget('amount')}
-              />
-            </label>
-            <div>
-              <span>Change</span>
-              <strong>{formatPhp(changeAmount)}</strong>
-            </div>
-          </div>
-        )}
+        {method === 'cash' ? (
+          <button
+            type="button"
+            className="finish-amount-row finish-cash-summary"
+            aria-label={`Cash received ${formatPhp(cashReceivedValue)}; change ${formatPhp(changeAmount)}`}
+            onClick={() => setKeypadTarget('amount')}
+          >
+            <span><small>Cash Received</small><strong>{formatPhp(cashReceivedValue)}</strong></span>
+            <span><small>Change</small><strong>{formatPhp(changeAmount)}</strong></span>
+          </button>
+        ) : null}
+        {method === 'gcash' ? (
+          <button
+            type="button"
+            className="finish-gcash-lines"
+            aria-label={`Last 6 digits of GCash number: ${reference || 'not entered'}`}
+            onClick={() => setKeypadTarget('reference')}
+          >
+            {Array.from({ length: 6 }, (_, index) => <span key={index}>{reference[index] ?? '—'}</span>)}
+          </button>
+        ) : null}
           <div className="finish-numberpad" aria-label="Payment number pad">
             {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((key) => (
               <button key={key} type="button" onClick={() => appendPaymentDigit(key)}>{key}</button>
             ))}
-            <button type="button" onClick={() => appendPaymentDigit('.')}>.</button>
             <button type="button" onClick={() => appendPaymentDigit('0')}>0</button>
-            <button type="button" onClick={backspacePaymentAmount}>Back</button>
-            <button type="button" onClick={exactPaymentAmount}>Exact</button>
-            <button type="button" onClick={() => addPaymentAmount(1)}>+ P1</button>
-            <button type="button" onClick={clearPaymentAmount}>Clear</button>
+            <button type="button" className="finish-keypad-action" onClick={backspacePaymentAmount}>⌫ <span>Back</span></button>
+            <button type="button" className="finish-keypad-action finish-keypad-clear" onClick={clearPaymentAmount}><Trash2 size={24} /><span>Clear</span></button>
           </div>
-        {method !== 'cash' ? (
-          <label className="finish-reference-field">
-            <span>Last 6 digits of GCash number</span>
-            <input
-              type="text"
-              inputMode="numeric"
-              maxLength={6}
-              value={reference}
-              readOnly
-              className={keypadTarget === 'reference' ? 'is-keypad-active' : ''}
-              onClick={() => setKeypadTarget('reference')}
-              onFocus={() => setKeypadTarget('reference')}
-              onChange={(event) => setReference(event.target.value.replace(/\D/g, '').slice(0, 6))}
-            />
-          </label>
-        ) : null}
-                <label className="finish-reference-field">
-          <span>Order Notes (Optional)</span>
-          <input value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Add payment note..." />
-                </label>
         <button
           type="button"
                   className="modal-primary process-payment-button"
@@ -2679,7 +2697,7 @@ function FinishOrderDetailPanel({
               method,
               amount: amountDue,
               reference: reference.trim(),
-              notes: [paymentModeLabel(paymentMode), notes.trim(), customerName.trim()].filter(Boolean).join(' - '),
+              notes: '',
               cashAmount: method === 'cash' ? amountDue : method === 'split' ? splitCashValue : 0,
               gcashAmount: method === 'gcash' ? amountDue : method === 'split' ? splitGcashValue : 0,
               itemPayments: paymentMode === 'split-items' ? splitItemQuantities : undefined,
@@ -2692,14 +2710,14 @@ function FinishOrderDetailPanel({
             setSplitField('cash')
             setKeypadTarget('amount')
             setReference('')
-            setNotes('')
-            setCustomerName('')
             setSplitItemQuantities({})
             setPaymentMode('full')
                     setPaymentPopupOpen(false)
           }}
         >
-          Confirm Payment {formatPhp(amountDue || balance)}
+          <Check size={24} /> {method === 'cash'
+            ? `Confirm Change ${formatPhp(changeAmount)}`
+            : `Confirm Payment ${formatPhp(amountDue || balance)}`}
         </button>
               </div>
             </section>
@@ -2945,15 +2963,16 @@ function SaleTrackerPage({
   onHalfOrderToggle: () => void
   shiftSession: ShiftSession | null
 }) {
-  const [payments, setPayments] = useState<SalePayment[]>([])
-  const [trackerStatus, setTrackerStatus] = useState('Loading payments...')
+  const cachedShiftMatches = saleTrackerCache.shiftId === (shiftSession?.shiftId ?? null)
+  const [payments, setPayments] = useState<SalePayment[]>(() => saleTrackerCache.payments)
+  const [trackerStatus, setTrackerStatus] = useState(() => cachedShiftMatches ? saleTrackerCache.status : 'Loading payments...')
   const [cardLayout, setCardLayout] = useState<'money-first' | 'counts-first'>('money-first')
   const [selectedPayment, setSelectedPayment] = useState<SalePayment | null>(null)
   const [showExpenseModal, setShowExpenseModal] = useState(false)
   const [showAdjustmentModal, setShowAdjustmentModal] = useState(false)
   const [showFinancialHistory, setShowFinancialHistory] = useState(false)
-  const [shiftExpenses, setShiftExpenses] = useState<CashMovement[]>([])
-  const [shiftAdjustments, setShiftAdjustments] = useState<ShiftAdjustment[]>([])
+  const [shiftExpenses, setShiftExpenses] = useState<CashMovement[]>(() => cachedShiftMatches ? saleTrackerCache.expenses : [])
+  const [shiftAdjustments, setShiftAdjustments] = useState<ShiftAdjustment[]>(() => cachedShiftMatches ? saleTrackerCache.adjustments : [])
   const [refreshRequest, setRefreshRequest] = useState(0)
 
   useEffect(() => {
@@ -2970,11 +2989,19 @@ function SaleTrackerPage({
         const movements = await fetchCashMovements()
         const adjustments = shiftSession ? await fetchShiftAdjustments(shiftSession.shiftId) : []
         if (!active) return
-        setPayments(rows)
-        setShiftExpenses(movements.filter((item) => shiftSession && item.movementKind === 'PAY_OUT' && cashMovementBelongsToShift(item, shiftSession)))
-        setShiftAdjustments(adjustments.filter((item) => shiftSession && shiftAdjustmentBelongsToShift(item, shiftSession)))
+        const currentExpenses = movements.filter((item) => shiftSession && item.movementKind === 'PAY_OUT' && cashMovementBelongsToShift(item, shiftSession))
+        const currentAdjustments = adjustments.filter((item) => shiftSession && shiftAdjustmentBelongsToShift(item, shiftSession))
         const currentShiftCount = shiftSession ? rows.filter((payment) => salePaymentBelongsToShift(payment, shiftSession)).length : 0
-        setTrackerStatus(`Live Supabase payments synced. ${currentShiftCount} current-shift records loaded.`)
+        const nextStatus = `Live Supabase payments synced. ${currentShiftCount} current-shift records loaded.`
+        saleTrackerCache.shiftId = shiftSession?.shiftId ?? null
+        saleTrackerCache.payments = rows
+        saleTrackerCache.expenses = currentExpenses
+        saleTrackerCache.adjustments = currentAdjustments
+        saleTrackerCache.status = nextStatus
+        setPayments(rows)
+        setShiftExpenses(currentExpenses)
+        setShiftAdjustments(currentAdjustments)
+        setTrackerStatus(nextStatus)
       } catch (error) {
         if (!active) return
         setTrackerStatus(error instanceof Error ? error.message : 'Could not load payments.')
@@ -3442,6 +3469,10 @@ function SalePaymentDetailsModal({ payment, cashierName, onClose }: { payment: S
               ))}
             </div>
           </section>
+          <section className="sale-detail-note">
+            <span>Order Notes</span>
+            <p>{payment.orderNote?.trim() || 'No order notes recorded.'}</p>
+          </section>
         </div>
         <footer>
           <button type="button" className="modal-secondary" onClick={onClose}>Close</button>
@@ -3464,6 +3495,7 @@ function SettingsPage({
   onAutoPrintReceiptChange,
   onReceiptCopiesChange,
   onReceiptPrintSettingsChange,
+  onProductStatusChange,
 }: {
   history: RestaurantOrder[]
   products: PosMenuProduct[]
@@ -3476,6 +3508,7 @@ function SettingsPage({
   onAutoPrintReceiptChange: (enabled: boolean) => void
   onReceiptCopiesChange: (copies: number) => void
   onReceiptPrintSettingsChange: (settings: ReceiptPrintSettings) => void
+  onProductStatusChange: (productId: string, status: ProductStatus) => Promise<void>
   onToggleMenuCategory: (category: string) => void
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('menu')
@@ -3487,6 +3520,8 @@ function SettingsPage({
   const [movementNote, setMovementNote] = useState('')
   const [printSettingsStatus, setPrintSettingsStatus] = useState('Receipt settings are saved on this POS browser.')
   const [printerDetectionLog, setPrinterDetectionLog] = useState<PrinterDetectionLogEntry[]>(readPrinterDetectionLog)
+  const [savingProductId, setSavingProductId] = useState<string | null>(null)
+  const [menuStatusMessage, setMenuStatusMessage] = useState('Availability changes sync with Admin Web and the live POS menu.')
   const [activeMenuListCategory, setActiveMenuListCategory] = useState('All Items')
 
   useEffect(() => {
@@ -3575,6 +3610,18 @@ function SettingsPage({
     setPrintSettingsStatus(`${result.state}: ${result.message}`)
   }
 
+  async function setProductAvailability(product: PosMenuProduct, nextStatus: ProductStatus) {
+    setSavingProductId(product.id)
+    try {
+      await onProductStatusChange(product.id, nextStatus)
+      setMenuStatusMessage(`${product.name} changed to ${productStatusLabel(nextStatus)}.`)
+    } catch (error) {
+      setMenuStatusMessage(error instanceof Error ? error.message : `Could not update ${product.name}.`)
+    } finally {
+      setSavingProductId(null)
+    }
+  }
+
   const settingSections: Array<{ id: SettingsSection; title: string; subtitle: string }> = [
     { id: 'menu', title: 'Menu List', subtitle: `${products.length} products` },
     { id: 'printing', title: 'Printing', subtitle: 'Receipt print setup' },
@@ -3610,6 +3657,7 @@ function SettingsPage({
         {activeSection === 'menu' ? (
           <section className="settings-panel">
             <SettingsPanelHeader title="Menu List" subtitle="Products and POS category visibility." />
+            <p className="settings-menu-sync-status" role="status">{menuStatusMessage}</p>
             <div className="settings-menu-manager">
               <aside className="settings-menu-categories">
                 <header>
@@ -3671,7 +3719,19 @@ function SettingsPage({
                       </div>
                       <span>{product.categoryName || 'Uncategorized'}</span>
                       <strong>{formatPhp(product.price)}</strong>
-                      <em className={product.status === 'AVAILABLE' ? 'is-active' : 'is-inactive'}>{productStatusLabel(product.status)}</em>
+                      <div className="settings-product-status" aria-label={`${product.name} status`}>
+                        {(['AVAILABLE', 'UNAVAILABLE', 'HIDDEN'] as ProductStatus[]).map((status) => (
+                          <button
+                            key={status}
+                            type="button"
+                            className={product.status === status ? `is-selected is-${status.toLowerCase()}` : ''}
+                            disabled={savingProductId === product.id || product.status === status}
+                            onClick={() => void setProductAvailability(product, status)}
+                          >
+                            {savingProductId === product.id && product.status !== status ? '...' : productStatusLabel(status)}
+                          </button>
+                        ))}
+                      </div>
                       <button type="button" aria-label={`Actions for ${product.name}`}>...</button>
                     </article>
                   ))}
@@ -3940,6 +4000,10 @@ function HistoryPage({
                 </article>
               ))}
             </div>
+            <section className="history-order-note">
+              <span>Order Notes</span>
+              <p>{selectedOrder.paymentNotes || 'No order notes recorded.'}</p>
+            </section>
             <div className="history-actions">
               <button type="button" className="settings-primary-button" onClick={() => printOrderDocument(selectedOrder, 'customer-receipt', setHistoryStatus, receiptCopies, receiptPrintSettings)}>Print Receipt</button>
               <button type="button" onClick={() => printOrderDocument(selectedOrder, 'kitchen-ticket', setHistoryStatus, 1, receiptPrintSettings, kitchenCategorySettings, categoryByProductId)}>Print Kitchen Ticket</button>
@@ -4045,6 +4109,7 @@ function normalizePosEmployees(setting: Record<string, unknown> | null): PosEmpl
         dailyRate: Math.max(0, Number(employee.dailyRate ?? employee.daily_rate ?? 0) || 0),
         isCashier: employee.isCashier !== false && employee.is_cashier !== false,
         isActive: employee.isActive !== false && employee.is_active !== false,
+        pin: String(employee.pin ?? employee.loginPin ?? employee.login_pin ?? '').replace(/\D/g, '').slice(0, 6),
       }
     })
     .filter((employee): employee is PosEmployee => Boolean(employee))
@@ -4075,6 +4140,16 @@ function readReceiptPrintSettings(): ReceiptPrintSettings {
   }
 }
 
+type EmployeeConsumptionRecord = {
+  id: string
+  employeeId: string
+  employeeName: string
+  orderId: string
+  displayOrderId: string
+  amount: number
+  recordedAt: string
+}
+
 function readPrinterDetectionLog(): PrinterDetectionLogEntry[] {
   try {
     const parsed = JSON.parse(window.localStorage.getItem('pos-web-printer-detection-log') ?? '[]')
@@ -4099,6 +4174,17 @@ function readKitchenPrintCategorySettings(): Record<string, boolean> {
 
 function isKitchenCategoryEnabled(settings: Record<string, boolean>, category: string) {
   return settings[category] !== false
+}
+
+function kitchenPrintableItems(
+  items: OrderItem[],
+  kitchenCategorySettings: Record<string, boolean>,
+  categoryByProductId: Map<string, string>,
+) {
+  return items.filter((item) => {
+    const category = categoryByProductId.get(item.productId) || item.categoryName || itemCategory(item.name)
+    return isKitchenCategoryEnabled(kitchenCategorySettings, category)
+  })
 }
 
 function normalizeReceiptCopies(value: string | number) {
@@ -4214,11 +4300,11 @@ function resolveHalfOrderPrice(product: PosMenuProduct) {
 function productStatusLabel(status: string) {
   switch (status) {
     case 'AVAILABLE':
-      return 'Active'
+      return 'Available'
     case 'HIDDEN':
       return 'Hidden'
     case 'UNAVAILABLE':
-      return 'Inactive'
+      return 'Unavailable'
     default:
       return status || 'Unknown'
   }
@@ -4384,9 +4470,7 @@ function resolvePaymentModeAmount(
     case 'split-people':
       return roundCurrency(values.balance / Math.max(1, values.peopleCount))
     case 'custom':
-    case 'partial':
       return roundCurrency(values.customAmount)
-    case 'credit':
     case 'combine':
     case 'other':
     case 'full':
@@ -4444,10 +4528,7 @@ function toCompletedPrintOrder(
   },
 ): CompletedOrder {
   const sourceItems = options
-    ? order.items.filter((item) => {
-      const category = options.categoryByProductId.get(item.productId) || item.categoryName || itemCategory(item.name)
-      return isKitchenCategoryEnabled(options.kitchenCategorySettings, category)
-    })
+    ? kitchenPrintableItems(order.items, options.kitchenCategorySettings, options.categoryByProductId)
     : order.items
   const subtotal = sourceItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
   const tax = roundCurrency(subtotal * taxRate)
@@ -4526,16 +4607,26 @@ function paymentMethodText(method: SalePayment['method']) {
   return 'Other'
 }
 
-function clampAmount(value: string, max: number) {
-  if (!value) return ''
-  const amount = Number(value)
-  if (!Number.isFinite(amount)) return ''
-  return String(Math.min(Math.max(amount, 0), max))
-}
-
 function tableNumber(orderId: string) {
   const numeric = Number(orderId.replace(/\D/g, '')) || 1
   return (numeric % 6) + 1
+}
+
+function parsePreparedOrderNote(note: string) {
+  const customerMatch = note.match(/(?:^|\|\s*)Customer:\s*(.*?)(?=\s*\|\s*Kitchen:|$)/i)
+  const kitchenMatch = note.match(/(?:^|\|\s*)Kitchen:\s*(.*)$/i)
+  const customerParts = (customerMatch?.[1] ?? '').split(/\s+-\s+/).map((part) => part.trim()).filter(Boolean)
+  const table = customerParts.find((part) => /^Table [1-6]$/i.test(part)) ?? ''
+  const colorPart = customerParts.find((part) => /^(Red|Blue|Green|Yellow|Black|White) shirt$/i.test(part)) ?? ''
+  const identifier = customerParts.find((part) => kitchenIdentifierTags.some((tag) => tag.toLowerCase() === part.toLowerCase())) ?? ''
+  const customerNote = customerParts.filter((part) => part !== table && part !== colorPart && part !== identifier).join(' - ')
+  return {
+    table: table ? `Table ${table.match(/\d/)?.[0]}` : '',
+    color: colorPart.replace(/ shirt$/i, ''),
+    identifier,
+    customerNote: customerMatch ? customerNote : '',
+    kitchenNote: kitchenMatch?.[1]?.trim() ?? (customerMatch ? '' : note.trim()),
+  }
 }
 
 function buildOccupiedTableMap(orders: RestaurantOrder[], excludedOrderId?: string): Record<string, 'Preparing' | 'Pending Payment'> {
@@ -4616,21 +4707,25 @@ async function fetchSalePaymentsFromShiftEvents(orderRows: SalePayment[]) {
   }
 
   const orderById = new Map(orderRows.map((row) => [row.orderId, row]))
-  return (data ?? []).map((row): SalePayment => {
+  return (data ?? []).flatMap((row): SalePayment[] => {
     const order = orderById.get(String(row.order_id ?? ''))
+    // Match the Admin shift report: stale payment events must not contribute
+    // after their source order has been deleted or replaced.
+    if (!order) return []
     const method = String(row.method ?? 'other').toLowerCase()
-    return {
+    return [{
       id: String(row.id ?? ''),
       orderId: String(row.order_id ?? ''),
-      customerName: String(row.collected_by ?? order?.customerName ?? ''),
+      customerName: String(row.collected_by ?? order.customerName ?? ''),
       amount: Number(row.amount ?? 0) || 0,
       method: method === 'cash' || method === 'gcash' ? method : 'other',
       status: 'paid',
-      createdAt: String(row.collected_at ?? order?.createdAt ?? new Date().toISOString()),
-      items: order?.items ?? [],
+      createdAt: String(row.collected_at ?? order.createdAt ?? new Date().toISOString()),
+      items: order.items,
+      orderNote: order.orderNote,
       shiftId: row.collection_shift_id ? String(row.collection_shift_id) : null,
       shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
-    }
+    }]
   })
 }
 
@@ -4638,7 +4733,7 @@ async function fetchSalePaymentsFromOrders() {
   const supabase = requireSupabase()
   const { data, error } = await supabase
     .from('orders')
-    .select('device_order_id,device_id,payment_method,payment_status,workflow_status,cash_amount,gcash_amount,total,items_json,created_at,shift_id,shift_session_id')
+    .select('device_order_id,device_id,payment_method,payment_status,workflow_status,cash_amount,gcash_amount,total,items_json,order_note,created_at,shift_id,shift_session_id')
     .order('created_at', { ascending: false })
 
   if (error) throw error
@@ -4675,6 +4770,7 @@ function mergeSalePaymentRows(paymentRows: SalePayment[], orderRows: SalePayment
       shiftSessionId: payment.shiftSessionId ?? order.shiftSessionId,
       customerName: payment.customerName || order.customerName,
       createdAt: payment.createdAt || order.createdAt,
+      orderNote: payment.orderNote || order.orderNote,
     }
   })
   const existingKeys = new Set(merged.map(salePaymentKey))
@@ -4691,8 +4787,7 @@ function salePaymentKey(payment: SalePayment) {
 }
 
 function salePaymentBelongsToShift(payment: SalePayment, shiftSession: ShiftSession) {
-  if (payment.shiftId === shiftSession.shiftId || payment.shiftSessionId === shiftSession.id) return true
-  return recordCreatedDuringShift(payment.createdAt, shiftSession)
+  return paymentBelongsToActiveShift(payment, shiftSession)
 }
 
 function cashMovementBelongsToShift(movement: CashMovement, shiftSession: ShiftSession) {
@@ -4724,6 +4819,7 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
   const gcashAmount = Number(row.gcash_amount ?? 0) || 0
   const isPaid = paymentStatus === 'paid' || workflowStatus === 'paid' || paymentMethod === 'paid'
   const items = mapSalePaymentItems(row.items_json)
+  const orderNote = row.order_note ? String(row.order_note) : ''
 
   if (!isPaid) {
     return [{
@@ -4735,6 +4831,7 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
       status: 'unpaid',
       createdAt,
       items,
+      orderNote,
       shiftId: row.shift_id ? String(row.shift_id) : null,
       shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
     }]
@@ -4751,6 +4848,7 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
       status: 'paid',
       createdAt,
       items,
+      orderNote,
       shiftId: row.shift_id ? String(row.shift_id) : null,
       shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
     })
@@ -4765,6 +4863,7 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
       status: 'paid',
       createdAt,
       items,
+      orderNote,
       shiftId: row.shift_id ? String(row.shift_id) : null,
       shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
     })
@@ -4781,6 +4880,7 @@ function mapOrderRowToSalePayments(row: Record<string, unknown>): SalePayment[] 
     status: 'paid',
     createdAt,
     items,
+    orderNote,
     shiftId: row.shift_id ? String(row.shift_id) : null,
     shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
   }]

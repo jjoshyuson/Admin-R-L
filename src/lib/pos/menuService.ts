@@ -52,6 +52,19 @@ export async function fetchPosMenu(): Promise<{ categories: PosMenuCategory[]; p
   return { categories, products }
 }
 
+export async function updatePosMenuProductStatus(productId: string, status: ProductStatus) {
+  if (!hasSupabaseConfig) return
+  const { error } = await requireSupabase()
+    .from('products')
+    .update({ status: status.toLowerCase(), updated_at: new Date().toISOString() })
+    .eq('id', productId)
+  if (error) throw error
+}
+
+export function isProductVisibleOnPos(product: PosMenuProduct) {
+  return product.isActive && product.status !== 'HIDDEN'
+}
+
 function normalizeHalfOrderPrice(value: unknown) {
   if (value == null || value === '') return null
   const amount = Number(value)

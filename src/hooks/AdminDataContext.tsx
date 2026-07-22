@@ -24,6 +24,7 @@ import {
   voidOrder,
   zeroSellableStockInCloud,
 } from '../lib/adminApi'
+import { hasSupabaseConfig, requireSupabase } from '../lib/supabase/client'
 import {
   buildBillViews,
   buildCashAccounts,
@@ -243,6 +244,19 @@ export function AdminDataProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     void refresh()
+  }, [])
+
+  useEffect(() => {
+    if (!hasSupabaseConfig) return
+    const supabase = requireSupabase()
+    const channel = supabase
+      .channel('admin-shared-menu')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => void refresh())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, () => void refresh())
+      .subscribe()
+    return () => {
+      void supabase.removeChannel(channel)
+    }
   }, [])
 
   async function withOptimisticMutation(mutator: (draft: AdminState) => AdminState, task: () => Promise<void>) {
