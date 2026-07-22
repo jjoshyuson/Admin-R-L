@@ -903,6 +903,7 @@ h1 {
 }
 
 .cashier-pin-modal { width: min(400px, calc(100vw - 36px)); }
+.modal-backdrop:has(> .cashier-pin-modal) { z-index: 1000; }
 .cashier-pin-input {
   width: 100%;
   min-height: 64px;
