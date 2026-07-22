@@ -166,7 +166,7 @@ type RestaurantOrder = {
 }
 
 const defaultCategoryNames = ['Meals', 'Drinks', 'Add-ons', 'Others']
-const posAppVersion = 'vA06'
+const posAppVersion = 'V1'
 const taxRate = 0
 const paymentModeTiles = [
   { id: 'full', label: 'Full Payment', helper: 'Pay full amount', icon: '$' },
