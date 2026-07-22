@@ -6972,6 +6972,41 @@ h1 {
   width: 42px;
 }
 
+.online-dot.is-offline { color: #dc2626; }
+.online-dot.is-offline::before { background: #dc2626; box-shadow: 0 0 0 3px rgb(220 38 38 / 14%); }
+
+.mini-order-card.is-unsynced,
+.payment-order-card.is-unsynced {
+  border: 2px solid #dc2626 !important;
+  box-shadow: 0 0 0 3px rgb(220 38 38 / 8%);
+}
+
+.offline-sync-pill {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  border: 1px solid #dc2626;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #b91c1c;
+  background: #fff1f2;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+
+.backlog-summary { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-left: 4px solid #16a34a; }
+.backlog-summary.is-offline { border-left-color: #dc2626; }
+.backlog-summary .settings-primary-button { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.backlog-list { display: grid; gap: 10px; }
+.backlog-order-card { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 18px; padding: 15px 17px; border: 2px solid #dc2626; border-radius: 12px; background: #fff; }
+.backlog-order-card > div { display: grid; gap: 4px; }
+.backlog-order-card span, .backlog-order-card time { color: #667085; font-size: 12px; }
+
+@media (max-width: 720px) {
+  .backlog-summary, .backlog-order-card { align-items: stretch; grid-template-columns: 1fr; flex-direction: column; }
+}
+
 .header-icon-button:disabled {
   cursor: wait;
   opacity: 0.65;

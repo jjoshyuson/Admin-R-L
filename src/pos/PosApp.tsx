@@ -55,7 +55,7 @@ type OrderSort = 'oldest' | 'newest'
 type PaymentMethod = 'cash' | 'gcash' | 'split'
 type CheckoutTarget = { type: 'order'; orderId: string }
 type KitchenNoteTarget = { orderNumber: string; itemCount: number; appendToOrderId?: string; editOrderId?: string; noteOrderId?: string; initialNote?: string }
-type SettingsSection = 'menu' | 'history' | 'money' | 'printing'
+type SettingsSection = 'menu' | 'history' | 'money' | 'printing' | 'backlog'
 type MoneyAccount = 'cash' | 'gcash'
 type MovementDirection = 'in' | 'out'
 type ExpensePaymentMethod = 'cash' | 'gcash'
@@ -165,6 +165,17 @@ type RestaurantOrder = {
   shiftSessionId: string | null
 }
 
+type OfflineBacklogEntry = {
+  id: string
+  order: RestaurantOrder
+  queuedAt: string
+  orderPending: boolean
+  paymentPending: boolean
+  payment?: OrderPaymentInput
+  shiftSession?: ShiftSession | null
+  collectedBy?: string
+}
+
 const defaultCategoryNames = ['Meals', 'Drinks', 'Add-ons', 'Others']
 const posAppVersion = 'V1'
 const taxRate = 0
@@ -211,6 +222,30 @@ export function PosApp() {
   const [receiptCopies, setReceiptCopies] = useState(readReceiptCopies)
   const [receiptPrintSettings, setReceiptPrintSettings] = useState(readReceiptPrintSettings)
   const [menuCategoriesEnabled, setMenuCategoriesEnabled] = useState(readKitchenPrintCategorySettings)
+  const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine)
+  const [offlineBacklog, setOfflineBacklog] = useState<OfflineBacklogEntry[]>(readOfflineBacklog)
+
+  useEffect(() => {
+    const refreshBacklog = () => setOfflineBacklog(readOfflineBacklog())
+    const handleOffline = () => {
+      setIsOnline(false)
+      setStatusMessage('Offline mode. New changes are safely queued on this device.')
+    }
+    const handleOnline = () => {
+      setIsOnline(true)
+      setStatusMessage('Internet restored. Syncing offline backlog...')
+      void flushOfflineBacklog(setStatusMessage).finally(refreshBacklog)
+    }
+    window.addEventListener('offline', handleOffline)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('pos-offline-backlog-change', refreshBacklog)
+    if (navigator.onLine && readOfflineBacklog().length > 0) void flushOfflineBacklog(setStatusMessage).finally(refreshBacklog)
+    return () => {
+      window.removeEventListener('offline', handleOffline)
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('pos-offline-backlog-change', refreshBacklog)
+    }
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -1118,7 +1153,7 @@ export function PosApp() {
         </nav>
 
         <div className="sidebar-status">
-          <span className="online-dot">Online</span>
+          <span className={`online-dot ${isOnline ? '' : 'is-offline'}`}>{isOnline ? 'Online' : 'Offline'}</span>
           <strong>{activeEmployeeName}</strong>
           <small>{activeEmployee ? `Cashier - ${formatPhp(activeEmployee.dailyRate)} / day` : 'Choose person on shift'}</small>
           {activeEmployee ? (
@@ -1286,6 +1321,7 @@ export function PosApp() {
               setPrepaidCheckoutOrderId(null)
               setActiveTab('ongoing')
             }}
+            unsyncedOrderIds={new Set(offlineBacklog.map((entry) => entry.order.id))}
           />
         </section>
       ) : null}
@@ -1308,6 +1344,7 @@ export function PosApp() {
             onCancelOrder={requestCancelOrder}
             onReprintOrder={reprintKitchenTicket}
             onEditNotes={editOrderNotes}
+            unsyncedOrderIds={new Set(offlineBacklog.map((entry) => entry.order.id))}
           />
         </section>
       ) : null}
@@ -1344,6 +1381,9 @@ export function PosApp() {
               ...current,
               [category]: !isKitchenCategoryEnabled(current, category),
             }))}
+            backlog={offlineBacklog}
+            isOnline={isOnline}
+            onRetryBacklog={() => void flushOfflineBacklog(setStatusMessage)}
           />
         </section>
       ) : null}
@@ -1928,6 +1968,7 @@ type OngoingOrdersPageProps = {
   onReprintOrder?: (orderId: string) => void
   onApplyPayment?: (orderId: string, payment: OrderPaymentInput) => void
   onEditNotes?: (orderId: string) => void
+  unsyncedOrderIds?: Set<string>
 }
 
 type OrderPaymentInput = {
@@ -1955,6 +1996,7 @@ function OngoingOrdersBoard({
   onCancelOrder,
   onReprintOrder,
   onEditNotes,
+  unsyncedOrderIds = new Set(),
 }: OngoingOrdersPageProps) {
   const [sort, setSort] = useState<OrderSort>('oldest')
   const [viewMode, setViewMode] = useState<'tiles' | 'list'>('tiles')
@@ -1988,6 +2030,7 @@ function OngoingOrdersBoard({
               kitchenCategorySettings={kitchenCategorySettings}
               categoryByProductId={categoryByProductId}
               selected={selectedOrder?.id === order.id}
+              unsynced={unsyncedOrderIds.has(order.id)}
               onSelect={() => onSelectOrder(order.id)}
             />
           ))}
@@ -2016,19 +2059,21 @@ function OngoingTrackingCard({
   kitchenCategorySettings,
   categoryByProductId,
   selected,
+  unsynced,
   onSelect,
 }: {
   order: RestaurantOrder
   kitchenCategorySettings: Record<string, boolean>
   categoryByProductId: Map<string, string>
   selected: boolean
+  unsynced: boolean
   onSelect: () => void
 }) {
   const ready = allItemsServed(order)
   const kitchenItems = kitchenPrintableItems(order.items, kitchenCategorySettings, categoryByProductId)
   const hasUnprintedKitchenItems = kitchenItems.some((item) => item.kitchenPrintedQuantity < item.quantity)
   return (
-    <article className={`mini-order-card ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''}`} onClick={onSelect}>
+    <article className={`mini-order-card ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''} ${unsynced ? 'is-unsynced' : ''}`} onClick={onSelect}>
       <span className="order-card-icon"><Utensils size={24} aria-hidden="true" /></span>
       <div className="order-card-copy">
         <header>
@@ -2043,6 +2088,7 @@ function OngoingTrackingCard({
           <span className={`status-pill status-${order.status}`}>{statusLabel(order.status)}</span>
           {paymentStatus(order) === 'paid' && !order.paid ? <span className="status-pill payment-paid">PREPAID</span> : null}
           {hasUnprintedKitchenItems ? <span className="print-status-pill is-not-printed">NOT PRINTED</span> : null}
+          {unsynced ? <span className="offline-sync-pill">NOT SYNCED</span> : null}
         </div>
         <footer>
           <span>{minutesAgo(order.createdAt)} mins ago</span>
@@ -2180,6 +2226,7 @@ function FinishOrdersBoard({
   onEditNotes,
   autoOpenPaymentOrderId,
   onPaymentDismiss,
+  unsyncedOrderIds = new Set(),
 }: OngoingOrdersPageProps & {
   employees: PosEmployee[]
   onApplyEmployeePayment: (orderId: string, employee: PosEmployee) => Promise<void>
@@ -2230,6 +2277,7 @@ function FinishOrdersBoard({
               key={order.id}
               order={order}
               selected={selectedOrder?.id === order.id}
+              unsynced={unsyncedOrderIds.has(order.id)}
               onSelect={() => onSelectOrder(order.id)}
             />
           ))}
@@ -2256,10 +2304,12 @@ function FinishOrdersBoard({
 function FinishOrderCard({
   order,
   selected,
+  unsynced,
   onSelect,
 }: {
   order: RestaurantOrder
   selected: boolean
+  unsynced: boolean
   onSelect: () => void
 }) {
   const ready = allItemsServed(order)
@@ -2267,7 +2317,7 @@ function FinishOrderCard({
   const balance = orderBalance(order)
   const payStatus = paymentStatus(order)
   return (
-    <article className={`mini-order-card payment-order-card payment-${payStatus} ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''}`} onClick={onSelect}>
+    <article className={`mini-order-card payment-order-card payment-${payStatus} ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''} ${unsynced ? 'is-unsynced' : ''}`} onClick={onSelect}>
       <span className="order-card-icon"><WalletCards size={22} aria-hidden="true" /></span>
       <div className="order-card-copy">
         <header>
@@ -2280,6 +2330,7 @@ function FinishOrderCard({
         <div className="mini-subhead">
           <span>{formatOrderType(order.orderType)}</span>
           <span className={`status-pill payment-${payStatus}`}>{paymentStatusLabel(payStatus)}</span>
+          {unsynced ? <span className="offline-sync-pill">NOT SYNCED</span> : null}
         </div>
         <footer>
           <span>{minutesAgo(order.createdAt)} mins ago</span>
@@ -3505,6 +3556,9 @@ function SettingsPage({
   onReceiptCopiesChange,
   onReceiptPrintSettingsChange,
   onProductStatusChange,
+  backlog,
+  isOnline,
+  onRetryBacklog,
 }: {
   history: RestaurantOrder[]
   products: PosMenuProduct[]
@@ -3519,6 +3573,9 @@ function SettingsPage({
   onReceiptPrintSettingsChange: (settings: ReceiptPrintSettings) => void
   onProductStatusChange: (productId: string, status: ProductStatus) => Promise<void>
   onToggleMenuCategory: (category: string) => void
+  backlog: OfflineBacklogEntry[]
+  isOnline: boolean
+  onRetryBacklog: () => void
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('menu')
   const [movements, setMovements] = useState<CashMovement[]>([])
@@ -3634,6 +3691,7 @@ function SettingsPage({
   const settingSections: Array<{ id: SettingsSection; title: string; subtitle: string }> = [
     { id: 'menu', title: 'Menu List', subtitle: `${products.length} products` },
     { id: 'printing', title: 'Printing', subtitle: 'Receipt print setup' },
+    { id: 'backlog', title: 'Backlog', subtitle: `${backlog.length} waiting to sync` },
   ]
 
   return (
@@ -3892,6 +3950,26 @@ function SettingsPage({
               <a className="settings-primary-button" href={`${import.meta.env.BASE_URL}downloads/ooh-pos-tablet-debug.apk`} download>
                 Download APK
               </a>
+            </div>
+          </section>
+        ) : null}
+
+        {activeSection === 'backlog' ? (
+          <section className="settings-panel">
+            <SettingsPanelHeader title="Offline Backlog" subtitle="Orders finished or changed while this terminal could not reach the internet." />
+            <div className={`settings-card backlog-summary ${isOnline ? 'is-online' : 'is-offline'}`}>
+              <div><h3>{isOnline ? 'Internet connected' : 'Offline mode active'}</h3><p>{backlog.length === 0 ? 'Everything on this device is synced.' : `${backlog.length} order${backlog.length === 1 ? '' : 's'} waiting to sync automatically.`}</p></div>
+              <button type="button" className="settings-primary-button" disabled={!isOnline || backlog.length === 0} onClick={onRetryBacklog}><RefreshCw size={16} /> Retry now</button>
+            </div>
+            <div className="backlog-list">
+              {backlog.length === 0 ? <EmptyState text="No offline orders in the backlog." /> : null}
+              {backlog.map((entry) => (
+                <article key={entry.id} className="backlog-order-card">
+                  <div><strong>{formatPosOrderRef(entry.order.id)}</strong><span>{entry.order.items.length} items · {formatPhp(orderTotal(entry.order))}</span></div>
+                  <div><span>{entry.order.paid ? 'Finished offline' : 'Changed offline'}</span><time>{new Date(entry.queuedAt).toLocaleString()}</time></div>
+                  <span className="offline-sync-pill">NOT SYNCED</span>
+                </article>
+              ))}
             </div>
           </section>
         ) : null}
@@ -5023,10 +5101,72 @@ function createDeviceOrderId(deviceId: string, orderNumber: number, createdAt: n
   return `${safeDevice}-${compactTime}-${String(orderNumber).padStart(4, '0')}`
 }
 
+const offlineBacklogKey = 'pos-web-offline-backlog-v1'
+
+function readOfflineBacklog(): OfflineBacklogEntry[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const value = JSON.parse(window.localStorage.getItem(offlineBacklogKey) ?? '[]')
+    return Array.isArray(value) ? value : []
+  } catch {
+    return []
+  }
+}
+
+function writeOfflineBacklog(entries: OfflineBacklogEntry[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(offlineBacklogKey, JSON.stringify(entries))
+  window.dispatchEvent(new Event('pos-offline-backlog-change'))
+}
+
+function queueOfflineOrder(order: RestaurantOrder, pending: Partial<Pick<OfflineBacklogEntry, 'orderPending' | 'paymentPending' | 'payment' | 'shiftSession' | 'collectedBy'>>) {
+  const entries = readOfflineBacklog()
+  const existing = entries.find((entry) => entry.id === order.deviceOrderId)
+  const next: OfflineBacklogEntry = {
+    id: order.deviceOrderId,
+    order,
+    queuedAt: existing?.queuedAt ?? new Date().toISOString(),
+    orderPending: pending.orderPending ?? existing?.orderPending ?? false,
+    paymentPending: pending.paymentPending ?? existing?.paymentPending ?? false,
+    payment: pending.payment ?? existing?.payment,
+    shiftSession: pending.shiftSession ?? existing?.shiftSession,
+    collectedBy: pending.collectedBy ?? existing?.collectedBy,
+  }
+  writeOfflineBacklog([next, ...entries.filter((entry) => entry.id !== order.deviceOrderId)])
+}
+
+function clearOfflinePending(orderId: string, kind: 'order' | 'payment') {
+  const entries = readOfflineBacklog().map((entry) => entry.order.id === orderId ? {
+    ...entry,
+    orderPending: kind === 'order' ? false : entry.orderPending,
+    paymentPending: kind === 'payment' ? false : entry.paymentPending,
+  } : entry)
+  writeOfflineBacklog(entries.filter((entry) => entry.orderPending || entry.paymentPending))
+}
+
+let flushingOfflineBacklog = false
+async function flushOfflineBacklog(setStatusMessage: (message: string) => void) {
+  if (flushingOfflineBacklog || !hasSupabaseConfig || !navigator.onLine) return
+  flushingOfflineBacklog = true
+  const entries = readOfflineBacklog()
+  try {
+    for (const entry of entries) {
+      if (!navigator.onLine) break
+      if (entry.orderPending) await syncOrderSnapshot(entry.order, setStatusMessage)
+      if (entry.paymentPending) await syncPaymentSnapshot(entry.order, setStatusMessage, entry.payment, entry.shiftSession, entry.collectedBy)
+    }
+    const remaining = readOfflineBacklog().length
+    setStatusMessage(remaining === 0 ? `${entries.length} offline order${entries.length === 1 ? '' : 's'} synced successfully.` : `${remaining} offline order${remaining === 1 ? '' : 's'} still waiting to sync.`)
+  } finally {
+    flushingOfflineBacklog = false
+  }
+}
+
 async function syncOrderSnapshot(order: RestaurantOrder, setStatusMessage: (message: string) => void) {
-  if (!hasSupabaseConfig) {
+  if (!hasSupabaseConfig || (typeof navigator !== 'undefined' && !navigator.onLine)) {
     saveLocalOrderPreview(order)
-    setStatusMessage(`${order.id} saved locally. Supabase config is missing.`)
+    queueOfflineOrder(order, { orderPending: true })
+    setStatusMessage(`${order.id} saved safely offline and added to Backlog.`)
     return
   }
 
@@ -5035,6 +5175,7 @@ async function syncOrderSnapshot(order: RestaurantOrder, setStatusMessage: (mess
     const fullPayload = buildSupabaseOrderPayload(order, true)
     const fullResult = await supabase.from('orders').upsert(fullPayload, { onConflict: 'device_order_id' })
     if (!fullResult.error) {
+      clearOfflinePending(order.id, 'order')
       setStatusMessage(`${order.id} synced to Supabase.`)
       return
     }
@@ -5045,8 +5186,10 @@ async function syncOrderSnapshot(order: RestaurantOrder, setStatusMessage: (mess
 
     const baseResult = await supabase.from('orders').upsert(buildSupabaseOrderPayload(order, false), { onConflict: 'device_order_id' })
     if (baseResult.error) throw baseResult.error
+    clearOfflinePending(order.id, 'order')
     setStatusMessage(`${order.id} synced to Supabase with base order fields.`)
   } catch (error) {
+    queueOfflineOrder(order, { orderPending: true })
     setStatusMessage(`${order.id} sync failed: ${error instanceof Error ? error.message : 'Unknown Supabase error.'}`)
   }
 }
@@ -5058,7 +5201,10 @@ async function syncPaymentSnapshot(
   shiftSession?: ShiftSession | null,
   collectedBy = 'POS Web',
 ) {
-  if (!hasSupabaseConfig) return
+  if (!hasSupabaseConfig || (typeof navigator !== 'undefined' && !navigator.onLine)) {
+    queueOfflineOrder(order, { paymentPending: true, payment, shiftSession, collectedBy })
+    return
+  }
 
   try {
     const supabase = requireSupabase()
@@ -5089,7 +5235,9 @@ async function syncPaymentSnapshot(
       const result = await supabase.from('shift_payment_events').upsert(eventRows, { onConflict: 'id' })
       if (result.error && !isMissingTableError(result.error)) throw result.error
     }
+    clearOfflinePending(order.id, 'payment')
   } catch (error) {
+    queueOfflineOrder(order, { paymentPending: true, payment, shiftSession, collectedBy })
     setStatusMessage(`${order.id} payment sync failed: ${error instanceof Error ? error.message : 'Unknown Supabase error.'}`)
   }
 }
