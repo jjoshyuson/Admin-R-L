@@ -1,5 +1,6 @@
 import { Component, useEffect, useMemo, useState } from 'react'
 import type { ErrorInfo, ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { AdminDataProvider } from './hooks/AdminDataContext'
 import { useDashboardData } from './hooks/useDashboardData'
 import { useFinanceData } from './hooks/useFinanceData'
@@ -295,6 +296,7 @@ type RecipeSummaryMetrics = {
   grossProfit: number
   netProfit: number
   grossMargin: number
+  netMargin: number
   hasConversionIssue: boolean
 }
 
@@ -305,6 +307,7 @@ type IngredientCatalogOption = {
   unit: string
   price: number
   purchaseQuantity: number
+  businessDate?: string
 }
 
 type RecipeDraftLine = {
@@ -3233,22 +3236,27 @@ function AdminShell() {
               void handleSaveRecipeDraft()
             }}
             onAddIngredient={() =>
-              patchRecipeDraft((current) => ({
-                ...current,
-                ingredients: [
-                  ...current.ingredients,
-                  {
-                    id: createRandomId('recipe-ingredient'),
-                    ingredientRefId: '',
-                    ingredientRefType: 'ingredient',
-                    ingredientName: '',
-                    purchaseQuantity: '1',
-                    purchaseUnit: normalizeAllowedUnit(ingredientCatalog[0]?.unit ?? 'pc'),
-                    recipeQuantity: '',
-                    recipeUnit: normalizeAllowedUnit(ingredientCatalog[0]?.unit ?? 'pc'),
-                  },
-                ],
-              }))
+              patchRecipeDraft((current) => {
+                const usedIds = new Set(current.ingredients.map((line) => line.ingredientRefId))
+                const selected = ingredientCatalog.find((item) => !usedIds.has(item.id))
+                if (!selected) return current
+                return {
+                  ...current,
+                  ingredients: [
+                    ...current.ingredients,
+                    {
+                      id: createRandomId('recipe-ingredient'),
+                      ingredientRefId: selected.id,
+                      ingredientRefType: selected.sourceType,
+                      ingredientName: selected.name,
+                      purchaseQuantity: String(selected.purchaseQuantity),
+                      purchaseUnit: normalizeAllowedUnit(selected.unit),
+                      recipeQuantity: '',
+                      recipeUnit: normalizeAllowedUnit(selected.unit),
+                    },
+                  ],
+                }
+              })
             }
             onRemoveIngredient={(lineId) =>
               patchRecipeDraft((current) => ({
@@ -3808,7 +3816,10 @@ function buildIngredientCatalog(
   recipeViews: RecipeRecord[],
 ) {
   const latestById = new Map<string, IngredientCatalogOption>()
-  for (const log of [...logs].sort((left, right) => right.businessDate.localeCompare(left.businessDate))) {
+  const latestBusinessDate = logs.reduce((latest, log) => log.businessDate > latest ? log.businessDate : latest, '')
+  // A recipe is costed from one coherent daily-log snapshot. Do not mix the
+  // newest price for one ingredient with an older log for another ingredient.
+  for (const log of logs.filter((entry) => entry.businessDate === latestBusinessDate)) {
     if (!latestById.has(log.ingredientId)) {
       latestById.set(log.ingredientId, {
         id: log.ingredientId,
@@ -3817,6 +3828,7 @@ function buildIngredientCatalog(
         unit: normalizeAllowedUnit(log.unit || 'pc'),
         price: log.price,
         purchaseQuantity: 1,
+        businessDate: log.businessDate,
       })
     }
   }
@@ -4057,7 +4069,7 @@ function computeRecipeSummary(draft: RecipeDraft, ingredientCatalog: IngredientC
   const revenue = servings * pricePerServing
   const taxAmount = revenue * (taxRatePercent / 100)
   const netSales = revenue - taxAmount
-  const grossProfit = revenue - totalRecipeCost
+  const grossProfit = netSales - totalRecipeCost
   const netProfit = netSales - totalRecipeCost
 
   return {
@@ -4068,7 +4080,8 @@ function computeRecipeSummary(draft: RecipeDraft, ingredientCatalog: IngredientC
     netSales,
     grossProfit,
     netProfit,
-    grossMargin: revenue > 0 ? (grossProfit / revenue) * 100 : 0,
+    grossMargin: netSales > 0 ? (grossProfit / netSales) * 100 : 0,
+    netMargin: netSales > 0 ? (netProfit / netSales) * 100 : 0,
     hasConversionIssue,
   }
 }
@@ -4077,6 +4090,9 @@ function computeRecipeLineCost(line: RecipeDraftLine, ingredientCatalog: Ingredi
   const recipeQuantity = Number(line.recipeQuantity)
   const purchaseQuantity = Number(line.purchaseQuantity || '1')
   const catalogEntry = ingredientCatalog.find((item) => item.id === line.ingredientRefId)
+  if (line.ingredientRefType === 'ingredient' && line.ingredientRefId && !catalogEntry) {
+    return null
+  }
   const referencePrice = catalogEntry?.price ?? 0
   if (!line.ingredientRefId || !Number.isFinite(recipeQuantity) || recipeQuantity <= 0 || !Number.isFinite(purchaseQuantity) || purchaseQuantity <= 0) {
     return 0
@@ -4195,6 +4211,7 @@ function emptyRecipeSummary(): RecipeSummaryMetrics {
     grossProfit: 0,
     netProfit: 0,
     grossMargin: 0,
+    netMargin: 0,
     hasConversionIssue: false,
   }
 }
@@ -5064,7 +5081,12 @@ function MoreDetailScreen({
   if (route === 'menu-settings') {
     return (
       <>
-        {detailNotice}
+        {flashMessage ? (
+          <div className="menu-live-banner" role="status">
+            <span className="menu-live-banner-icon" aria-hidden="true">i</span>
+            <span>{flashMessage}</span>
+          </div>
+        ) : null}
         <MenuSettingsScreenV2
           items={menuItems}
           categories={categories}
@@ -5235,6 +5257,7 @@ function TurnoverSettingsScreen({ onBack }: { onBack: () => void }) {
     </section>
   </div>
 }
+
 
 function ShiftReportsScreen({ onBack }: { onBack: () => void }) {
   const [businessDate, setBusinessDate] = useState(() => new Date().toISOString().slice(0, 10))
@@ -7802,7 +7825,7 @@ function MenuSettingsScreenV2({
   const categoryIconByName = new Map(categories.map((category) => [category.name, category.icon]))
 
   return (
-    <div className="product-screen">
+    <div className="product-screen menu-settings-screen">
       <header className="product-header">
         <button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back">
           <span aria-hidden="true">&lt;</span>
@@ -7837,6 +7860,9 @@ function MenuSettingsScreenV2({
       </div>
 
       <button type="button" className="surface-card category-settings-entry" onClick={onOpenCategorySettings}>
+        <span className="category-settings-icon" aria-hidden="true">
+          <CategoryIconBadge icon="meal" />
+        </span>
         <span className="category-settings-copy">
           <strong>Category Settings</strong>
           <small>Manage category order, naming, and visibility structure</small>
@@ -7852,8 +7878,28 @@ function MenuSettingsScreenV2({
       ) : null}
 
       <div className="menu-card-list">
-        {items.map((item) => (
-          <article key={item.id} className="surface-card menu-item-card">
+        {categoryChips
+          .filter((category) => category !== 'All' && (activeCategory === 'All' || activeCategory === category))
+          .map((category, categoryIndex) => {
+            const categoryItems = items.filter((item) => item.category === category)
+            return (
+              <section key={category} className="surface-card menu-category-card">
+                <header className="menu-category-header">
+                  <span className={`menu-category-avatar tint-${categoryIndex % 4}`} aria-hidden="true">
+                    {category.slice(0, 2).toUpperCase()}
+                  </span>
+                  <span className="menu-category-copy">
+                    <strong>{category}</strong>
+                    <small>{categoryItems.length} {categoryItems.length === 1 ? 'item' : 'items'}</small>
+                  </span>
+                </header>
+                <button type="button" className="menu-group-add-button" onClick={onAddItem}>
+                  <PlusIcon />
+                  <span>Add Menu Item</span>
+                </button>
+                <div className="menu-category-items">
+                  {categoryItems.map((item) => (
+          <article key={item.id} className="menu-item-card">
             <div className="menu-item-image-column">
               <SafeMenuImage className="menu-item-thumb" imagePath={item.imagePath} name={item.name} />
               <button type="button" className="menu-image-add-button" onClick={() => onEditItem(item.id)} aria-label={`${item.imagePath ? 'Change' : 'Add'} picture for ${item.name}`}>
@@ -7876,7 +7922,11 @@ function MenuSettingsScreenV2({
               </button>
             </div>
           </article>
-        ))}
+                  ))}
+                </div>
+              </section>
+            )
+          })}
 
         {items.length === 0 ? (
           <div className="surface-card empty-state-card">
@@ -8486,12 +8536,13 @@ function RecipeEditorModalV2({
   const resolvedCategories = uniqueNonEmptyValues(categoryOptions.length > 0 ? categoryOptions : [draft.menuCategory || 'Meals'])
   const isLinkedMenuItem = draft.recipeType === 'MENU_ITEM' && Boolean(draft.linkedMenuItemId)
 
-  return (
-    <div className="modal-overlay" role="presentation">
+  return createPortal(
+    <div className="modal-overlay recipe-editor-overlay" role="presentation">
       <div className="sheet-backdrop" onClick={onClose} />
-      <section className="bottom-sheet product-edit-sheet" role="dialog" aria-modal="true" aria-label="Recipe editor">
+      <section className="bottom-sheet product-edit-sheet recipe-editor-sheet" role="dialog" aria-modal="true" aria-label="Recipe editor">
         <div className="sheet-handle" />
-        <header className="product-modal-header">
+        <header className="product-modal-header recipe-editor-header">
+          <button type="button" className="sheet-close-button recipe-back-button" onClick={onClose} aria-label="Go back">‹</button>
           <h2>{isLinkedMenuItem ? 'Create Recipe' : draft.recipeType === 'PREP' ? 'Add Prep Product' : 'Recipe Editor'}</h2>
           <button type="button" className="sheet-close-button" onClick={onClose} aria-label="Close">
             <CloseIcon />
@@ -8499,9 +8550,9 @@ function RecipeEditorModalV2({
         </header>
 
         <div className="product-modal-scroll">
-          <section className="product-modal-section">
-            <h3>{isLinkedMenuItem ? 'Menu Item Details' : draft.recipeType === 'PREP' ? 'Prep Product Details' : 'Recipe Details'}</h3>
-            <div className="cash-form-stack">
+          <section className="product-modal-section recipe-editor-card">
+            <h3 className="recipe-card-title">{isLinkedMenuItem ? 'Menu Details' : draft.recipeType === 'PREP' ? 'Prep Product Details' : 'Recipe Details'}</h3>
+            <div className="cash-form-stack recipe-menu-grid">
               <label className="input-field">
                 <span>{isLinkedMenuItem ? 'Linked Menu Item' : 'Name'}</span>
                 <input className="text-input" value={draft.recipeName} readOnly={isLinkedMenuItem} onChange={(event) => onChange((current) => ({ ...current, recipeName: event.target.value }))} />
@@ -8520,21 +8571,16 @@ function RecipeEditorModalV2({
                   </select>
                 )}
               </label>
-              <div className="field-grid">
+              <div className="field-grid recipe-menu-pricing-grid">
                 <label className="input-field">
                   <span>{draft.recipeType === 'PREP' ? 'Yield Quantity' : 'Servings'}</span>
-                  <input
-                    className="text-input"
-                    inputMode="decimal"
-                    value={draft.recipeType === 'PREP' ? draft.yieldQuantity : draft.servings}
-                    onChange={(event) =>
-                      onChange((current) =>
-                        current.recipeType === 'PREP'
-                          ? { ...current, yieldQuantity: sanitizeDecimalInput(event.target.value) }
-                          : { ...current, servings: sanitizeDecimalInput(event.target.value) },
-                      )
-                    }
-                  />
+                  {draft.recipeType === 'PREP' ? <input className="text-input" inputMode="decimal" value={draft.yieldQuantity} onChange={(event) => onChange((current) => ({ ...current, yieldQuantity: sanitizeDecimalInput(event.target.value) }))} /> : (
+                    <div className="recipe-yield-stepper">
+                      <button type="button" aria-label="Decrease servings" onClick={() => onChange((current) => ({ ...current, servings: String(Math.max(1, (Number(current.servings) || 1) - 1)) }))}>−</button>
+                      <input aria-label="Servings" inputMode="numeric" value={draft.servings} onChange={(event) => onChange((current) => ({ ...current, servings: sanitizeDecimalInput(event.target.value) }))} />
+                      <button type="button" aria-label="Increase servings" onClick={() => onChange((current) => ({ ...current, servings: String(Math.max(1, (Number(current.servings) || 0) + 1)) }))}>+</button>
+                    </div>
+                  )}
                 </label>
                 <label className="input-field">
                   <span>{draft.recipeType === 'PREP' ? 'Yield Unit' : 'Default Price'}</span>
@@ -8563,48 +8609,54 @@ function RecipeEditorModalV2({
                   </label>
                 ) : null}
               </div>
-              {isLinkedMenuItem ? <p className="field-helper">Sellable products are created in Menu Settings. This screen only manages recipe and costing for the selected menu item.</p> : null}
+              {isLinkedMenuItem ? <p className="field-helper recipe-grid-wide">Sellable products are created in Menu Settings. This screen only manages recipe and costing for the selected menu item.</p> : null}
               {draft.recipeType === 'PREP' ? <p className="field-helper">Prep products are internal batches used by recipes. They are not created as sellable menu products here.</p> : null}
             </div>
           </section>
 
-          <section className="product-modal-section">
+          <section className="product-modal-section recipe-editor-card recipe-profit-card">
             <div className="section-head">
               <h3>Profit Snapshot</h3>
             </div>
-            <article className="surface-card cash-log-detail-card">
-              <div className="finance-row"><span>Total Recipe Cost</span><strong>{formatPhp(draft.summary.totalRecipeCost)}</strong></div>
+            <article className="recipe-profit-grid">
+              <div className="recipe-profit-column"><div className="finance-row"><span>Total Recipe Cost</span><strong>{formatPhp(draft.summary.totalRecipeCost)}</strong></div>
               <div className="finance-row"><span>Cost Per Serving</span><strong>{formatPhp(draft.summary.costPerServing)}</strong></div>
               <div className="finance-row"><span>Recipe Revenue</span><strong>{formatPhp(draft.summary.revenue)}</strong></div>
               <div className="finance-row"><span>Tax</span><strong>{formatPhp(draft.summary.taxAmount)}</strong></div>
-              <div className="finance-row"><span>Net Sales</span><strong>{formatPhp(draft.summary.netSales)}</strong></div>
-              <div className="finance-row"><span>Gross Profit</span><strong>{formatPhp(draft.summary.grossProfit)}</strong></div>
+              <div className="finance-row recipe-positive"><span>Net Sales</span><strong>{formatPhp(draft.summary.netSales)}</strong></div></div>
+              <div className="recipe-profit-column"><div className="finance-row recipe-positive"><span>Gross Profit</span><strong>{formatPhp(draft.summary.grossProfit)}</strong></div>
               <div className="finance-row"><span>Net Profit</span><strong>{formatPhp(draft.summary.netProfit)}</strong></div>
               <div className="finance-row total-row"><span>Gross Margin</span><strong>{draft.summary.grossMargin.toFixed(1)}%</strong></div>
+              <div className="finance-row total-row"><span>Net Margin</span><strong>{draft.summary.netMargin.toFixed(1)}%</strong></div></div>
               {draft.summary.hasConversionIssue ? <p className="field-error">One or more ingredient units do not match, so cost is only partially counted.</p> : null}
             </article>
+            {draft.ingredients.length === 0 ? <p className="recipe-cost-note">ⓘ Add ingredients below to calculate accurate costs.</p> : null}
           </section>
 
-          <section className="product-modal-section">
+          <section className="product-modal-section recipe-editor-card recipe-ingredients-card">
             <div className="section-head">
               <h3>{draft.recipeType === 'PREP' ? 'Ingredients' : 'Ingredients From Daily Log'}</h3>
-              <button type="button" className="ghost-pill" onClick={onAddIngredient} disabled={ingredientCatalog.length === 0}>
+              <button type="button" className="ghost-pill" onClick={onAddIngredient} disabled={ingredientCatalog.length === 0 || ingredientCatalog.every((item) => draft.ingredients.some((line) => line.ingredientRefId === item.id))}>
                 Add Ingredient
               </button>
             </div>
+            {ingredientCatalog.find((item) => item.businessDate)?.businessDate ? <p className="recipe-log-source">Costs and available ingredients use latest Daily Log: <strong>{ingredientCatalog.find((item) => item.businessDate)?.businessDate}</strong></p> : null}
             {ingredientCatalog.length === 0 ? (
               <div className="sync-empty-state">
                 <strong>No Daily Log ingredients found.</strong>
                 <p>Ingredients become available here after they are added through the Daily Log flow.</p>
               </div>
             ) : (
-              <div className="cash-form-stack">
-                {draft.ingredients.map((line) => (
-                  <article key={line.id} className="surface-card cash-log-detail-card">
+              <div className="cash-form-stack recipe-ingredient-list">
+                {draft.ingredients.length > 0 ? <div className="recipe-ingredient-head"><span>Ingredient</span><span>Qty / Yield</span><span>Unit Cost</span><span>Total Cost</span><span /></div> : null}
+                {draft.ingredients.map((line) => {
+                  const selectedIngredient = ingredientCatalog.find((item) => item.id === line.ingredientRefId)
+                  const lineCost = computeRecipeLineCost(line, ingredientCatalog)
+                  return <article key={line.id} className="surface-card cash-log-detail-card recipe-ingredient-row">
                     <label className="input-field">
-                      <span>Select Ingredient / Prep Item</span>
                       <select
                         className="cash-select"
+                        aria-label="Ingredient"
                         value={line.ingredientRefId}
                         onChange={(event) =>
                           onChange((current) => {
@@ -8630,46 +8682,29 @@ function RecipeEditorModalV2({
                       >
                         <option value="">Select ingredient</option>
                         {ingredientCatalog.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.sourceType === 'recipe' ? `${item.name} (Prep Product)` : `${item.name} (${item.unit})`}
+                          <option key={item.id} value={item.id} disabled={draft.ingredients.some((existing) => existing.id !== line.id && existing.ingredientRefId === item.id)}>
+                            {item.sourceType === 'recipe' ? `${item.name} (Prep Product)` : item.name}
                           </option>
                         ))}
                       </select>
+                      {selectedIngredient ? <small>{selectedIngredient.purchaseQuantity} {selectedIngredient.unit} source</small> : null}
                     </label>
-                    <div className="field-grid">
-                      <label className="input-field">
-                        <span>Purchase Qty</span>
-                        <input className="text-input" inputMode="decimal" value={line.purchaseQuantity} onChange={(event) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, purchaseQuantity: sanitizeDecimalInput(event.target.value) } : item)) }))} />
-                      </label>
-                      <label className="input-field">
-                        <span>Unit</span>
-                        <UnitSelect value={line.purchaseUnit} onChange={(value) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, purchaseUnit: value } : item)) }))} ariaLabel={`Purchase unit for ${line.ingredientName || 'ingredient'}`} />
-                      </label>
-                      <label className="input-field">
-                        <span>Quantity Used</span>
+                    <div className="recipe-quantity-control">
+                      <label className="input-field recipe-quantity-input">
                         <input className="text-input" inputMode="decimal" value={line.recipeQuantity} onChange={(event) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, recipeQuantity: sanitizeDecimalInput(event.target.value) } : item)) }))} />
                       </label>
-                      <label className="input-field">
-                        <span>Recipe Unit</span>
+                      <label className="input-field recipe-unit-input">
                         <UnitSelect value={line.recipeUnit} onChange={(value) => onChange((current) => ({ ...current, ingredients: current.ingredients.map((item) => (item.id === line.id ? { ...item, recipeUnit: value } : item)) }))} ariaLabel={`Recipe unit for ${line.ingredientName || 'ingredient'}`} />
                       </label>
                     </div>
-                    <div className="finance-row">
-                      <span>Estimated Cost</span>
-                      <strong>{(() => {
-                        const lineCost = computeRecipeLineCost(line, ingredientCatalog)
-                        return lineCost === null ? 'Unit mismatch' : formatPhp(lineCost)
-                      })()}</strong>
-                    </div>
-                    <div className="sheet-footer">
-                      <button type="button" className="secondary-button" onClick={() => onRemoveIngredient(line.id)}>
-                        Remove Line
-                      </button>
-                    </div>
+                    <div className="recipe-unit-cost"><strong>{selectedIngredient ? formatPhp(selectedIngredient.price) : '—'}</strong><small>{selectedIngredient ? `/ ${selectedIngredient.purchaseQuantity} ${selectedIngredient.unit}` : 'Select ingredient'}</small></div>
+                    <div className="recipe-line-total"><small>Total Cost</small><strong>{lineCost === null ? 'Unit mismatch' : formatPhp(lineCost)}</strong></div>
+                    <button type="button" className="recipe-remove-line" aria-label={`Remove ${line.ingredientName || 'ingredient'}`} onClick={() => onRemoveIngredient(line.id)}>×</button>
                   </article>
-                ))}
+                })}
               </div>
             )}
+            {draft.ingredients.length > 0 ? <div className="recipe-total-cost"><strong>Total Recipe Cost</strong><strong>{formatPhp(draft.summary.totalRecipeCost)}</strong></div> : null}
           </section>
 
           {error ? <p className="field-error cash-form-error">{error}</p> : null}
@@ -8681,7 +8716,8 @@ function RecipeEditorModalV2({
           </button>
         </div>
       </section>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
