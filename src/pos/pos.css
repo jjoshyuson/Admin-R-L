@@ -6772,6 +6772,38 @@ h1 {
   color: #111827;
 }
 
+.sidebar-pin-entry {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.sidebar-pin-entry input {
+  background: #ffffff;
+  border: 2px solid #8bd3aa;
+  border-radius: 9px;
+  box-sizing: border-box;
+  color: #111827;
+  font-size: 15px;
+  min-height: 40px;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.sidebar-pin-entry > div {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.sidebar-pin-entry > div button {
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  min-height: 36px;
+  padding: 0 8px;
+  text-align: center;
+}
+
 .online-dot::before {
   background: #28d163;
   border-radius: 999px;

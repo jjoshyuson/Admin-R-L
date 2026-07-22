@@ -1127,7 +1127,7 @@ export function PosApp() {
           {!activeEmployee ? (
             <select
               className="sidebar-employee-select"
-              value={activeEmployeeId}
+              value={pendingEmployeeId || activeEmployeeId}
               onChange={(event) => requestClockIn(event.target.value)}
               aria-label="Select cashier on shift"
             >
@@ -1137,24 +1137,33 @@ export function PosApp() {
               ))}
             </select>
           ) : null}
+          {pendingEmployeeId ? (
+            <div className="sidebar-pin-entry">
+              <strong>Enter PIN for {cashierEmployees.find((item) => item.id === pendingEmployeeId)?.name}</strong>
+              <input
+                autoFocus
+                type="password"
+                inputMode="numeric"
+                autoComplete="off"
+                maxLength={6}
+                value={loginPin}
+                onChange={(event) => { setLoginPin(event.target.value.replace(/\D/g, '').slice(0, 6)); setPinError('') }}
+                onKeyDown={(event) => { if (event.key === 'Enter' && loginPin.length >= 4) verifyPinAndClockIn() }}
+                aria-label="Cashier PIN"
+                placeholder="Enter 4–6 digit PIN"
+              />
+              {pinError ? <small className="cashier-pin-error" role="alert">{pinError}</small> : null}
+              <div>
+                <button type="button" onClick={() => { setPendingEmployeeId(''); setLoginPin(''); setPinError('') }}>Cancel</button>
+                <button type="button" disabled={loginPin.length < 4 || shiftBusy} onClick={verifyPinAndClockIn}>{shiftBusy ? 'Opening...' : 'Clock in'}</button>
+              </div>
+            </div>
+          ) : null}
           <span>{ongoingOrders.length} ongoing</span>
           <span>{completedThisShift} closed this shift</span>
           <span>{activeShiftSession ? `${activeShiftSession.shiftType === 'FIRST' ? 'First' : 'Second'} Shift • Cash ₱0 opening` : 'No open shift'}</span>
         </div>
       </aside>
-      {pendingEmployeeId ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPendingEmployeeId('') }}>
-          <section className="admin-approval-modal cashier-pin-modal" role="dialog" aria-modal="true" aria-labelledby="cashier-pin-title">
-            <header><div><span>POS Login</span><h2 id="cashier-pin-title">Enter your PIN</h2></div><button type="button" className="modal-close" onClick={() => setPendingEmployeeId('')} aria-label="Close">×</button></header>
-            <div className="admin-approval-body">
-              <p>Logging in as <strong>{cashierEmployees.find((item) => item.id === pendingEmployeeId)?.name}</strong></p>
-              <input autoFocus className="cashier-pin-input" type="password" inputMode="numeric" autoComplete="off" maxLength={6} value={loginPin} onChange={(event) => { setLoginPin(event.target.value.replace(/\D/g, '').slice(0, 6)); setPinError('') }} onKeyDown={(event) => { if (event.key === 'Enter' && loginPin.length >= 4) verifyPinAndClockIn() }} aria-label="Cashier PIN" placeholder="••••" />
-              {pinError ? <p className="cashier-pin-error" role="alert">{pinError}</p> : <small>Your PIN is 4–6 digits.</small>}
-            </div>
-            <footer><button type="button" className="modal-secondary" onClick={() => setPendingEmployeeId('')}>Cancel</button><button type="button" className="modal-primary" disabled={loginPin.length < 4} onClick={verifyPinAndClockIn}>Log in</button></footer>
-          </section>
-        </div>
-      ) : null}
       {activeTab === 'new-order' ? (
         <>
           <aside className="pos-category-sidebar" aria-label="POS categories">
