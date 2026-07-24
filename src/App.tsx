@@ -23,6 +23,7 @@ import {
   recordInventoryCount,
   seedTroubleshootingData,
   saveAdminSetting,
+  voidOrder,
 } from './lib/adminApi'
 import { createRandomId } from './lib/randomId'
 import { WorkVault } from './WorkVault'
@@ -30,6 +31,7 @@ import {
   approveOrderEditRequest,
   describeOrderEditRequestError,
   fetchPendingOrderEditRequests,
+  rejectOrderEditRequest,
   subscribeToOrderEditRequests,
 } from './lib/orderEditRequests'
 import { hasSupabaseConfig } from './lib/supabase/client'
@@ -61,6 +63,7 @@ type MoreRoute =
   | 'home'
   | 'sync'
   | 'orders'
+  | 'requests'
   | 'sales-range'
   | 'employees'
   | 'staff-consumption'
@@ -2053,13 +2056,24 @@ function AdminShell() {
     setFlashMessage(`Order ${orderId} marked void in the authority sync log.`)
   }
 
-  async function handleApproveOrderEditRequest(request: OrderEditRequestRecord) {
+  async function handleOrderRequestDecision(request: OrderEditRequestRecord, decision: 'approved' | 'rejected') {
     setOrderEditRequestBusyId(request.id)
     setOrderEditRequestError('')
     try {
-      await approveOrderEditRequest(request.id, 'Admin Web')
+      if (decision === 'approved') {
+        if (request.requestType === 'cancel') {
+          await voidOrder({
+            deviceOrderId: request.deviceOrderId,
+            voidReason: 'POS cancellation approved in Admin Request Center',
+            voidedBy: 'Admin Web',
+          })
+        }
+        await approveOrderEditRequest(request.id, 'Admin Web')
+      } else {
+        await rejectOrderEditRequest(request.id, 'Admin Web')
+      }
       setOrderEditRequests((current) => current.filter((item) => item.id !== request.id))
-      setFlashMessage(`Edit approved for ${request.displayOrderId}.`)
+      setFlashMessage(`${request.requestType === 'cancel' ? 'Cancellation' : 'Edit'} ${decision} for ${request.displayOrderId}.`)
     } catch (error) {
       setOrderEditRequestError(describeOrderEditRequestError(error))
     } finally {
@@ -3029,6 +3043,13 @@ function AdminShell() {
                 onVoidOrder={(orderId) => {
                   void handleVoidOrder(orderId)
                 }}
+                orderRequests={orderEditRequests}
+                shiftAdjustmentRequests={shiftAdjustmentRequests}
+                orderRequestBusyId={orderEditRequestBusyId}
+                shiftAdjustmentBusyId={shiftAdjustmentBusyId}
+                requestError={orderEditRequestError || shiftAdjustmentError}
+                onOrderRequestDecision={(request, decision) => void handleOrderRequestDecision(request, decision)}
+                onShiftAdjustmentDecision={(request, decision) => void handleShiftAdjustmentDecision(request, decision)}
                 menuRecipeEntries={menuRecipeEntries}
                 prepRecipeEntries={prepRecipeEntries}
                 activeRecipeFilter={activeRecipeFilter}
@@ -3086,16 +3107,6 @@ function AdminShell() {
             onClose={() => setPurchaseModalOpen(false)}
             onDraftChange={handlePurchaseDraftChange}
             onSubmit={handleSubmitPurchases}
-          />
-        ) : shiftAdjustmentRequests.length > 0 ? (
-          <ShiftAdjustmentRequestPopup
-            request={shiftAdjustmentRequests[0]}
-            pendingCount={shiftAdjustmentRequests.length}
-            busy={shiftAdjustmentBusyId === shiftAdjustmentRequests[0].id}
-            error={shiftAdjustmentError}
-            onApprove={() => void handleShiftAdjustmentDecision(shiftAdjustmentRequests[0], 'APPROVED')}
-            onReject={() => void handleShiftAdjustmentDecision(shiftAdjustmentRequests[0], 'REJECTED')}
-            onDismiss={() => setShiftAdjustmentRequests((current) => current.slice(1))}
           />
         ) : null}
 
@@ -3276,24 +3287,13 @@ function AdminShell() {
           />
         ) : null}
 
-        {orderEditRequests.length > 0 ? (
-          <OrderEditRequestPopup
-            request={orderEditRequests[0]}
-            pendingCount={orderEditRequests.length}
-            busy={orderEditRequestBusyId === orderEditRequests[0].id}
-            error={orderEditRequestError}
-            onApprove={() => {
-              void handleApproveOrderEditRequest(orderEditRequests[0])
-            }}
-            onDismiss={() => setOrderEditRequests((current) => current.slice(1))}
-          />
-        ) : null}
       </section>
     </main>
   )
 }
 
-function OrderEditRequestPopup({
+/*
+function _OrderEditRequestPopup({
   request,
   pendingCount,
   busy,
@@ -3341,10 +3341,11 @@ function OrderEditRequestPopup({
   )
 }
 
-function ShiftAdjustmentRequestPopup({ request, pendingCount, busy, error, onApprove, onReject, onDismiss }: { request: ShiftAdjustment; pendingCount: number; busy: boolean; error: string; onApprove: () => void; onReject: () => void; onDismiss: () => void }) {
+function _ShiftAdjustmentRequestPopup({ request, pendingCount, busy, error, onApprove, onReject, onDismiss }: { request: ShiftAdjustment; pendingCount: number; busy: boolean; error: string; onApprove: () => void; onReject: () => void; onDismiss: () => void }) {
   return <div className="admin-request-modal-backdrop" role="presentation"><section className="admin-request-modal" role="dialog" aria-modal="true" aria-label="Pending shift adjustment request"><div className="admin-request-modal-head"><div><span>Pending Adjustment</span><strong>{request.direction} {formatPhp(request.amount)} • {request.account}</strong></div><span className="system-badge is-synced">{pendingCount}</span></div><p>{request.requestedBy} requested this adjustment for {request.shiftId}. Totals will not change until it is approved.</p><div className="admin-request-meta"><span>{formatFullDateTime(request.requestedAt)}</span><span>{request.reason}</span></div>{error ? <div className="admin-request-error">{error}</div> : null}<div className="admin-request-actions"><button type="button" className="ghost-pill" onClick={onDismiss} disabled={busy}>Not Now</button><button type="button" className="ghost-pill" onClick={onReject} disabled={busy}>Reject</button><button type="button" className="save-changes-button" onClick={onApprove} disabled={busy}>{busy ? 'Updating...' : 'Approve'}</button></div></section></div>
 }
 
+*/
 async function prepareMenuImage(file: File) {
   const image = await createImageBitmap(file)
   const targetSize = 800
@@ -4626,6 +4627,12 @@ function SettingsMoreScreen({
           onClick={() => onNavigate('orders')}
         />
         <ActionRow
+          icon={<SyncLogsIcon />}
+          title="Request Center"
+          subtitle="Review POS edits, cancellations, and shift adjustments"
+          onClick={() => onNavigate('requests')}
+        />
+        <ActionRow
           icon={<OrderHistoryIcon />}
           title="Shift Reports"
           subtitle="First and Second Shift summaries, expenses, and adjustments"
@@ -4953,6 +4960,13 @@ type MoreDetailScreenProps = {
   selectedOrderVoid: OrderVoidRecord | null
   onCloseOrderDetail: () => void
   onVoidOrder: (orderId: string) => void
+  orderRequests: OrderEditRequestRecord[]
+  shiftAdjustmentRequests: ShiftAdjustment[]
+  orderRequestBusyId: string | null
+  shiftAdjustmentBusyId: string | null
+  requestError: string
+  onOrderRequestDecision: (request: OrderEditRequestRecord, decision: 'approved' | 'rejected') => void
+  onShiftAdjustmentDecision: (request: ShiftAdjustment, decision: 'APPROVED' | 'REJECTED') => void
   menuRecipeEntries: MenuRecipeEntry[]
   prepRecipeEntries: PrepRecipeEntry[]
   hasDailyLogIngredients: boolean
@@ -4985,6 +4999,92 @@ type MoreDetailScreenProps = {
   onDragCategoryStart: (categoryId: string | null) => void
   onDragCategoryEnd: () => void
   onMoveCategory: (sourceId: string, targetId: string) => void
+}
+
+function RequestCenterScreen({
+  orderRequests,
+  shiftAdjustments,
+  orderBusyId,
+  adjustmentBusyId,
+  error,
+  onOrderDecision,
+  onAdjustmentDecision,
+  onBack,
+}: {
+  orderRequests: OrderEditRequestRecord[]
+  shiftAdjustments: ShiftAdjustment[]
+  orderBusyId: string | null
+  adjustmentBusyId: string | null
+  error: string
+  onOrderDecision: (request: OrderEditRequestRecord, decision: 'approved' | 'rejected') => void
+  onAdjustmentDecision: (request: ShiftAdjustment, decision: 'APPROVED' | 'REJECTED') => void
+  onBack: () => void
+}) {
+  const requestCount = orderRequests.length + shiftAdjustments.length
+  return (
+    <div className="more-panel request-center-screen">
+      <header className="more-header request-center-header">
+        <button type="button" className="request-center-back" onClick={onBack} aria-label="Back">‹</button>
+        <div className="request-center-heading">
+          <span className="more-header-label">Settings / More</span>
+          <h1>Request Center</h1>
+        </div>
+        <span className="system-badge is-synced">{requestCount} pending</span>
+      </header>
+      {error ? <div className="admin-request-error">{error}</div> : null}
+
+      <MoreSection title="ORDER CANCELLATIONS">
+        {orderRequests.filter((request) => request.requestType === 'cancel').length === 0 ? <p>No cancellation requests.</p> : null}
+        {orderRequests.filter((request) => request.requestType === 'cancel').map((request) => (
+          <article key={request.id} className="activity-row request-center-card">
+            <div className="activity-copy">
+              <strong>Cancel {formatShortOrderNumber(request.displayOrderId)}</strong>
+              <p>{request.requestedBy} · {request.deviceId || 'POS Web'}</p>
+              <small>{formatFullDateTime(request.requestedAt)}</small>
+            </div>
+            <div className="admin-request-actions request-center-actions">
+              <button type="button" className="ghost-pill" disabled={orderBusyId === request.id} onClick={() => onOrderDecision(request, 'rejected')}>Reject</button>
+              <button type="button" className="save-changes-button" disabled={orderBusyId === request.id} onClick={() => onOrderDecision(request, 'approved')}>Approve Void</button>
+            </div>
+          </article>
+        ))}
+      </MoreSection>
+
+      <MoreSection title="ORDER EDITS">
+        {orderRequests.filter((request) => request.requestType === 'edit').length === 0 ? <p>No edit requests.</p> : null}
+        {orderRequests.filter((request) => request.requestType === 'edit').map((request) => (
+          <article key={request.id} className="activity-row request-center-card">
+            <div className="activity-copy">
+              <strong>Edit {formatShortOrderNumber(request.displayOrderId)}</strong>
+              <p>{request.requestedBy} · {request.deviceId || 'POS Web'}</p>
+              <small>{formatFullDateTime(request.requestedAt)}</small>
+            </div>
+            <div className="admin-request-actions request-center-actions">
+              <button type="button" className="ghost-pill" disabled={orderBusyId === request.id} onClick={() => onOrderDecision(request, 'rejected')}>Reject</button>
+              <button type="button" className="save-changes-button" disabled={orderBusyId === request.id} onClick={() => onOrderDecision(request, 'approved')}>Approve Edit</button>
+            </div>
+          </article>
+        ))}
+      </MoreSection>
+
+      <MoreSection title="SHIFT ADJUSTMENTS">
+        {shiftAdjustments.length === 0 ? <p>No shift adjustment requests.</p> : null}
+        {shiftAdjustments.map((request) => (
+          <article key={request.id} className="activity-row request-center-card">
+            <div className="activity-copy">
+              <strong>{request.direction} {formatPhp(request.amount)} · {request.account}</strong>
+              <p>{request.requestedBy} · {request.reason}</p>
+              <small>{formatFullDateTime(request.requestedAt)}</small>
+            </div>
+            <div className="admin-request-actions request-center-actions">
+              <button type="button" className="ghost-pill" disabled={adjustmentBusyId === request.id} onClick={() => onAdjustmentDecision(request, 'REJECTED')}>Reject</button>
+              <button type="button" className="save-changes-button" disabled={adjustmentBusyId === request.id} onClick={() => onAdjustmentDecision(request, 'APPROVED')}>Approve</button>
+            </div>
+          </article>
+        ))}
+      </MoreSection>
+    </div>
+  )
 }
 
 function MoreDetailScreen({
@@ -5023,6 +5123,13 @@ function MoreDetailScreen({
   selectedOrderVoid,
   onCloseOrderDetail,
   onVoidOrder,
+  orderRequests,
+  shiftAdjustmentRequests,
+  orderRequestBusyId,
+  shiftAdjustmentBusyId,
+  requestError,
+  onOrderRequestDecision,
+  onShiftAdjustmentDecision,
   menuRecipeEntries,
   prepRecipeEntries,
   hasDailyLogIngredients,
@@ -5164,6 +5271,21 @@ function MoreDetailScreen({
 
   if (route === 'employees') {
     return <EmployeeManagementScreen onBack={onBack} />
+  }
+
+  if (route === 'requests') {
+    return (
+      <RequestCenterScreen
+        orderRequests={orderRequests}
+        shiftAdjustments={shiftAdjustmentRequests}
+        orderBusyId={orderRequestBusyId}
+        adjustmentBusyId={shiftAdjustmentBusyId}
+        error={requestError}
+        onOrderDecision={onOrderRequestDecision}
+        onAdjustmentDecision={onShiftAdjustmentDecision}
+        onBack={onBack}
+      />
+    )
   }
 
   if (route === 'staff-consumption') {

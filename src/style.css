@@ -3826,10 +3826,122 @@ textarea {
   min-height: 40px;
 }
 
+.request-center-screen {
+  padding-inline: 16px;
+}
+
+.request-center-header {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 8px 0 20px;
+}
+
+.request-center-back {
+  width: 40px;
+  height: 40px;
+  border: 1px solid #d8e0ea;
+  border-radius: 12px;
+  background: #fff;
+  color: #334155;
+  font-size: 1.7rem;
+  line-height: 1;
+}
+
+.request-center-heading {
+  min-width: 0;
+}
+
+.request-center-heading h1 {
+  margin: 3px 0 0;
+  color: #0f172a;
+  font-size: clamp(1.45rem, 7vw, 2rem);
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+}
+
+.request-center-screen .more-section {
+  margin-top: 20px;
+}
+
+.request-center-screen .more-section-head {
+  padding-inline: 2px;
+}
+
+.request-center-screen .action-card-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.request-center-screen .action-card-group > p {
+  margin: 0;
+  padding: 20px;
+  border: 1px solid #d9e2ec;
+  border-radius: 16px;
+  background: #fff;
+  color: #64748b;
+  text-align: center;
+}
+
+.request-center-card.activity-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid #d9e2ec;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+}
+
+.request-center-card .activity-copy strong {
+  color: #0f172a;
+  font-size: 1.05rem;
+  line-height: 1.25;
+}
+
+.request-center-card .activity-copy p {
+  margin-top: 7px;
+  color: #475569;
+  font-size: 0.82rem;
+}
+
+.request-center-card .activity-copy small {
+  display: block;
+  margin-top: 5px;
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+
+.request-center-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 10px;
+  width: 100%;
+}
+
+.request-center-actions .ghost-pill,
+.request-center-actions .save-changes-button {
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  border-radius: 12px;
+}
+
 @media (max-width: 640px) {
   .admin-request-actions .save-changes-button,
   .admin-request-actions .ghost-pill {
     flex: 1;
+  }
+
+  .request-center-header .system-badge {
+    padding-inline: 9px;
+    white-space: nowrap;
   }
 }
 

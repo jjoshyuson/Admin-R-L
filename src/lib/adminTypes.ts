@@ -66,7 +66,8 @@ export type OrderVoidRecord = {
   voidedAt: string
 }
 
-export type OrderEditRequestStatus = 'pending' | 'approved' | 'cancelled' | 'expired'
+export type OrderEditRequestStatus = 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired'
+export type OrderRequestType = 'edit' | 'cancel'
 
 export type OrderEditRequestRecord = {
   id: string
@@ -74,6 +75,7 @@ export type OrderEditRequestRecord = {
   displayOrderId: string
   deviceId: string
   requestedBy: string
+  requestType: OrderRequestType
   requestedAt: string
   status: OrderEditRequestStatus
   approvedBy: string | null

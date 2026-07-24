@@ -1,5 +1,5 @@
 import { hasSupabaseConfig, requireSupabase } from './supabase/client'
-import type { OrderEditRequestRecord, OrderEditRequestStatus } from './adminTypes'
+import type { OrderEditRequestRecord, OrderEditRequestStatus, OrderRequestType } from './adminTypes'
 
 type OrderEditRequestRow = {
   id: string
@@ -12,6 +12,7 @@ type OrderEditRequestRow = {
   approved_by: string | null
   approved_at: string | null
   cancelled_at: string | null
+  request_type?: string | null
 }
 
 type CreateOrderEditRequestInput = {
@@ -19,6 +20,7 @@ type CreateOrderEditRequestInput = {
   displayOrderId: string
   deviceId: string
   requestedBy: string
+  requestType: OrderRequestType
 }
 
 function assertOnlineRequestsAvailable() {
@@ -28,7 +30,7 @@ function assertOnlineRequestsAvailable() {
 }
 
 function normalizeStatus(value: string | null): OrderEditRequestStatus {
-  if (value === 'approved' || value === 'cancelled' || value === 'expired') return value
+  if (value === 'approved' || value === 'rejected' || value === 'cancelled' || value === 'expired') return value
   return 'pending'
 }
 
@@ -39,6 +41,7 @@ function mapOrderEditRequest(row: OrderEditRequestRow): OrderEditRequestRecord {
     displayOrderId: String(row.display_order_id ?? row.device_order_id),
     deviceId: String(row.device_id ?? ''),
     requestedBy: String(row.requested_by ?? 'POS'),
+    requestType: row.request_type === 'cancel' || String(row.requested_by ?? '').toLowerCase().includes('cancel order') ? 'cancel' : 'edit',
     requestedAt: String(row.requested_at ?? ''),
     status: normalizeStatus(row.status),
     approvedBy: row.approved_by ? String(row.approved_by) : null,
@@ -81,10 +84,11 @@ export async function createOrderEditRequest(input: CreateOrderEditRequestInput)
       display_order_id: input.displayOrderId,
       device_id: input.deviceId,
       requested_by: input.requestedBy,
+      request_type: input.requestType,
       requested_at: requestedAt,
       status: 'pending',
     })
-    .select('id,device_order_id,display_order_id,device_id,requested_by,requested_at,status,approved_by,approved_at,cancelled_at')
+    .select('id,device_order_id,display_order_id,device_id,requested_by,requested_at,status,approved_by,approved_at,cancelled_at,request_type')
     .single()
   if (error) throw error
   return mapOrderEditRequest(data as OrderEditRequestRow)
@@ -95,7 +99,7 @@ export async function fetchPendingOrderEditRequests() {
   const supabase = requireSupabase()
   const { data, error } = await supabase
     .from('order_edit_requests')
-    .select('id,device_order_id,display_order_id,device_id,requested_by,requested_at,status,approved_by,approved_at,cancelled_at')
+    .select('id,device_order_id,display_order_id,device_id,requested_by,requested_at,status,approved_by,approved_at,cancelled_at,request_type')
     .eq('status', 'pending')
     .order('requested_at', { ascending: true })
     .limit(20)
@@ -118,7 +122,7 @@ export async function approveOrderEditRequest(requestId: string, approvedBy = 'A
     })
     .eq('id', requestId)
     .eq('status', 'pending')
-    .select('id,device_order_id,display_order_id,device_id,requested_by,requested_at,status,approved_by,approved_at,cancelled_at')
+    .select('id,device_order_id,display_order_id,device_id,requested_by,requested_at,status,approved_by,approved_at,cancelled_at,request_type')
     .single()
   if (error) throw error
   return mapOrderEditRequest(data as OrderEditRequestRow)
@@ -136,6 +140,41 @@ export async function cancelOrderEditRequest(requestId: string) {
     .eq('id', requestId)
     .eq('status', 'pending')
   if (error && !isMissingRequestTable(error)) throw error
+}
+
+export async function rejectOrderEditRequest(requestId: string, approvedBy = 'Admin Web') {
+  assertOnlineRequestsAvailable()
+  const supabase = requireSupabase()
+  const { data, error } = await supabase
+    .from('order_edit_requests')
+    .update({
+      status: 'rejected',
+      approved_by: approvedBy,
+      approved_at: new Date().toISOString(),
+    })
+    .eq('id', requestId)
+    .eq('status', 'pending')
+    .select('id,device_order_id,display_order_id,device_id,requested_by,requested_at,status,approved_by,approved_at,cancelled_at,request_type')
+    .single()
+  if (error) throw error
+  return mapOrderEditRequest(data as OrderEditRequestRow)
+}
+
+export async function fetchPendingOrderRequestsForDevice(deviceId: string) {
+  const requests = await fetchPendingOrderEditRequests()
+  return requests.filter((request) => request.deviceId === deviceId)
+}
+
+export async function fetchOrderEditRequest(requestId: string) {
+  assertOnlineRequestsAvailable()
+  const supabase = requireSupabase()
+  const { data, error } = await supabase
+    .from('order_edit_requests')
+    .select('id,device_order_id,display_order_id,device_id,requested_by,requested_at,status,approved_by,approved_at,cancelled_at,request_type')
+    .eq('id', requestId)
+    .single()
+  if (error) throw error
+  return mapOrderEditRequest(data as OrderEditRequestRow)
 }
 
 export function subscribeToOrderEditRequests(onChange: () => void) {

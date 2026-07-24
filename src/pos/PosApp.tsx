@@ -39,6 +39,7 @@ import {
   cancelOrderEditRequest,
   createOrderEditRequest,
   describeOrderEditRequestError,
+  fetchOrderEditRequest,
   subscribeToOrderEditRequest,
 } from '../lib/orderEditRequests'
 import { hasSupabaseConfig, requireSupabase } from '../lib/supabase/client'
@@ -163,6 +164,14 @@ type RestaurantOrder = {
   createdAt: number
   shiftId: string | null
   shiftSessionId: string | null
+  cancellationState?: 'pending' | 'voided'
+  cancellationRequestId?: string
+}
+
+type PendingCancellation = {
+  requestId: string
+  requestedAt: string
+  order: RestaurantOrder
 }
 
 type OfflineBacklogEntry = {
@@ -224,6 +233,7 @@ export function PosApp() {
   const [menuCategoriesEnabled, setMenuCategoriesEnabled] = useState(readKitchenPrintCategorySettings)
   const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine)
   const [offlineBacklog, setOfflineBacklog] = useState<OfflineBacklogEntry[]>(readOfflineBacklog)
+  const [pendingCancellations, setPendingCancellations] = useState<PendingCancellation[]>(readPendingCancellations)
 
   useEffect(() => {
     const refreshBacklog = () => setOfflineBacklog(readOfflineBacklog())
@@ -246,6 +256,36 @@ export function PosApp() {
       window.removeEventListener('pos-offline-backlog-change', refreshBacklog)
     }
   }, [])
+
+  useEffect(() => {
+    writePendingCancellations(pendingCancellations)
+  }, [pendingCancellations])
+
+  useEffect(() => {
+    if (!hasSupabaseConfig || pendingCancellations.length === 0) return undefined
+    let active = true
+    for (const pending of pendingCancellations) {
+      void fetchOrderEditRequest(pending.requestId).then((request) => {
+        if (!active) return
+        if (request.status === 'approved') {
+          void finalizePendingCancellation(pending, request.approvedBy ?? 'Admin Web')
+        } else if (request.status === 'rejected' || request.status === 'cancelled' || request.status === 'expired') {
+          restorePendingCancellation(pending, request.status)
+        }
+      }).catch(() => {})
+    }
+    const unsubscribers = pendingCancellations.map((pending) => subscribeToOrderEditRequest(pending.requestId, (request) => {
+      if (request.status === 'approved') {
+        void finalizePendingCancellation(pending, request.approvedBy ?? 'Admin Web')
+      } else if (request.status === 'rejected' || request.status === 'cancelled' || request.status === 'expired') {
+        restorePendingCancellation(pending, request.status)
+      }
+    }))
+    return () => {
+      active = false
+      unsubscribers.forEach((unsubscribe) => unsubscribe())
+    }
+  }, [pendingCancellations])
 
   useEffect(() => {
     let active = true
@@ -365,10 +405,12 @@ export function PosApp() {
         const items = await fetchOrders()
         if (!active) return
         const mappedOrders = items.map(mapAdminOrderToRestaurantOrder)
-        const activeOrders = mappedOrders.filter((order) => !order.paid)
+        const storedPending = readPendingCancellations()
+        const pendingOrderIds = new Set(storedPending.map((item) => item.order.id))
+        const activeOrders = mappedOrders.filter((order) => !order.paid && !pendingOrderIds.has(order.id))
         const closedOrders = mappedOrders.filter((order) => order.paid)
         setOrders(activeOrders)
-        setHistory(closedOrders)
+        setHistory([...storedPending.map((item) => item.order), ...closedOrders.filter((order) => !pendingOrderIds.has(order.id))])
         if (hasSupabaseConfig) {
           setStatusMessage(`${activeOrders.length} active orders synced from Supabase.`)
         }
@@ -506,12 +548,10 @@ export function PosApp() {
     if (!editApprovalRequest?.requestId || editApprovalRequest.status !== 'pending') return undefined
     return subscribeToOrderEditRequest(editApprovalRequest.requestId, (request) => {
       if (request.status === 'approved') {
-        if (editApprovalRequest.action === 'cancel') {
-          void completeApprovedCancellation(editApprovalRequest.orderId, request.approvedBy ?? 'Admin Web')
-        } else {
+        if (editApprovalRequest.action === 'edit') {
           beginApprovedEditOrder(editApprovalRequest.orderId, request.approvedBy ?? 'Admin Web')
         }
-      } else if (request.status === 'cancelled' || request.status === 'expired') {
+      } else if (request.status === 'rejected' || request.status === 'cancelled' || request.status === 'expired') {
         setStatusMessage(`Edit request for ${formatPosOrderRef(editApprovalRequest.orderId)} was ${request.status}.`)
         setEditApprovalRequest(null)
       }
@@ -866,14 +906,15 @@ export function PosApp() {
         displayOrderId: order.id,
         deviceId,
         requestedBy: activeEmployeeName,
+        requestType: 'edit',
       })
-      setStatusMessage(`Edit request sent for ${formatPosOrderRef(order.id)}. Waiting for Admin Web approval.`)
+      setStatusMessage(`Edit request queued for ${formatPosOrderRef(order.id)}. You can continue using the POS.`)
       setEditApprovalRequest({
         requestId: request.id,
         orderId,
         action: 'edit',
         status: 'pending',
-        message: 'Waiting for the admin app to approve. Keep this POS online.',
+        message: 'Queued for review in the Admin Request Center.',
       })
     } catch (error) {
       const message = describeOrderEditRequestError(error)
@@ -905,55 +946,59 @@ export function PosApp() {
       })
       return
     }
-    setEditApprovalRequest({
-      requestId: null,
-      orderId,
-      action: 'cancel',
-      status: 'creating',
-      message: 'Sending cancellation request to Admin Web...',
-    })
     try {
       const request = await createOrderEditRequest({
         deviceOrderId: order.deviceOrderId,
         displayOrderId: order.id,
         deviceId,
-        requestedBy: `${activeEmployeeName} · Cancel order`,
+        requestedBy: activeEmployeeName,
+        requestType: 'cancel',
       })
-      setStatusMessage(`Cancellation request sent for ${formatPosOrderRef(order.id)}. Waiting for Admin Web confirmation.`)
-      setEditApprovalRequest({
-        requestId: request.id,
-        orderId,
-        action: 'cancel',
-        status: 'pending',
-        message: 'Waiting for an admin to confirm cancellation. Keep this POS online.',
-      })
+      const pendingOrder: RestaurantOrder = { ...order, cancellationState: 'pending', cancellationRequestId: request.id }
+      setPendingCancellations((current) => [
+        { requestId: request.id, requestedAt: request.requestedAt, order: pendingOrder },
+        ...current.filter((item) => item.order.id !== order.id),
+      ])
+      setOrders((current) => current.filter((item) => item.id !== order.id))
+      setHistory((current) => [pendingOrder, ...current.filter((item) => item.id !== order.id)])
+      setSelectedOrderId(null)
+      setStatusMessage(`${formatPosOrderRef(order.id)} moved to History as Void Pending.`)
     } catch (error) {
       const message = describeOrderEditRequestError(error)
       setStatusMessage(message)
-      setEditApprovalRequest({ requestId: null, orderId, action: 'cancel', status: 'error', message })
     }
   }
 
-  async function completeApprovedCancellation(orderId: string, approvedBy: string) {
-    const order = orders.find((item) => item.id === orderId)
-    if (!order) {
-      setEditApprovalRequest(null)
-      return
-    }
+  async function finalizePendingCancellation(pending: PendingCancellation, approvedBy: string) {
     try {
       await voidOrder({
-        deviceOrderId: order.deviceOrderId,
-        voidReason: 'Cancelled from POS after admin confirmation',
+        deviceOrderId: pending.order.deviceOrderId,
+        voidReason: 'POS cancellation approved in Admin Request Center',
         voidedBy: approvedBy,
       })
-      setOrders((current) => current.filter((item) => item.id !== orderId))
-      setSelectedOrderId(null)
-      setStatusMessage(`${formatPosOrderRef(order.id)} cancelled with confirmation from ${approvedBy}.`)
-      setEditApprovalRequest(null)
+      setPendingCancellations((current) => current.filter((item) => item.requestId !== pending.requestId))
+      setHistory((current) => current.map((item) => item.id === pending.order.id ? { ...item, cancellationState: 'voided' } : item))
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not cancel the approved order.'
-      setStatusMessage(message)
-      setEditApprovalRequest({ requestId: null, orderId, action: 'cancel', status: 'error', message })
+      setStatusMessage(error instanceof Error ? error.message : 'Could not finalize the approved cancellation.')
+    }
+  }
+
+  function restorePendingCancellation(pending: PendingCancellation, outcome: string) {
+    const restoredOrder: RestaurantOrder = { ...pending.order, cancellationState: undefined, cancellationRequestId: undefined }
+    setPendingCancellations((current) => current.filter((item) => item.requestId !== pending.requestId))
+    setHistory((current) => current.filter((item) => item.id !== pending.order.id))
+    setOrders((current) => current.some((item) => item.id === restoredOrder.id) ? current : [restoredOrder, ...current])
+    setStatusMessage(`${formatPosOrderRef(restoredOrder.id)} restored after cancellation was ${outcome}.`)
+  }
+
+  async function withdrawPendingCancellation(requestId: string) {
+    const pending = pendingCancellations.find((item) => item.requestId === requestId)
+    if (!pending) return
+    try {
+      await cancelOrderEditRequest(requestId)
+      restorePendingCancellation(pending, 'withdrawn')
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'Could not withdraw the cancellation request.')
     }
   }
 
@@ -973,13 +1018,15 @@ export function PosApp() {
     setActiveTab('new-order')
   }
 
-  function closeEditApprovalRequest() {
+  /*
+  function _closeEditApprovalRequest() {
     if (editApprovalRequest?.requestId && editApprovalRequest.status === 'pending') {
       void cancelOrderEditRequest(editApprovalRequest.requestId).catch(() => {})
     }
     setEditApprovalRequest(null)
   }
 
+  */
   function updateOrderItem(orderId: string, itemId: string, served: boolean) {
     const order = orders.find((item) => item.id === orderId)
     if (!order) return
@@ -1111,12 +1158,14 @@ export function PosApp() {
     try {
       const [menu, syncedOrders] = await Promise.all([fetchPosMenu(), fetchOrders()])
       const mappedOrders = syncedOrders.map(mapAdminOrderToRestaurantOrder)
-      const activeOrders = mappedOrders.filter((order) => !order.paid)
+      const storedPending = readPendingCancellations()
+      const pendingOrderIds = new Set(storedPending.map((item) => item.order.id))
+      const activeOrders = mappedOrders.filter((order) => !order.paid && !pendingOrderIds.has(order.id))
 
       setCategories(menu.categories)
       setProducts(menu.products)
       setOrders(activeOrders)
-      setHistory(mappedOrders.filter((order) => order.paid))
+      setHistory([...storedPending.map((item) => item.order), ...mappedOrders.filter((order) => order.paid && !pendingOrderIds.has(order.id))])
       setStatusMessage(`POS refreshed. ${activeOrders.length} active order${activeOrders.length === 1 ? '' : 's'} loaded.`)
     } catch (error) {
       setStatusMessage(error instanceof Error ? `Refresh failed: ${error.message}` : 'Refresh failed. Please try again.')
@@ -1382,8 +1431,10 @@ export function PosApp() {
               [category]: !isKitchenCategoryEnabled(current, category),
             }))}
             backlog={offlineBacklog}
+            pendingCancellations={pendingCancellations}
             isOnline={isOnline}
             onRetryBacklog={() => void flushOfflineBacklog(setStatusMessage)}
+            onWithdrawCancellation={(requestId) => void withdrawPendingCancellation(requestId)}
           />
         </section>
       ) : null}
@@ -1397,15 +1448,6 @@ export function PosApp() {
             if (kitchenNoteTarget.noteOrderId) void saveOrderNotes(kitchenNoteTarget.noteOrderId, note)
             else void saveOrder(note)
           }}
-        />
-      ) : null}
-      {editApprovalRequest ? (
-        <AdminApprovalModal
-          orderId={editApprovalRequest.orderId}
-          action={editApprovalRequest.action}
-          status={editApprovalRequest.status}
-          message={editApprovalRequest.message}
-          onCancel={closeEditApprovalRequest}
         />
       ) : null}
     </main>
@@ -1620,7 +1662,8 @@ function SendToKitchenModal({
   )
 }
 
-function AdminApprovalModal({
+/*
+function _AdminApprovalModal({
   orderId,
   action,
   status,
@@ -1664,6 +1707,7 @@ function AdminApprovalModal({
   )
 }
 
+*/
 export function PaymentModal({
   target,
   order,
@@ -3557,8 +3601,10 @@ function SettingsPage({
   onReceiptPrintSettingsChange,
   onProductStatusChange,
   backlog,
+  pendingCancellations,
   isOnline,
   onRetryBacklog,
+  onWithdrawCancellation,
 }: {
   history: RestaurantOrder[]
   products: PosMenuProduct[]
@@ -3574,8 +3620,10 @@ function SettingsPage({
   onProductStatusChange: (productId: string, status: ProductStatus) => Promise<void>
   onToggleMenuCategory: (category: string) => void
   backlog: OfflineBacklogEntry[]
+  pendingCancellations: PendingCancellation[]
   isOnline: boolean
   onRetryBacklog: () => void
+  onWithdrawCancellation: (requestId: string) => void
 }) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('menu')
   const [movements, setMovements] = useState<CashMovement[]>([])
@@ -3691,7 +3739,7 @@ function SettingsPage({
   const settingSections: Array<{ id: SettingsSection; title: string; subtitle: string }> = [
     { id: 'menu', title: 'Menu List', subtitle: `${products.length} products` },
     { id: 'printing', title: 'Printing', subtitle: 'Receipt print setup' },
-    { id: 'backlog', title: 'Backlog', subtitle: `${backlog.length} waiting to sync` },
+    { id: 'backlog', title: 'Backlog', subtitle: `${backlog.length + pendingCancellations.length} pending` },
   ]
 
   return (
@@ -3956,7 +4004,21 @@ function SettingsPage({
 
         {activeSection === 'backlog' ? (
           <section className="settings-panel">
-            <SettingsPanelHeader title="Offline Backlog" subtitle="Orders finished or changed while this terminal could not reach the internet." />
+            <SettingsPanelHeader title="POS Backlog" subtitle="Pending cancellation requests and offline changes from this terminal." />
+            <div className="settings-card">
+              <h3>Pending Cancellations</h3>
+              <p>These orders are hidden from active POS screens and shown as Void Pending in History.</p>
+              <div className="backlog-list">
+                {pendingCancellations.length === 0 ? <EmptyState text="No cancellation requests waiting for admin review." /> : null}
+                {pendingCancellations.map((pending) => (
+                  <article key={pending.requestId} className="backlog-order-card">
+                    <div><strong>{formatPosOrderRef(pending.order.id)}</strong><span>{pending.order.items.length} items · {formatPhp(orderTotal(pending.order))}</span></div>
+                    <div><span>VOID PENDING</span><time>{new Date(pending.requestedAt).toLocaleString()}</time></div>
+                    <button type="button" onClick={() => onWithdrawCancellation(pending.requestId)}>Withdraw Cancellation</button>
+                  </article>
+                ))}
+              </div>
+            </div>
             <div className={`settings-card backlog-summary ${isOnline ? 'is-online' : 'is-offline'}`}>
               <div><h3>{isOnline ? 'Internet connected' : 'Offline mode active'}</h3><p>{backlog.length === 0 ? 'Everything on this device is synced.' : `${backlog.length} order${backlog.length === 1 ? '' : 's'} waiting to sync automatically.`}</p></div>
               <button type="button" className="settings-primary-button" disabled={!isOnline || backlog.length === 0} onClick={onRetryBacklog}><RefreshCw size={16} /> Retry now</button>
@@ -4046,7 +4108,7 @@ function HistoryPage({
             >
               <div>
                 <strong>{formatPosOrderRef(order.id)}</strong>
-                <span>{formatOrderType(order.orderType)} - {formatOrderTime(order.createdAt)}</span>
+                <span>{order.cancellationState === 'pending' ? 'Void Pending' : order.cancellationState === 'voided' ? 'Voided' : formatOrderType(order.orderType)} - {formatOrderTime(order.createdAt)}</span>
               </div>
               <em>{formatPhp(orderTotal(order))}</em>
             </button>
@@ -4062,7 +4124,7 @@ function HistoryPage({
                 <span>Selected Order</span>
                 <strong>{formatPosOrderRef(selectedOrder.id)}</strong>
               </div>
-              <em className="is-paid">Paid</em>
+              <em className="is-paid">{selectedOrder.cancellationState === 'pending' ? 'Void Pending' : selectedOrder.cancellationState === 'voided' ? 'Voided' : 'Paid'}</em>
             </header>
             <div className="history-detail-summary">
               <div>
@@ -5102,6 +5164,22 @@ function createDeviceOrderId(deviceId: string, orderNumber: number, createdAt: n
 }
 
 const offlineBacklogKey = 'pos-web-offline-backlog-v1'
+const pendingCancellationsKey = 'pos-web-pending-cancellations-v1'
+
+function readPendingCancellations(): PendingCancellation[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(pendingCancellationsKey) ?? '[]')
+    return Array.isArray(parsed) ? parsed as PendingCancellation[] : []
+  } catch {
+    return []
+  }
+}
+
+function writePendingCancellations(items: PendingCancellation[]) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(pendingCancellationsKey, JSON.stringify(items))
+}
 
 function readOfflineBacklog(): OfflineBacklogEntry[] {
   if (typeof window === 'undefined') return []
