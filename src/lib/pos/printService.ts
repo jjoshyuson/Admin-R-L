@@ -1,4 +1,5 @@
 import type { CompletedOrder } from './posTypes'
+import { formatCustomerOrderNumber } from '../orderNumber'
 
 export type PrintDocumentType = 'customer-receipt' | 'kitchen-ticket'
 export type ReceiptPaperWidth = '58mm' | '80mm'
@@ -245,7 +246,7 @@ function formatReceiptTimestamp(value: string) {
 }
 
 function shortOrderId(value: string) {
-  return value.trim() ? value.trim().slice(-18) : 'ORDER'
+  return value.trim() ? `Order #${formatCustomerOrderNumber(value)}` : 'ORDER'
 }
 
 function formatPhp(value: number) {

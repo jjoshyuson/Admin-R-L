@@ -54,6 +54,7 @@ import type {
   ShiftType,
   CashMovement as CashMovementRecord,
 } from './lib/adminTypes'
+import { formatCustomerOrderNumber } from './lib/orderNumber'
 
 type Period = 'Daily' | 'Weekly' | 'Monthly'
 type InventoryRoute = 'overview' | 'configuration'
@@ -6624,7 +6625,7 @@ function OrderDetailModal({ order, voidRecord, onClose, onVoid }: OrderDetailMod
       <section className="bottom-sheet cash-sheet" role="dialog" aria-modal="true" aria-label="Order detail">
         <div className="sheet-handle" />
         <header className="product-modal-header">
-          <h2>Order {order.deviceOrderId}</h2>
+          <h2>Order #{formatShortOrderNumber(order.deviceOrderId)}</h2>
           <button type="button" className="sheet-close-button" onClick={onClose} aria-label="Close">
             <CloseIcon />
           </button>
@@ -9880,27 +9881,7 @@ function formatQuantity(value: number, unit: string) {
 }
 
 function formatShortOrderNumber(value: string) {
-  const cleaned = value.trim()
-  const timestampMatch = cleaned.match(/(\d{4})(\d{2})(\d{2})\d{6}-(\d{4,})$/)
-  if (timestampMatch) {
-    return `${timestampMatch[2]}${timestampMatch[3]}-${timestampMatch[4]}`
-  }
-
-  const lastSegment = cleaned.split('-').filter(Boolean).at(-1)
-  if (lastSegment && /^\d{4,}$/.test(lastSegment)) {
-    return lastSegment
-  }
-
-  if (/^#?\d{1,6}$/.test(cleaned)) {
-    return cleaned.replace(/^#/, '').padStart(4, '0')
-  }
-
-  const digits = cleaned.replace(/\D/g, '')
-  if (digits.length >= 5) {
-    return digits.slice(-5)
-  }
-
-  return cleaned.replace(/^#/, '') || '----'
+  return formatCustomerOrderNumber(value)
 }
 
 function resolveCashOrderAmount(order: OrderRecord) {

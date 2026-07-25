@@ -33,6 +33,7 @@ import { fetchAdminSetting, fetchCashMovements, fetchOrders, saveAdminSetting, u
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
 import { fetchPosMenu, getPreviewPosMenu, isProductVisibleOnPos, updatePosMenuProductStatus } from '../lib/pos/menuService'
 import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ProductStatus, ServiceMode } from '../lib/pos/posTypes'
+import { formatCustomerOrderNumber, peekHourlyOrderNumber, reserveHourlyOrderNumber } from '../lib/orderNumber'
 import { checkNativePrinterStatus, printPosDocument, type NativePrinterStatus, type PrintDocumentType, type ReceiptDetailMode, type ReceiptPaperWidth } from '../lib/pos/printService'
 import { paymentBelongsToActiveShift } from '../lib/pos/shiftFiltering'
 import {
@@ -221,7 +222,7 @@ export function PosApp() {
   const [pinError, setPinError] = useState('')
   const [statusMessage, setStatusMessage] = useState('Loading menu...')
   const [refreshing, setRefreshing] = useState(false)
-  const [nextOrderNumber, setNextOrderNumber] = useState(1)
+  const [nextOrderNumber, setNextOrderNumber] = useState(peekHourlyOrderNumber)
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
   const [prepaidCheckoutOrderId, setPrepaidCheckoutOrderId] = useState<string | null>(null)
   const [kitchenNoteTarget, setKitchenNoteTarget] = useState<KitchenNoteTarget | null>(null)
@@ -235,6 +236,11 @@ export function PosApp() {
   const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine)
   const [offlineBacklog, setOfflineBacklog] = useState<OfflineBacklogEntry[]>(readOfflineBacklog)
   const [pendingCancellations, setPendingCancellations] = useState<PendingCancellation[]>(readPendingCancellations)
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNextOrderNumber(peekHourlyOrderNumber()), 30_000)
+    return () => window.clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     const refreshBacklog = () => setOfflineBacklog(readOfflineBacklog())
@@ -543,7 +549,7 @@ export function PosApp() {
     ? formatPosOrderRef(editOrderId)
     : appendOrderId
       ? formatPosOrderRef(appendOrderId)
-      : `#${String(nextOrderNumber).padStart(4, '0')}`
+      : `#${nextOrderNumber}`
 
   useEffect(() => {
     if (!editApprovalRequest?.requestId || editApprovalRequest.status !== 'pending') return undefined
@@ -763,9 +769,10 @@ export function PosApp() {
       return
     }
     const createdAt = Date.now()
+    const reservedOrderNumber = reserveHourlyOrderNumber(createdAt)
     const order: RestaurantOrder = {
-      id: `#${String(nextOrderNumber).padStart(4, '0')}`,
-      deviceOrderId: createDeviceOrderId(deviceId, nextOrderNumber, createdAt),
+      id: `#${reservedOrderNumber.reference}`,
+      deviceOrderId: createDeviceOrderId(deviceId, reservedOrderNumber.reference, createdAt),
       items: ticketItems.map((item) => ({
         id: item.lineId,
         productId: item.productId,
@@ -792,7 +799,7 @@ export function PosApp() {
       shiftSessionId: activeShiftSession?.id ?? null,
     }
     setOrders((current) => [order, ...current])
-    setNextOrderNumber((value) => value + 1)
+    setNextOrderNumber(peekHourlyOrderNumber())
     setTicketItems([])
     setKitchenNoteTarget(null)
     setStatusMessage(`${order.id} saved to ongoing orders.`)
@@ -1339,7 +1346,7 @@ export function PosApp() {
                 return
               }
               setKitchenNoteTarget({
-                orderNumber: editOrderId ?? appendOrderId ?? `#${String(nextOrderNumber).padStart(4, '0')}`,
+                orderNumber: editOrderId ?? appendOrderId ?? `#${nextOrderNumber}`,
                 itemCount: ticketItems.reduce((sum, item) => sum + item.quantity, 0),
                 appendToOrderId: appendOrderId ?? undefined,
                 editOrderId: editOrderId ?? undefined,
@@ -4376,7 +4383,7 @@ function normalizeReceiptCopies(value: string | number) {
 
 function buildTestReceipt(deviceId: string): CompletedOrder {
   return {
-    deviceOrderId: createDeviceOrderId(deviceId, 1, Date.now()),
+    deviceOrderId: createDeviceOrderId(deviceId, peekHourlyOrderNumber(), Date.now()),
     deviceId,
     createdAt: new Date().toISOString(),
     serviceMode: 'DINE IN',
@@ -4431,27 +4438,7 @@ function formatPhp(value: number) {
 }
 
 function formatPosOrderRef(value: string) {
-  const cleaned = value.trim()
-  const match = cleaned.match(/(\d{4})(\d{2})(\d{2})\d{6}-(\d{4,})$/)
-  if (match) {
-    return `#${match[2]}${match[3]}-${match[4]}`
-  }
-
-  const lastSegment = cleaned.split('-').filter(Boolean).at(-1)
-  if (lastSegment && /^\d{4,}$/.test(lastSegment)) {
-    return `#${lastSegment}`
-  }
-
-  if (/^#?\d{1,6}$/.test(cleaned)) {
-    return cleaned.startsWith('#') ? cleaned : `#${cleaned.padStart(4, '0')}`
-  }
-
-  const digits = cleaned.replace(/\D/g, '')
-  if (digits.length >= 5) {
-    return `#${digits.slice(-5)}`
-  }
-
-  return cleaned || '#----'
+  return `#${formatCustomerOrderNumber(value)}`
 }
 
 function initials(value: string) {
@@ -5219,10 +5206,10 @@ function isMissingTableError(error: unknown) {
     || message.includes('schema cache')
 }
 
-function createDeviceOrderId(deviceId: string, orderNumber: number, createdAt: number) {
+function createDeviceOrderId(deviceId: string, orderNumber: string, createdAt: number) {
   const safeDevice = normalizeAccountId(deviceId).toUpperCase()
   const compactTime = new Date(createdAt).toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)
-  return `${safeDevice}-${compactTime}-${String(orderNumber).padStart(4, '0')}`
+  return `${safeDevice}-${compactTime}-${orderNumber}`
 }
 
 const offlineBacklogKey = 'pos-web-offline-backlog-v1'
