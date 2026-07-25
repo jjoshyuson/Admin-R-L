@@ -29,7 +29,7 @@ import {
   WalletCards,
   X,
 } from 'lucide-react'
-import { fetchAdminSetting, fetchCashMovements, fetchOrders, saveAdminSetting, upsertCashMovements, voidOrder } from '../lib/adminApi'
+import { fetchAdminSetting, fetchCashMovements, fetchOrders, saveAdminSetting, upsertCashMovements, voidedExpenseIds, voidOrder } from '../lib/adminApi'
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
 import { fetchPosMenu, getPreviewPosMenu, isProductVisibleOnPos, updatePosMenuProductStatus } from '../lib/pos/menuService'
 import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ProductStatus, ServiceMode } from '../lib/pos/posTypes'
@@ -91,7 +91,7 @@ type PosEmployee = {
   pin: string
 }
 
-type SalePayment = {
+export type SalePayment = {
   id: string
   orderId: string
   customerName: string
@@ -103,6 +103,7 @@ type SalePayment = {
     name: string
     quantity: number
     price: number
+    isHalfOrder: boolean
   }>
   orderNote?: string
   shiftId?: string | null
@@ -3093,7 +3094,8 @@ function SaleTrackerPage({
         const movements = await fetchCashMovements()
         const adjustments = shiftSession ? await fetchShiftAdjustments(shiftSession.shiftId) : []
         if (!active) return
-        const currentExpenses = movements.filter((item) => shiftSession && item.movementKind === 'PAY_OUT' && cashMovementBelongsToShift(item, shiftSession))
+        const voidedIds = voidedExpenseIds(movements)
+        const currentExpenses = movements.filter((item) => shiftSession && item.movementKind === 'PAY_OUT' && !voidedIds.has(item.id) && cashMovementBelongsToShift(item, shiftSession))
         const currentAdjustments = adjustments.filter((item) => shiftSession && shiftAdjustmentBelongsToShift(item, shiftSession))
         const currentShiftCount = shiftSession ? rows.filter((payment) => salePaymentBelongsToShift(payment, shiftSession)).length : 0
         const nextStatus = `Live Supabase payments synced. ${currentShiftCount} current-shift records loaded.`
@@ -3567,7 +3569,10 @@ function SalePaymentDetailsModal({ payment, cashierName, onClose }: { payment: S
               {payment.items.map((item, index) => (
                 <article key={`${item.name}-${index}`}>
                   <span>{item.quantity}x</span>
-                  <strong>{item.name}</strong>
+                  <strong>
+                    {item.name}
+                    {item.isHalfOrder ? <small className="half-order-stamp">Half Order</small> : null}
+                  </strong>
                   <em>{formatPhp(item.price * item.quantity)}</em>
                 </article>
               ))}
@@ -4856,7 +4861,7 @@ async function fetchSalePaymentsFromShiftEvents(orderRows: SalePayment[]) {
   }
 
   const orderById = new Map(orderRows.map((row) => [row.orderId, row]))
-  return (data ?? []).flatMap((row): SalePayment[] => {
+  const payments = (data ?? []).flatMap((row): SalePayment[] => {
     const order = orderById.get(String(row.order_id ?? ''))
     // Match the Admin shift report: stale payment events must not contribute
     // after their source order has been deleted or replaced.
@@ -4876,6 +4881,7 @@ async function fetchSalePaymentsFromShiftEvents(orderRows: SalePayment[]) {
       shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
     }]
   })
+  return aggregateSalePaymentEvents(payments)
 }
 
 async function fetchSalePaymentsFromOrders() {
@@ -4947,6 +4953,27 @@ function cashMovementBelongsToShift(movement: CashMovement, shiftSession: ShiftS
 function shiftAdjustmentBelongsToShift(adjustment: ShiftAdjustment, shiftSession: ShiftSession) {
   if (adjustment.shiftId === shiftSession.shiftId || adjustment.shiftSessionId === shiftSession.id) return true
   return recordCreatedDuringShift(adjustment.requestedAt, shiftSession)
+}
+
+export function aggregateSalePaymentEvents(payments: SalePayment[]) {
+  const grouped = new Map<string, SalePayment>()
+  payments.forEach((payment) => {
+    const key = salePaymentKey(payment)
+    const existing = grouped.get(key)
+    if (!existing) {
+      grouped.set(key, payment)
+      return
+    }
+    const newest = Date.parse(payment.createdAt) >= Date.parse(existing.createdAt) ? payment : existing
+    grouped.set(key, {
+      ...newest,
+      id: `${newest.orderId}-${newest.method}-combined`,
+      amount: roundCurrency(existing.amount + payment.amount),
+      items: newest.items.length > 0 ? newest.items : existing.items,
+      orderNote: newest.orderNote || existing.orderNote,
+    })
+  })
+  return [...grouped.values()]
 }
 
 function recordCreatedDuringShift(createdAt: string, shiftSession: ShiftSession) {
@@ -5046,6 +5073,7 @@ function mapSalePaymentItems(value: unknown): SalePayment['items'] {
       name: String(item.name ?? 'Item'),
       quantity,
       price,
+      isHalfOrder: Boolean(item.isHalfOrder ?? item.is_half_order),
     }
   })
 }

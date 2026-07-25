@@ -2508,6 +2508,28 @@ textarea {
 .shift-expense-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .shift-expense-heading h2, .shift-expense-heading p { margin: 0; }
 .shift-expense-heading p { margin-top: 4px; color: #667085; font-size: 12px; }
+.expense-history-screen { display: grid; gap: 14px; }
+.expense-history-summary { display: grid; gap: 4px; }
+.expense-history-summary > span,
+.expense-history-summary > small { color: #667085; }
+.expense-history-summary > strong { font-size: 28px; color: #14283d; }
+.expense-history-list article { position: relative; padding-right: 126px; }
+.expense-history-list article.is-voided { opacity: .7; background: #f7f7f8; }
+.expense-history-list article.is-voided > strong,
+.expense-history-list article.is-voided > span { text-decoration: line-through; }
+.expense-history-list article > button { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); }
+.expense-history-list article > small { color: #a23b3b; font-weight: 700; }
+.confirm-modal {
+  width: min(440px, calc(100vw - 32px));
+  padding: 22px;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(15 23 42 / 22%);
+}
+.confirm-modal h2 { margin: 0 0 8px; }
+.confirm-modal > p { margin: 0 0 18px; color: #667085; line-height: 1.5; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.confirm-actions .modal-secondary { min-width: 100px; min-height: 44px; border-radius: 12px; background: #eef2f7; color: #334155; }
 .shift-session-card { padding: 18px; }
 .shift-session-card h2 { margin-top: 0; font-size: 16px; }
 .audit-session-list { display: grid; }

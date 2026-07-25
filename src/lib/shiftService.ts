@@ -1,5 +1,6 @@
 import { hasSupabaseConfig, requireSupabase } from './supabase/client'
 import type { CashMovement, OrderRecord, ShiftAdjustment, ShiftAudit, ShiftPaymentEvent, ShiftSchedule, ShiftSession, ShiftType } from './adminTypes'
+import { voidedExpenseIds } from './adminApi'
 
 export const defaultShiftSchedule: ShiftSchedule = {
   firstShiftStart: '06:00',
@@ -96,7 +97,7 @@ export async function fetchShiftReport(businessDate: string, shiftType: ShiftTyp
     supabase.from('shift_sessions').select('*').eq('shift_id', shiftId).order('clocked_in_at'),
     supabase.from('orders').select('device_order_id,device_id,payment_method,payment_reference,cash_amount,gcash_amount,payment_status,workflow_status,subtotal,tax,total,created_at,items_json,shift_id,shift_session_id').eq('shift_id', shiftId).order('created_at'),
     supabase.from('shift_payment_events').select('*').or(`origin_shift_id.eq.${shiftId},collection_shift_id.eq.${shiftId}`).order('collected_at'),
-    supabase.from('cash_movements').select('*').eq('shift_id', shiftId).eq('movement_kind', 'PAY_OUT').order('created_at'),
+    supabase.from('cash_movements').select('*').eq('shift_id', shiftId).order('created_at'),
     supabase.from('shift_adjustments').select('*').eq('shift_id', shiftId).order('requested_at'),
     supabase.from('shift_audits').select('*').eq('shift_id', shiftId).maybeSingle(),
   ])
@@ -117,7 +118,9 @@ export async function fetchShiftReport(businessDate: string, shiftType: ShiftTyp
     const existingOrderIds = new Set((paymentOrders ?? []).map((row) => String(row.device_order_id)))
     payments = rawPayments.filter((item) => existingOrderIds.has(item.orderId))
   }
-  const expenses = (expensesResult.data ?? []).map((row) => ({ id: String(row.id), accountId: String(row.account_id), accountType: String(row.account_type) as CashMovement['accountType'], sourceAccountId: row.source_account_id ? String(row.source_account_id) : null, destinationAccountId: null, movementKind: 'PAY_OUT' as const, reasonCategory: String(row.reason_category), amount: Number(row.amount), note: row.note ? String(row.note) : null, relatedBillId: null, createdBy: String(row.created_by), createdAtEpochMillis: Date.parse(String(row.created_at)), shiftId: String(row.shift_id), shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null }))
+  const shiftMovements: CashMovement[] = (expensesResult.data ?? []).map((row) => ({ id: String(row.id), accountId: String(row.account_id), accountType: String(row.account_type) as CashMovement['accountType'], sourceAccountId: row.source_account_id ? String(row.source_account_id) : null, destinationAccountId: row.destination_account_id ? String(row.destination_account_id) : null, movementKind: String(row.movement_kind) as CashMovement['movementKind'], reasonCategory: String(row.reason_category), amount: Number(row.amount), note: row.note ? String(row.note) : null, relatedBillId: row.related_bill_id ? String(row.related_bill_id) : null, createdBy: String(row.created_by), createdAtEpochMillis: Date.parse(String(row.created_at)), shiftId: String(row.shift_id), shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null }))
+  const voidedIds = voidedExpenseIds(shiftMovements)
+  const expenses = shiftMovements.filter((movement) => movement.movementKind === 'PAY_OUT' && !voidedIds.has(movement.id))
   const adjustments = (adjustmentsResult.data ?? []).map(mapAdjustment)
   return { sessions: (sessionsResult.data ?? []).map((row) => mapSession(row as Record<string, unknown>)), orders, payments, expenses, adjustments, audit: auditResult.data ? mapShiftAudit(auditResult.data as Record<string, unknown>) : null }
 }

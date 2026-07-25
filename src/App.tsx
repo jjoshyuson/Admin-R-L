@@ -19,10 +19,13 @@ import {
   deactivateMenuCategory,
   deactivateMenuProduct,
   fetchAdminSetting,
+  fetchCashMovements,
   upsertCashMovements,
   recordInventoryCount,
   seedTroubleshootingData,
   saveAdminSetting,
+  voidedExpenseIds,
+  voidExpense,
   voidOrder,
 } from './lib/adminApi'
 import { createRandomId } from './lib/randomId'
@@ -49,6 +52,7 @@ import type {
   ShiftSchedule,
   ShiftAdjustment,
   ShiftType,
+  CashMovement as CashMovementRecord,
 } from './lib/adminTypes'
 
 type Period = 'Daily' | 'Weekly' | 'Monthly'
@@ -73,6 +77,7 @@ type MoreRoute =
   | 'recipes'
   | 'finance-overview'
   | 'cash-drawer'
+  | 'expense-history'
   | 'expense-categories'
   | 'turnover-settings'
   | 'shift-reports'
@@ -4708,6 +4713,12 @@ function SettingsMoreScreen({
           onClick={() => onNavigate('cash-drawer')}
         />
         <ActionRow
+          icon={<BillsIcon />}
+          title="Expense History"
+          subtitle="Review active and voided expenses"
+          onClick={() => onNavigate('expense-history')}
+        />
+        <ActionRow
           icon={<FinanceOverviewIcon />}
           title="Expense Categories"
           subtitle="Categories and subcategories used by POS expense logging"
@@ -5318,6 +5329,10 @@ function MoreDetailScreen({
     return <ExpenseCategorySettingsScreen onBack={onBack} />
   }
 
+  if (route === 'expense-history') {
+    return <ExpenseHistoryScreen onBack={onBack} />
+  }
+
   if (route === 'payables') {
     return (
       <BillsPayablesScreen
@@ -5473,6 +5488,76 @@ function ShiftReportsScreen({ onBack, onRefreshFinance }: { onBack: () => void; 
     </section>{!report.audit ? <button type="button" className="audit-start-button" disabled={auditBusy || hasOpenSessions} onClick={() => void approveAudit()}><span aria-hidden="true">♢</span>{auditBusy ? 'Approving...' : 'Approve'}</button> : null}</> : null}
     {page === 'expenses' ? <section className="surface-card"><div className="shift-expense-heading"><div><h2>{expenseAccount ? `${expenseAccount === 'CASH' ? 'Cash' : 'GCash'} Expense Log` : 'Expense Log'}</h2>{expenseAccount ? <p>Total expenses: <strong>{formatPhp(expenseAccount === 'CASH' ? totals.cashExpenses : totals.gcashExpenses)}</strong></p> : null}</div>{expenseAccount ? <button type="button" className="ghost-pill" onClick={() => setExpenseAccount(null)}>Show all</button> : null}</div><div className="shift-ledger-list">{visibleExpenses.length === 0 ? <p>No {expenseAccount === 'CASH' ? 'cash ' : expenseAccount === 'GCASH' ? 'GCash ' : ''}expenses for this shift.</p> : visibleExpenses.map((item) => <article key={item.id}><strong>{formatPhp(item.amount)} • {item.accountType === 'BANK' ? 'GCash' : 'Cash'}</strong><span>{item.reasonCategory} — {item.note || 'No note'}</span><em>{item.createdBy} • {new Date(item.createdAtEpochMillis).toLocaleString()}</em></article>)}</div></section> : null}
     {page === 'adjustments' ? <><section className="surface-card shift-adjustment-entry"><h2>Admin Adjustment</h2><select value={adjustment.account} onChange={(e) => setAdjustment({ ...adjustment, account: e.target.value as 'CASH' | 'GCASH' })}><option>CASH</option><option>GCASH</option></select><select value={adjustment.direction} onChange={(e) => setAdjustment({ ...adjustment, direction: e.target.value as 'ADD' | 'REMOVE' })}><option>ADD</option><option>REMOVE</option></select><input inputMode="decimal" value={adjustment.amount} onChange={(e) => setAdjustment({ ...adjustment, amount: e.target.value })} placeholder="Amount" /><input value={adjustment.reason} onChange={(e) => setAdjustment({ ...adjustment, reason: e.target.value })} placeholder="Required reason" /><button className="ghost-pill" onClick={() => void addAdjustment()}>Apply Adjustment</button></section><section className="surface-card"><div className="shift-ledger-list">{report.adjustments.map((item) => <article key={item.id}><strong>{item.direction} {formatPhp(item.amount)} • {item.account}</strong><span>{item.reason} — {item.status}</span><em>{item.requestedBy} • {new Date(item.requestedAt).toLocaleString()}</em>{item.status === 'PENDING' ? <div><button onClick={() => void decide(item.id, 'APPROVED')}>Approve</button><button onClick={() => void decide(item.id, 'REJECTED')}>Reject</button></div> : null}</article>)}</div></section></> : null}
+  </div>
+}
+
+function ExpenseHistoryScreen({ onBack }: { onBack: () => void }) {
+  const [movements, setMovements] = useState<CashMovementRecord[]>([])
+  const [selectedExpense, setSelectedExpense] = useState<CashMovementRecord | null>(null)
+  const [voidReason, setVoidReason] = useState('')
+  const [status, setStatus] = useState('Loading expense history...')
+  const [saving, setSaving] = useState(false)
+
+  async function load() {
+    try {
+      const rows = await fetchCashMovements()
+      setMovements(rows)
+      setStatus('Expense history loaded from Supabase.')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Could not load expense history.')
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  const voidedIds = voidedExpenseIds(movements)
+  const voidByExpenseId = new Map(
+    movements.flatMap((movement) => {
+      const targetId = movement.movementKind === 'ADJUSTMENT_PLUS' && movement.relatedBillId?.startsWith('void-expense:')
+        ? movement.relatedBillId.slice('void-expense:'.length)
+        : null
+      return targetId ? [[targetId, movement] as const] : []
+    }),
+  )
+  const expenses = movements.filter((movement) => movement.movementKind === 'PAY_OUT')
+  const activeTotal = expenses.filter((expense) => !voidedIds.has(expense.id)).reduce((sum, expense) => sum + expense.amount, 0)
+
+  async function confirmVoid() {
+    if (!selectedExpense || !voidReason.trim()) {
+      setStatus('Enter a reason before voiding this expense.')
+      return
+    }
+    setSaving(true)
+    try {
+      await voidExpense(selectedExpense, voidReason.trim())
+      setSelectedExpense(null)
+      setVoidReason('')
+      await load()
+      setStatus('Expense voided. The reversal was recorded and the balance was restored.')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Could not void the expense.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return <div className="record-screen expense-history-screen">
+    <header className="record-header"><button type="button" className="back-button icon-back-button" onClick={onBack}>&lt;</button><h1>Expense History</h1><button type="button" className="ghost-pill" onClick={() => void load()}>Refresh</button></header>
+    <section className="surface-card expense-history-summary"><span>Active expenses</span><strong>{formatPhp(activeTotal)}</strong><small>{expenses.length} records • {voidedIds.size} voided</small></section>
+    <div className="finance-notice-banner">{status}</div>
+    <section className="surface-card"><div className="shift-ledger-list expense-history-list">
+      {expenses.length === 0 ? <p>No expenses have been logged.</p> : expenses.map((expense) => {
+        const voidRecord = voidByExpenseId.get(expense.id)
+        const isVoided = Boolean(voidRecord)
+        return <article key={expense.id} className={isVoided ? 'is-voided' : ''}>
+          <strong>{formatPhp(expense.amount)} • {expense.accountType === 'BANK' ? 'GCash' : 'Cash'}</strong>
+          <span>{expense.reasonCategory} — {expense.note || 'No note'}</span>
+          <em>{expense.createdBy} • {new Date(expense.createdAtEpochMillis).toLocaleString()}</em>
+          {isVoided ? <small>VOIDED by {voidRecord?.createdBy} • {voidRecord?.note}</small> : <button type="button" className="text-danger-button" onClick={() => { setSelectedExpense(expense); setVoidReason('') }}>Void expense</button>}
+        </article>
+      })}
+    </div></section>
+    {selectedExpense ? <div className="modal-backdrop" role="presentation"><section className="confirm-modal" role="dialog" aria-modal="true"><h2>Void expense?</h2><p>{formatPhp(selectedExpense.amount)} for {selectedExpense.reasonCategory} will be reversed. The original record will remain in history.</p><label className="input-field"><span>Reason</span><textarea className="text-area" value={voidReason} onChange={(event) => setVoidReason(event.target.value)} placeholder="Required for the audit trail" /></label><div className="confirm-actions"><button type="button" className="modal-secondary" onClick={() => setSelectedExpense(null)}>Cancel</button><button type="button" className="danger-button" disabled={saving || !voidReason.trim()} onClick={() => void confirmVoid()}>{saving ? 'Voiding...' : 'Void expense'}</button></div></section></div> : null}
   </div>
 }
 

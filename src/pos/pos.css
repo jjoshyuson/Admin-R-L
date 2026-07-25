@@ -6408,8 +6408,17 @@ h1 {
 
 .sale-detail-items article strong {
   color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
   font-size: 14px;
   font-weight: 700;
+}
+
+.sale-detail-items article .half-order-stamp {
+  font-size: 9px;
+  padding: 2px 6px;
 }
 
 .sale-summary-panel {

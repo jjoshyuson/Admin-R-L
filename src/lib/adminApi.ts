@@ -1011,6 +1011,40 @@ export async function upsertCashMovements(movements: CashMovement[]) {
   })
 }
 
+const EXPENSE_VOID_PREFIX = 'void-expense:'
+
+export function expenseVoidTargetId(movement: CashMovement) {
+  if (movement.movementKind !== 'ADJUSTMENT_PLUS') return null
+  const relatedId = movement.relatedBillId ?? ''
+  return relatedId.startsWith(EXPENSE_VOID_PREFIX) ? relatedId.slice(EXPENSE_VOID_PREFIX.length) : null
+}
+
+export function voidedExpenseIds(movements: CashMovement[]) {
+  return new Set(movements.map(expenseVoidTargetId).filter((id): id is string => Boolean(id)))
+}
+
+export async function voidExpense(expense: CashMovement, reason: string, voidedBy = 'Admin Web') {
+  if (expense.movementKind !== 'PAY_OUT') throw new Error('Only expense records can be voided.')
+  const reversal: CashMovement = {
+    id: `expense-void-${expense.id}`,
+    accountId: expense.accountId,
+    accountType: expense.accountType,
+    sourceAccountId: expense.sourceAccountId,
+    destinationAccountId: expense.destinationAccountId,
+    movementKind: 'ADJUSTMENT_PLUS',
+    reasonCategory: `Voided expense: ${expense.reasonCategory}`,
+    amount: expense.amount,
+    note: `${reason.trim() || 'Voided from Admin Web'} • Original expense ${expense.id}`,
+    relatedBillId: `${EXPENSE_VOID_PREFIX}${expense.id}`,
+    createdBy: voidedBy,
+    createdAtEpochMillis: Date.now(),
+    shiftId: expense.shiftId ?? null,
+    shiftSessionId: expense.shiftSessionId ?? null,
+  }
+  await upsertCashMovements([reversal])
+  return reversal
+}
+
 export async function savePayable(input: SavePayableInput) {
   return maybeConfigured(undefined, async () => {
     const supabase = requireSupabase()
