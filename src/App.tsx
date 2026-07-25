@@ -6616,6 +6616,7 @@ type OrderDetailModalProps = {
 
 function OrderDetailModal({ order, voidRecord, onClose, onVoid }: OrderDetailModalProps) {
   const amountPaid = resolveOrderAmountPaid(order)
+  const gcashReference = resolveOrderGcashReference(order)
 
   return (
     <div className="modal-overlay" role="presentation">
@@ -6649,6 +6650,12 @@ function OrderDetailModal({ order, voidRecord, onClose, onVoid }: OrderDetailMod
               <span>Payment Method</span>
               <strong>{order.paymentMethod || 'Unknown'}</strong>
             </div>
+            {gcashReference ? (
+              <div className="finance-row">
+                <span>GCash Reference Number</span>
+                <strong>{gcashReference}</strong>
+              </div>
+            ) : null}
             <div className="finance-row">
               <span>Status</span>
               <strong>{formatOrderWorkflowStatus(order)}</strong>
@@ -6730,6 +6737,15 @@ function OrderDetailModal({ order, voidRecord, onClose, onVoid }: OrderDetailMod
       </section>
     </div>
   )
+}
+
+function resolveOrderGcashReference(order: OrderRecord) {
+  const method = order.paymentMethod.trim().toUpperCase()
+  if (method !== 'GCASH' && method !== 'SPLIT' && (order.gcashAmount ?? 0) <= 0) return null
+
+  const paymentReference = order.paymentReference?.trim() ?? ''
+  const splitReference = paymentReference.match(/(?:^|;)REF=([^;]+)/i)?.[1]?.trim()
+  return splitReference || (method === 'GCASH' ? paymentReference : '') || order.gcashReferenceLast4?.trim() || null
 }
 
 type DailyLogEditorModalProps = {

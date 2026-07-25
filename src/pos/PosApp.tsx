@@ -4144,6 +4144,12 @@ function HistoryPage({
                 <span>Payment</span>
                 <strong>{historyPaymentLabel(selectedOrder)}</strong>
               </div>
+              {historyGcashReference(selectedOrder) ? (
+                <div>
+                  <span>GCash Reference Number</span>
+                  <strong>{historyGcashReference(selectedOrder)}</strong>
+                </div>
+              ) : null}
             </div>
             <div className="history-detail-items">
               {selectedOrder.items.map((item) => (
@@ -4469,6 +4475,13 @@ function historyPaymentLabel(order: RestaurantOrder) {
   if (order.paymentMethod === 'split') return 'Split Cash/GCash'
   if (order.paymentMethod === 'cash') return 'Cash'
   return 'Not recorded'
+}
+
+function historyGcashReference(order: RestaurantOrder) {
+  if (order.paymentMethod !== 'gcash' && order.paymentMethod !== 'split') return null
+  const reference = order.paymentReference.trim()
+  const splitReference = reference.match(/(?:^|;)REF=([^;]+)/i)?.[1]?.trim()
+  return splitReference || (order.paymentMethod === 'gcash' ? reference : '') || null
 }
 
 function mapAdminOrderToRestaurantOrder(order: OrderRecord): RestaurantOrder {
