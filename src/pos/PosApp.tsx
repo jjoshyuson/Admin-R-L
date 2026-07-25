@@ -2429,6 +2429,9 @@ function FinishOrderDetailPanel({
   useEffect(() => {
     if (!autoOpenPayment || !order) return
     setPaymentMode('full')
+    setMethod('cash')
+    setCashReceived(String(roundCurrency(orderBalance(order))))
+    setKeypadTarget('amount')
     setPaymentPopupOpen(true)
   }, [autoOpenPayment, order?.id])
 
@@ -2592,7 +2595,14 @@ function FinishOrderDetailPanel({
                 key={tile.id}
                 type="button"
                 className={active ? 'is-active' : ''}
-                onClick={() => setPaymentMode(tile.id)}
+                onClick={() => {
+                  setPaymentMode(tile.id)
+                  if (tile.id === 'full') {
+                    setMethod('cash')
+                    setCashReceived(String(roundCurrency(balance)))
+                    setKeypadTarget('amount')
+                  }
+                }}
               >
                 <i>{tile.icon}</i>
                 <span>{tile.label}</span>
@@ -2697,7 +2707,14 @@ function FinishOrderDetailPanel({
           className="confirm-payment-mode-button"
           disabled={amountDue <= 0 || amountDue > balance || (paymentMode === 'other' && !employeeId) || employeePaymentBusy}
           onClick={async () => {
-            if (paymentMode !== 'other') { setPaymentPopupOpen(true); return }
+            if (paymentMode !== 'other') {
+              if (paymentMode === 'full' && method === 'cash') {
+                setCashReceived(String(roundCurrency(balance)))
+                setKeypadTarget('amount')
+              }
+              setPaymentPopupOpen(true)
+              return
+            }
             const employee = employees.find((item) => item.id === employeeId)
             if (!employee) return
             setEmployeePaymentBusy(true)
@@ -2753,7 +2770,11 @@ function FinishOrderDetailPanel({
                 </div>
                 <div className="finish-checkout-actions">
                   <div className="finish-method-grid" aria-label="Payment method">
-                    <button type="button" className={method === 'cash' ? 'is-active' : ''} onClick={() => { setMethod('cash'); setKeypadTarget('amount') }}><Banknote size={18} />Cash</button>
+                    <button type="button" className={method === 'cash' ? 'is-active' : ''} onClick={() => {
+                      setMethod('cash')
+                      setKeypadTarget('amount')
+                      if (paymentMode === 'full') setCashReceived(String(roundCurrency(balance)))
+                    }}><Banknote size={18} />Cash</button>
                     <button type="button" className={method === 'gcash' ? 'is-active' : ''} onClick={() => { setMethod('gcash'); setKeypadTarget('reference') }}><span className="gcash-mark">G</span>GCash</button>
                   </div>
                   <button type="button" className="modal-close finish-checkout-close" onClick={() => {
