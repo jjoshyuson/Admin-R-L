@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import {
   ChartNoAxesColumnIncreasing,
   Banknote,
+  Bell,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -29,7 +30,7 @@ import {
   WalletCards,
   X,
 } from 'lucide-react'
-import { fetchAdminSetting, fetchCashMovements, fetchOrders, saveAdminSetting, upsertCashMovements, voidedExpenseIds, voidOrder } from '../lib/adminApi'
+import { acceptQrKOrder, fetchAdminSetting, fetchCashMovements, fetchOrders, saveAdminSetting, upsertCashMovements, voidedExpenseIds, voidOrder } from '../lib/adminApi'
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
 import { fetchPosMenu, getPreviewPosMenu, isProductVisibleOnPos, updatePosMenuProductStatus } from '../lib/pos/menuService'
 import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ProductStatus, ServiceMode } from '../lib/pos/posTypes'
@@ -166,6 +167,7 @@ type RestaurantOrder = {
   createdAt: number
   shiftId: string | null
   shiftSessionId: string | null
+  requiresAcceptance: boolean
   cancellationState?: 'pending' | 'voided'
   cancellationRequestId?: string
 }
@@ -508,7 +510,9 @@ export function PosApp() {
   const subtotal = ticketItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
   const tax = subtotal * taxRate
   const total = subtotal + tax
-  const ongoingOrders = orders.filter((order) => !order.readyForPayment && !(order.paid && order.readyForPayment))
+  const ordersPageOrders = orders.filter((order) => !order.readyForPayment && !(order.paid && order.readyForPayment))
+  const ongoingOrders = ordersPageOrders.filter((order) => !order.requiresAcceptance)
+  const pendingQrKOrders = ordersPageOrders.filter((order) => order.requiresAcceptance)
   const finishOrders = orders.filter((order) => (order.readyForPayment || order.id === prepaidCheckoutOrderId) && !order.paid)
   const shiftHistory = activeShiftSession
     ? history.filter((order) => order.shiftId === activeShiftSession.shiftId)
@@ -538,8 +542,8 @@ export function PosApp() {
     finally { setShiftBusy(false) }
   }
   const selectedOrder = selectedOrderId
-    ? ongoingOrders.find((order) => order.id === selectedOrderId) ?? ongoingOrders[0] ?? null
-    : ongoingOrders[0] ?? null
+    ? ordersPageOrders.find((order) => order.id === selectedOrderId) ?? ordersPageOrders[0] ?? null
+    : ordersPageOrders[0] ?? null
   const selectedFinishOrder = selectedOrderId
     ? finishOrders.find((order) => order.id === selectedOrderId) ?? finishOrders[0] ?? null
     : finishOrders[0] ?? null
@@ -797,6 +801,7 @@ export function PosApp() {
       createdAt,
       shiftId: activeShiftSession?.shiftId ?? null,
       shiftSessionId: activeShiftSession?.id ?? null,
+      requiresAcceptance: false,
     }
     setOrders((current) => [order, ...current])
     setNextOrderNumber(peekHourlyOrderNumber())
@@ -1038,6 +1043,10 @@ export function PosApp() {
   function updateOrderItem(orderId: string, itemId: string, served: boolean) {
     const order = orders.find((item) => item.id === orderId)
     if (!order) return
+    if (order.requiresAcceptance) {
+      setStatusMessage('Accept this QRK order before updating kitchen items.')
+      return
+    }
     const items = order.items.map((item) => item.id === itemId ? { ...item, served } : item)
     const isServed = items.every((item) => item.served)
     const isPaid = isServed && order.paymentReceived >= orderTotal({ ...order, items })
@@ -1056,6 +1065,10 @@ export function PosApp() {
   function markAllServed(orderId: string) {
     const order = orders.find((item) => item.id === orderId)
     if (!order) return
+    if (order.requiresAcceptance) {
+      setStatusMessage('Accept this QRK order before marking it ready.')
+      return
+    }
     const isPaid = order.paymentReceived >= orderTotal(order)
     const updatedOrder: RestaurantOrder = {
       ...order,
@@ -1075,6 +1088,32 @@ export function PosApp() {
     setSelectedOrderId(orderId)
     setPrepaidCheckoutOrderId(orderId)
     setActiveTab('kitchen')
+  }
+
+  async function acceptIncomingQrKOrder(orderId: string) {
+    const order = orders.find((item) => item.id === orderId)
+    if (!order?.requiresAcceptance) return
+    try {
+      await acceptQrKOrder(order.deviceOrderId, order.items.map((item) => ({
+        productId: item.productId,
+        categoryName: item.categoryName,
+        name: item.name,
+        serviceMode: item.orderType,
+        isHalfOrder: item.isHalfOrder,
+        quantity: item.quantity,
+        price: item.price,
+        lineTotal: roundCurrency(item.price * item.quantity),
+        kitchenStatus: 'PREPARING',
+        isChecked: false,
+        paidQuantity: item.paidQuantity,
+        kitchenPrintedQuantity: item.kitchenPrintedQuantity,
+      })))
+      setOrders((current) => current.map((item) => item.id === orderId ? { ...item, requiresAcceptance: false } : item))
+      setSelectedOrderId(orderId)
+      setStatusMessage(`${formatPosOrderRef(orderId)} accepted and sent to preparation.`)
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'Could not accept the QRK order.')
+    }
   }
 
   function applyOrderPayment(orderId: string, payment: OrderPaymentInput) {
@@ -1204,7 +1243,7 @@ export function PosApp() {
         </div>
         <nav className="pos-section-nav" aria-label="POS sections">
           <PrimaryNavButton icon={<ShoppingCart size={22} strokeWidth={1.9} />} label="POS" subtitle="Create New Order" active={activeTab === 'new-order'} onClick={() => { setAppendOrderId(null); setEditOrderId(null); setTicketItems([]); setActiveTab('new-order') }} />
-          <PrimaryNavButton icon={<Clock3 size={22} strokeWidth={1.9} />} label="Orders" subtitle="In Kitchen" count={ongoingOrders.length} active={activeTab === 'ongoing'} onClick={() => setActiveTab('ongoing')} />
+          <PrimaryNavButton icon={<Clock3 size={22} strokeWidth={1.9} />} label="Orders" subtitle="In Kitchen" count={ordersPageOrders.length} active={activeTab === 'ongoing'} onClick={() => setActiveTab('ongoing')} />
           <PrimaryNavButton icon={<WalletCards size={22} strokeWidth={1.9} />} label="Pending Payment" subtitle="Awaiting Payment" count={finishOrders.length} active={activeTab === 'kitchen'} onClick={() => setActiveTab('kitchen')} />
           <PrimaryNavButton icon={<ChartNoAxesColumnIncreasing size={22} strokeWidth={1.9} />} label="Reports" subtitle="Sales & Analytics" active={activeTab === 'sale-tracker'} onClick={() => setActiveTab('sale-tracker')} />
         </nav>
@@ -1251,7 +1290,7 @@ export function PosApp() {
               </div>
             </div>
           ) : null}
-          <span>{ongoingOrders.length} ongoing</span>
+          <span>{ongoingOrders.length} ongoing{pendingQrKOrders.length > 0 ? ` • ${pendingQrKOrders.length} new` : ''}</span>
           <span>{completedThisShift} closed this shift</span>
           <span>{activeShiftSession ? `${activeShiftSession.shiftType === 'FIRST' ? 'First' : 'Second'} Shift • Cash ₱0 opening` : 'No open shift'}</span>
         </div>
@@ -1386,7 +1425,7 @@ export function PosApp() {
       {activeTab === 'ongoing' ? (
         <section className="pos-workspace">
           <OngoingOrdersBoard
-            orders={ongoingOrders}
+            orders={ordersPageOrders}
             selectedOrder={selectedOrder}
             kitchenCategorySettings={menuCategoriesEnabled}
             categoryByProductId={categoryByProductId}
@@ -1401,6 +1440,7 @@ export function PosApp() {
             onCancelOrder={requestCancelOrder}
             onReprintOrder={reprintKitchenTicket}
             onEditNotes={editOrderNotes}
+            onAcceptQrKOrder={acceptIncomingQrKOrder}
             unsyncedOrderIds={new Set(offlineBacklog.map((entry) => entry.order.id))}
           />
         </section>
@@ -2020,6 +2060,7 @@ type OngoingOrdersPageProps = {
   onReprintOrder?: (orderId: string) => void
   onApplyPayment?: (orderId: string, payment: OrderPaymentInput) => void
   onEditNotes?: (orderId: string) => void
+  onAcceptQrKOrder?: (orderId: string) => void
   unsyncedOrderIds?: Set<string>
 }
 
@@ -2048,22 +2089,41 @@ function OngoingOrdersBoard({
   onCancelOrder,
   onReprintOrder,
   onEditNotes,
+  onAcceptQrKOrder,
   unsyncedOrderIds = new Set(),
 }: OngoingOrdersPageProps) {
   const [sort, setSort] = useState<OrderSort>('oldest')
   const [viewMode, setViewMode] = useState<'tiles' | 'list'>('tiles')
+  const [showIncoming, setShowIncoming] = useState(false)
+  const incomingCount = orders.filter((order) => order.requiresAcceptance).length
   const filteredOrders = useMemo(() => {
-    return [...orders].sort((left, right) => sort === 'oldest' ? left.createdAt - right.createdAt : right.createdAt - left.createdAt)
-  }, [orders, sort])
+    const base = orders.filter((order) => showIncoming ? order.requiresAcceptance : !order.requiresAcceptance)
+    return [...base].sort((left, right) => sort === 'oldest' ? left.createdAt - right.createdAt : right.createdAt - left.createdAt)
+  }, [orders, showIncoming, sort])
+  const visibleSelectedOrder = filteredOrders.find((order) => order.id === selectedOrder?.id) ?? filteredOrders[0] ?? null
+
+  useEffect(() => {
+    if (showIncoming && incomingCount === 0) setShowIncoming(false)
+  }, [incomingCount, showIncoming])
 
   return (
     <section className="ongoing-dashboard">
       <section className="ongoing-main">
         <div className="ongoing-toolbar">
           <div className="filter-block">
-            <p className="eyebrow">Ongoing Orders</p>
+            <p className="eyebrow">{showIncoming ? 'New QRK Orders' : 'Ongoing Orders'}</p>
           </div>
           <div className="sort-control">
+            <button
+              type="button"
+              className={`incoming-order-bell ${showIncoming ? 'is-active' : ''}`}
+              aria-label={`${incomingCount} new QRK order${incomingCount === 1 ? '' : 's'}`}
+              aria-pressed={showIncoming}
+              onClick={() => setShowIncoming((visible) => !visible)}
+            >
+              <Bell size={18} aria-hidden="true" />
+              {incomingCount > 0 ? <span>{incomingCount}</span> : null}
+            </button>
             <span>Sort by:</span>
             <button type="button" className="sort-select" onClick={() => setSort(sort === 'oldest' ? 'newest' : 'oldest')}>
               {sort === 'oldest' ? 'Oldest First' : 'Newest First'} v
@@ -2081,17 +2141,18 @@ function OngoingOrdersBoard({
               order={order}
               kitchenCategorySettings={kitchenCategorySettings}
               categoryByProductId={categoryByProductId}
-              selected={selectedOrder?.id === order.id}
+              selected={visibleSelectedOrder?.id === order.id}
               unsynced={unsyncedOrderIds.has(order.id)}
+              incoming={order.requiresAcceptance}
               onSelect={() => onSelectOrder(order.id)}
             />
           ))}
         </div>
-        <p className="showing-count">Showing {filteredOrders.length} of {orders.length} ongoing orders</p>
+        <p className="showing-count">Showing {filteredOrders.length} {showIncoming ? 'new QRK' : 'ongoing'} orders</p>
       </section>
 
       <OngoingTrackingDetailPanel
-        order={selectedOrder}
+        order={visibleSelectedOrder}
         onToggleItem={onToggleItem}
         onMarkAllServed={onMarkAllServed}
         onViewDetails={onViewDetails}
@@ -2101,6 +2162,7 @@ function OngoingOrdersBoard({
         onCancelOrder={onCancelOrder}
         onReprintOrder={onReprintOrder}
         onEditNotes={onEditNotes}
+        onAcceptQrKOrder={onAcceptQrKOrder}
       />
     </section>
   )
@@ -2112,6 +2174,7 @@ function OngoingTrackingCard({
   categoryByProductId,
   selected,
   unsynced,
+  incoming,
   onSelect,
 }: {
   order: RestaurantOrder
@@ -2119,14 +2182,15 @@ function OngoingTrackingCard({
   categoryByProductId: Map<string, string>
   selected: boolean
   unsynced: boolean
+  incoming: boolean
   onSelect: () => void
 }) {
   const ready = allItemsServed(order)
   const kitchenItems = kitchenPrintableItems(order.items, kitchenCategorySettings, categoryByProductId)
   const hasUnprintedKitchenItems = kitchenItems.some((item) => item.kitchenPrintedQuantity < item.quantity)
   return (
-    <article className={`mini-order-card ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''} ${unsynced ? 'is-unsynced' : ''}`} onClick={onSelect}>
-      <span className="order-card-icon"><Utensils size={24} aria-hidden="true" /></span>
+    <article className={`mini-order-card ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''} ${unsynced ? 'is-unsynced' : ''} ${incoming ? 'is-incoming' : ''}`} onClick={onSelect}>
+      <span className="order-card-icon">{incoming ? <Bell size={24} aria-hidden="true" /> : <Utensils size={24} aria-hidden="true" />}</span>
       <div className="order-card-copy">
         <header>
           <div>
@@ -2137,7 +2201,7 @@ function OngoingTrackingCard({
         </header>
         <div className="mini-subhead">
           <span>{formatOrderType(order.orderType)}</span>
-          <span className={`status-pill status-${order.status}`}>{statusLabel(order.status)}</span>
+          <span className={`status-pill ${incoming ? 'status-incoming' : `status-${order.status}`}`}>{incoming ? 'NEW FROM QRK' : statusLabel(order.status)}</span>
           {paymentStatus(order) === 'paid' && !order.paid ? <span className="status-pill payment-paid">PREPAID</span> : null}
           {hasUnprintedKitchenItems ? <span className="print-status-pill is-not-printed">NOT PRINTED</span> : null}
           {unsynced ? <span className="offline-sync-pill">NOT SYNCED</span> : null}
@@ -2163,6 +2227,7 @@ function OngoingTrackingDetailPanel({
   onCancelOrder,
   onReprintOrder,
   onEditNotes,
+  onAcceptQrKOrder,
 }: {
   order: RestaurantOrder | null
   onToggleItem: (orderId: string, itemId: string, served: boolean) => void
@@ -2174,6 +2239,7 @@ function OngoingTrackingDetailPanel({
   onCancelOrder?: (orderId: string) => void
   onReprintOrder?: (orderId: string) => void
   onEditNotes?: (orderId: string) => void
+  onAcceptQrKOrder?: (orderId: string) => void
 }) {
   const [confirmingReprint, setConfirmingReprint] = useState(false)
 
@@ -2196,7 +2262,7 @@ function OngoingTrackingDetailPanel({
           <p className="detail-title">Order {formatPosOrderRef(order.id)}</p>
           <span className="detail-order-subtitle">New Order</span>
           <span>Table {tableNumber(order.id)} - {formatOrderType(order.orderType)}</span>
-          <span className={`status-pill status-${order.status}`}>{statusLabel(order.status)}</span>
+          <span className={`status-pill ${order.requiresAcceptance ? 'status-incoming' : `status-${order.status}`}`}>{order.requiresAcceptance ? 'AWAITING ACCEPTANCE' : statusLabel(order.status)}</span>
           {paymentStatus(order) === 'paid' && !order.paid ? <span className="status-pill payment-paid">PREPAID</span> : null}
         </div>
         <div className="detail-time">
@@ -2230,19 +2296,27 @@ function OngoingTrackingDetailPanel({
         </button>
       </section>
       <section className="detail-actions">
-        <button type="button" className="send-kitchen" onClick={() => onMarkAllServed(order.id)}>
-          <CircleCheckBig size={16} /> {allReady ? 'Mark as Served' : 'Mark All Ready'}
-        </button>
-        <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
-        <button type="button" onClick={() => onQuickAddRice?.(order.id)}><Plus size={16} /> Extra Rice</button>
-        {paymentStatus(order) === 'paid' ? (
-          <button type="button" disabled><CircleCheckBig size={16} /> Prepay</button>
+        {order.requiresAcceptance ? (
+          <button type="button" className="accept-qrk-order" onClick={() => onAcceptQrKOrder?.(order.id)}>
+            <Bell size={16} /> Accept &amp; Prepare
+          </button>
         ) : (
-          <button type="button" onClick={() => onCustomerPrepaid?.(order.id)}><WalletCards size={16} /> Prepay</button>
+          <>
+            <button type="button" className="send-kitchen" onClick={() => onMarkAllServed(order.id)}>
+              <CircleCheckBig size={16} /> {allReady ? 'Mark as Served' : 'Mark All Ready'}
+            </button>
+            <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
+            <button type="button" onClick={() => onQuickAddRice?.(order.id)}><Plus size={16} /> Extra Rice</button>
+            {paymentStatus(order) === 'paid' ? (
+              <button type="button" disabled><CircleCheckBig size={16} /> Prepay</button>
+            ) : (
+              <button type="button" onClick={() => onCustomerPrepaid?.(order.id)}><WalletCards size={16} /> Prepay</button>
+            )}
+            <button type="button" className="edit-order-action" onClick={() => onViewDetails(order.id)}><Pencil size={16} /> Edit Order</button>
+            <button type="button" onClick={() => setConfirmingReprint(true)}><RefreshCw size={16} /> Reprint</button>
+            <button type="button" className="cancel-order-action" onClick={() => onCancelOrder?.(order.id)}><X size={16} /> Cancel Order</button>
+          </>
         )}
-        <button type="button" className="edit-order-action" onClick={() => onViewDetails(order.id)}><Pencil size={16} /> Edit Order</button>
-        <button type="button" onClick={() => setConfirmingReprint(true)}><RefreshCw size={16} /> Reprint</button>
-        <button type="button" className="cancel-order-action" onClick={() => onCancelOrder?.(order.id)}><X size={16} /> Cancel Order</button>
       </section>
       {confirmingReprint ? (
         <div className="modal-backdrop" role="presentation">
@@ -4492,7 +4566,7 @@ function historyGcashReference(order: RestaurantOrder) {
   return splitReference || (order.paymentMethod === 'gcash' ? reference : '') || null
 }
 
-function mapAdminOrderToRestaurantOrder(order: OrderRecord): RestaurantOrder {
+export function mapAdminOrderToRestaurantOrder(order: OrderRecord): RestaurantOrder {
   const workflowStatus = normalizeStatusToken(order.workflowStatus)
   const paymentStatus = normalizeStatusToken(order.paymentStatus)
   const paid = paymentStatus === 'PAID' || workflowStatus === 'PAID'
@@ -4532,6 +4606,7 @@ function mapAdminOrderToRestaurantOrder(order: OrderRecord): RestaurantOrder {
     createdAt: Date.parse(order.createdAt) || Date.now(),
     shiftId: order.shiftId ?? null,
     shiftSessionId: order.shiftSessionId ?? null,
+    requiresAcceptance: workflowStatus === 'PENDING_ACCEPTANCE' && normalizeStatusToken(order.deviceId) === 'QRK_MENU',
   }
 }
 

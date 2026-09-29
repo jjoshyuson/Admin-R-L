@@ -34,6 +34,11 @@ alter table public.qrk_integrations enable row level security;
 alter table public.qrk_order_receipts enable row level security;
 revoke all on public.qrk_integrations, public.qrk_order_receipts from public, anon, authenticated;
 
+alter table public.orders
+  drop constraint if exists orders_workflow_status_check,
+  add constraint orders_workflow_status_check
+    check (workflow_status in ('PENDING_ACCEPTANCE', 'PREPARING', 'SERVED', 'PAID'));
+
 create or replace function public.qrk_require_integration(p_api_key text)
 returns text
 language plpgsql
@@ -211,7 +216,7 @@ begin
       'quantity', quantity,
       'price', unit_price,
       'lineTotal', line_total,
-      'kitchenStatus', 'PREPARING',
+      'kitchenStatus', 'PENDING',
       'isChecked', false,
       'paidQuantity', 0,
       'kitchenPrintedQuantity', 0
@@ -262,7 +267,7 @@ begin
     device_order_id, 'QRK MENU', service_mode, payment_method, nullif(p_order #>> '{payment,reference}', ''),
     subtotal, tax, total, items, now(), coalesce(nullif(p_order ->> 'createdAt', '')::timestamptz, now()),
     cash_amount, gcash_amount, right(regexp_replace(coalesce(p_order #>> '{payment,reference}', ''), '[^0-9]', '', 'g'), 4),
-    nullif(order_note, ''), payment_status, case when payment_status = 'PAID' then 'PAID' else 'PREPARING' end,
+    nullif(order_note, ''), payment_status, case when payment_status = 'PAID' then 'PAID' else 'PENDING_ACCEPTANCE' end,
     (select coalesce(jsonb_agg(false), '[]'::jsonb) from generate_series(1, jsonb_array_length(items))),
     case when payment_status = 'PAID' then now() else null end
   ) returning * into created;

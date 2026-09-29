@@ -59,13 +59,13 @@ Successful response:
   "idempotentReplay": false,
   "rnlOrderId": "uuid",
   "rnlDeviceOrderId": "QRK-...",
-  "workflowStatus": "PREPARING",
+  "workflowStatus": "PENDING_ACCEPTANCE",
   "paymentStatus": "UNPAID",
   "createdAt": "timestamp"
 }
 ```
 
-R&L workflow statuses are `PREPARING`, `SERVED`, and `PAID`. Payment statuses are `UNPAID`, `PARTIAL`, and `PAID`.
+New unpaid QRK orders enter `PENDING_ACCEPTANCE`. They appear behind the notification bell on the R&L Orders page and do not enter kitchen preparation until a cashier selects **Accept & Prepare**. The remaining R&L workflow statuses are `PREPARING`, `SERVED`, and `PAID`. Payment statuses are `UNPAID`, `PARTIAL`, and `PAID`.
 
 ## Status reconciliation
 

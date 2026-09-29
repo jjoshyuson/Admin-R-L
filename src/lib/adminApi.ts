@@ -284,6 +284,26 @@ export async function fetchOrders(): Promise<OrderRecord[]> {
   })
 }
 
+export async function acceptQrKOrder(deviceOrderId: string, items: Array<Record<string, unknown>>) {
+  if (!hasSupabaseConfig) throw new Error('Supabase is required to accept QRK orders.')
+  const supabase = requireSupabase()
+  const { data, error } = await supabase
+    .from('orders')
+    .update({
+      workflow_status: 'PREPARING',
+      items_json: items,
+      uploaded_at: new Date().toISOString(),
+    })
+    .eq('device_order_id', deviceOrderId)
+    .eq('device_id', 'QRK MENU')
+    .eq('workflow_status', 'PENDING_ACCEPTANCE')
+    .select('device_order_id')
+    .maybeSingle()
+
+  if (error) throw error
+  if (!data) throw new Error('This QRK order was already accepted or is no longer pending.')
+}
+
 function normalizeHalfOrderPrice(value: unknown) {
   if (value == null || value === '') return null
   const amount = Number(value)

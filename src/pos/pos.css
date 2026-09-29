@@ -2133,6 +2133,61 @@ h1 {
   top: -4px;
 }
 
+.incoming-order-bell {
+  align-items: center;
+  background: #fffdf8;
+  border: 1px solid #e3d5c0;
+  border-radius: 10px;
+  color: #654b2a;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 40px;
+  min-width: 42px;
+  padding: 0 12px;
+  position: relative;
+}
+
+.incoming-order-bell.is-active {
+  background: #fff1d8;
+  border-color: #d99a28;
+  color: #7a4100;
+}
+
+.incoming-order-bell span {
+  align-items: center;
+  background: #d92d20;
+  border: 2px solid #fffaf3;
+  border-radius: 999px;
+  color: #fff;
+  display: flex;
+  font-size: 10px;
+  font-weight: 800;
+  height: 20px;
+  justify-content: center;
+  min-width: 20px;
+  padding: 0 5px;
+  position: absolute;
+  right: -7px;
+  top: -7px;
+}
+
+.mini-order-card.is-incoming {
+  background: #fffaf0;
+  border-color: #eab75c;
+}
+
+.mini-order-card.is-incoming .order-card-icon {
+  background: #fff0cc;
+  border-color: #efc46f;
+  color: #8a4b00;
+}
+
+.status-pill.status-incoming {
+  background: #fff0cc;
+  border: 1px solid #efc46f;
+  color: #7a4100;
+}
+
 .ongoing-body {
   display: grid;
   gap: 14px;
@@ -7702,6 +7757,12 @@ h1 {
 
 .pos-shell.is-ongoing .detail-actions .send-kitchen {
   background: #063f25;
+  color: #ffffff;
+}
+
+.pos-shell.is-ongoing .detail-actions .accept-qrk-order {
+  background: #9a5b08;
+  border-color: #9a5b08;
   color: #ffffff;
 }
 
