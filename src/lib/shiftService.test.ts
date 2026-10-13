@@ -15,6 +15,11 @@ describe('shift schedule', () => {
 })
 
 describe('shift totals', () => {
+  it('aggregates fractional peso collections in integer cents', () => {
+    const report: ShiftReport = { sessions: [], orders: [], expenses: [], adjustments: [], audit: null,
+      payments: [0.1, 0.2].map((amount, index) => ({ id: String(index), orderId: 'o', originShiftId: 's', collectionShiftId: 's', shiftSessionId: 'x', method: 'CASH', amount, collectedBy: 'Synthetic', collectedAt: '' })) }
+    expect(calculateShiftTotals(report)).toMatchObject({ grossCash: 0.3, netCash: 0.3, totalSales: 0.3 })
+  })
   it('deducts a cash expense without changing gross sales', () => {
     const report: ShiftReport = {
       sessions: [], adjustments: [], audit: null,
@@ -39,6 +44,9 @@ describe('shift totals', () => {
 })
 
 describe('shift audit', () => {
+  it('returns cent-precise fractional variances', () => {
+    expect(calculateAuditVariance(0.2, 0.3, 0.3, 0.2)).toEqual({ cashVariance: 0.1, gcashVariance: -0.1 })
+  })
   it('records cash and GCash over/short independently', () => {
     expect(calculateAuditVariance(370, 365, 125, 130)).toEqual({ cashVariance: -5, gcashVariance: 5 })
   })

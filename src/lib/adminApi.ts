@@ -1127,22 +1127,10 @@ export async function clearMenuCatalogData() {
 }
 
 export async function resetOperationalData(input: ResetOperationalDataInput = {}) {
+  if (input.clearMenuCatalog) throw new Error('Menu data is protected. Operational resets preserve products, categories, options, and stock.')
   return maybeConfigured(undefined, async () => {
-    await deleteAll('cash_movements')
-    await deleteAll('payables')
-    await deleteAll('inventory_counts')
-    await deleteAll('inventory_items')
-    await deleteAll('daily_accounting')
-    await deleteAll('ingredient_price_logs')
-    await deleteAll('recipe_ingredients')
-    await deleteAll('recipes')
-    await deleteAll('order_voids')
-    await deleteAll('orders')
-    await publishOperationalResetMarker()
-    if (input.clearMenuCatalog) {
-      await deleteAll('products')
-      await deleteAll('categories')
-    }
+    const { error } = await requireSupabase().rpc('reset_rnl_operational_data')
+    if (error) throw error
   })
 }
 

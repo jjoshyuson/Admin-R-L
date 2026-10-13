@@ -1,3 +1,4 @@
+import { createLiveRefresh } from '../lib/liveRefresh'
 import {
   createContext,
   startTransition,
@@ -205,7 +206,13 @@ export function AdminDataProvider({ children }: PropsWithChildren) {
     }
   }, [])
 
+  const refreshRef = useRef<ReturnType<typeof createLiveRefresh> | null>(null)
   async function refresh() {
+    if (!refreshRef.current) refreshRef.current = createLiveRefresh(loadDataset)
+    await refreshRef.current.request()
+  }
+
+  async function loadDataset() {
     setState((current) => ({ ...current, loading: true, error: null }))
     try {
       const dataset = await loadAdminDataset()
@@ -249,12 +256,17 @@ export function AdminDataProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!hasSupabaseConfig) return
     const supabase = requireSupabase()
-    const channel = supabase
-      .channel('admin-shared-menu')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => void refresh())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, () => void refresh())
-      .subscribe()
+    const reconcile = () => { void refresh() }
+    let channel = supabase.channel('admin-live-data')
+    for (const table of ['products', 'categories', 'orders', 'order_voids', 'daily_accounting', 'ingredient_price_logs', 'ingredients', 'ingredient_categories', 'recipes', 'recipe_ingredients', 'cash_movements', 'payables', 'admin_settings']) {
+      channel = channel.on('postgres_changes', { event: '*', schema: 'public', table }, reconcile)
+    }
+    channel.subscribe(status => { if (status === 'SUBSCRIBED') reconcile() })
+    window.addEventListener('online', reconcile)
     return () => {
+      refreshRef.current?.dispose()
+      refreshRef.current = null
+      window.removeEventListener('online', reconcile)
       void supabase.removeChannel(channel)
     }
   }, [])

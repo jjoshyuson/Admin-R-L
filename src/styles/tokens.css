@@ -1,0 +1,37 @@
+@font-face { font-family: Geist; src: url('/fonts/Geist.ttf') format('truetype'); font-weight: 100 900; font-display: swap; }
+:root {
+ --weight-regular: 400; --weight-medium: 500; --weight-semibold: 600; --weight-bold: 650;
+ --font-ui: Geist, ui-sans-serif, system-ui, sans-serif;
+ --chart-base: #73817a; --canvas: #f5f7f6; --surface: #fff; --surface-raised: #fff; --surface-soft: #f1f5f3; --surface-inset: #e8eeeb;
+ --text: #192d25; --text-secondary: #485e53; --text-muted: #607268; --text-inverse: #fff; --sidebar-text: #e6ece8;
+ --border: #d9e3dc; --border-strong: #b9cbc0;
+ --action: #176748; --action-hover: #124d37; --action-soft: #e8f3ed; --on-action: #fff;
+ --success: #1b7048; --success-soft: #e8f4eb; --warning: #905712; --warning-soft: #fff3de;
+ --danger: #b43736; --danger-soft: #fff0ee; --info: #176748; --info-soft: #e8f3ed;
+ --inverse-surface: #193e2c; --scrim: rgb(9 20 15 / 55%);
+ --shadow-card: none; --shadow-float: 0 16px 48px rgb(10 30 20 / 16%);
+ --text-xs: .75rem; --text-caption: .8125rem; --text-sm: .875rem; --text-body: 1rem; --text-title: 1.125rem; --text-section: 1.25rem; --text-heading: 1.5rem; --text-page: 1.75rem; --text-large: 2rem; --text-value: 2.25rem;
+ --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px; --space-12: 48px;
+ --radius-xs: 4px; --radius-sm: 8px; --radius-control: 10px; --radius-card: 12px; --radius-dialog: 16px; --radius-large: 20px; --radius-pill: 999px;
+ --navigation-clearance: 112px; --control-height: 44px; --icon-size: 24px;
+ /* Compatibility names resolve to the same foundation during source migration. */
+ --app-bg: var(--canvas); --bg: var(--canvas); --card: var(--surface); --surface-tint: var(--action-soft);
+ --ink: var(--text); --ink-soft: var(--text-secondary); --ink-muted: var(--text-muted);
+ --brand: var(--action); --brand-strong: var(--action-hover); --brand-blue: var(--action);
+ --primary: var(--action); --primary-light: var(--action-soft); --text-primary: var(--text);
+ --accent-blue: var(--info); --accent-orange: var(--warning);
+ --rnl-brand: var(--action); --rnl-brand-strong: var(--action-hover); --rnl-brand-soft: var(--action-soft); --rnl-ink: var(--text); --rnl-muted: var(--text-muted); --rnl-border: var(--border); --rnl-surface: var(--surface); --rnl-background: var(--canvas); --rnl-danger: var(--danger); --rnl-radius: var(--radius-card);
+ font-family: var(--font-ui); color: var(--text); background: var(--canvas); color-scheme: light;
+}
+:root[data-theme=dark] {
+ --chart-base: #e6ece8; --canvas: #050606; --surface: #0d0f0e; --surface-raised: #121513; --surface-soft: #171c19; --surface-inset: #202722;
+ --text-inverse: #e6ece8; --text: #e6ece8; --text-secondary: #b7c4bc; --text-muted: #9eafa4; --text-secondary-color: #b7c4bc;
+ --border: #2c3730; --border-strong: #516357;
+ --action: #c5f853; --action-hover: #d3fc85; --action-soft: #23301a; --on-action: #192508;
+ --success: #79d9a0; --success-soft: #12291d; --warning: #f6c775; --warning-soft: #302619;
+ --danger: #ff9690; --danger-soft: #321c1a; --info: #79d9a0; --info-soft: #12291d;
+ --inverse-surface: #101b14; --shadow-float: 0 16px 48px rgb(0 0 0 / 55%); color-scheme: dark;
+}
+@media print {
+ :root[data-theme] { --canvas:#fff;--surface:#fff;--surface-soft:#fff;--surface-inset:#fff;--text:#111;--text-secondary:#333;--text-secondary-color:#333;--text-muted:#444;--border:#bbb;--action:#111;--on-action:#fff;--action-soft:#eee; color-scheme:light; }
+}

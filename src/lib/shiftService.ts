@@ -3,8 +3,8 @@ import type { CashMovement, OrderRecord, ShiftAdjustment, ShiftAudit, ShiftPayme
 import { voidedExpenseIds } from './adminApi'
 
 export const defaultShiftSchedule: ShiftSchedule = {
-  firstShiftStart: '06:00',
-  secondShiftStart: '14:00',
+  firstShiftStart: '08:00',
+  secondShiftStart: '20:00',
   timezone: 'Asia/Manila',
 }
 
@@ -63,10 +63,9 @@ export async function saveShiftSchedule(schedule: ShiftSchedule) {
 
 export async function openShiftSession(input: { employeeId: string; employeeName: string; deviceId: string; schedule: ShiftSchedule }) {
   if (!hasSupabaseConfig) throw new Error('Clock-in requires an online Supabase connection.')
-  await closeOpenShiftSession(input.deviceId)
-  const window = resolveShiftWindow(new Date(), input.schedule)
-  const payload = { shift_id: window.shiftId, business_date: window.businessDate, shift_type: window.shiftType, employee_id: input.employeeId, employee_name: input.employeeName, device_id: input.deviceId, clocked_in_at: new Date().toISOString(), status: 'OPEN', schedule_snapshot: input.schedule }
-  const { data, error } = await requireSupabase().from('shift_sessions').insert(payload).select('*').single()
+  const { data, error } = await requireSupabase().rpc('clock_in_rnl_session', {
+    p_employee_id: input.employeeId, p_employee_name: input.employeeName, p_device_id: input.deviceId, p_schedule: input.schedule,
+  })
   if (error) throw error
   return mapSession(data as Record<string, unknown>)
 }
@@ -93,17 +92,19 @@ export async function fetchShiftReport(businessDate: string, shiftType: ShiftTyp
   if (!hasSupabaseConfig) return { sessions: [], orders: [], payments: [], expenses: [], adjustments: [], audit: null }
   const shiftId = `${businessDate}-${shiftType.toLowerCase()}`
   const supabase = requireSupabase()
-  const [sessionsResult, ordersResult, paymentsResult, expensesResult, adjustmentsResult, auditResult] = await Promise.all([
+  const [sessionsResult, ordersResult, paymentsResult, expensesResult, adjustmentsResult, auditResult, voidsResult] = await Promise.all([
     supabase.from('shift_sessions').select('*').eq('shift_id', shiftId).order('clocked_in_at'),
     supabase.from('orders').select('device_order_id,device_id,payment_method,payment_reference,cash_amount,gcash_amount,payment_status,workflow_status,subtotal,tax,total,created_at,items_json,shift_id,shift_session_id').eq('shift_id', shiftId).order('created_at'),
     supabase.from('shift_payment_events').select('*').or(`origin_shift_id.eq.${shiftId},collection_shift_id.eq.${shiftId}`).order('collected_at'),
     supabase.from('cash_movements').select('*').eq('shift_id', shiftId).order('created_at'),
     supabase.from('shift_adjustments').select('*').eq('shift_id', shiftId).order('requested_at'),
     supabase.from('shift_audits').select('*').eq('shift_id', shiftId).maybeSingle(),
+    supabase.from('order_voids').select('device_order_id'),
   ])
-  const failed = [sessionsResult, ordersResult, paymentsResult, expensesResult, adjustmentsResult, auditResult].find((item) => item.error)
+  const failed = [sessionsResult, ordersResult, paymentsResult, expensesResult, adjustmentsResult, auditResult, voidsResult].find((item) => item.error)
   if (failed?.error) throw failed.error
-  const orders = (ordersResult.data ?? []).map((row) => ({
+  const voidedOrderIds = new Set((voidsResult.data ?? []).map((row) => String(row.device_order_id)))
+  const orders = (ordersResult.data ?? []).filter((row) => !voidedOrderIds.has(String(row.device_order_id))).map((row) => ({
     deviceOrderId: String(row.device_order_id), deviceId: String(row.device_id), paymentMethod: String(row.payment_method), paymentReference: row.payment_reference ? String(row.payment_reference) : null,
     cashAmount: row.cash_amount == null ? null : Number(row.cash_amount), gcashAmount: row.gcash_amount == null ? null : Number(row.gcash_amount), paymentStatus: String(row.payment_status ?? ''), workflowStatus: String(row.workflow_status ?? ''),
     subtotal: Number(row.subtotal ?? 0), tax: Number(row.tax ?? 0), total: Number(row.total ?? 0), createdAt: String(row.created_at), items: Array.isArray(row.items_json) ? row.items_json as OrderRecord['items'] : [], shiftId: String(row.shift_id), shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null,
@@ -116,7 +117,7 @@ export async function fetchShiftReport(businessDate: string, shiftType: ShiftTyp
     const { data: paymentOrders, error: paymentOrdersError } = await supabase.from('orders').select('device_order_id').in('device_order_id', [...new Set(rawPayments.map((item) => item.orderId))])
     if (paymentOrdersError) throw paymentOrdersError
     const existingOrderIds = new Set((paymentOrders ?? []).map((row) => String(row.device_order_id)))
-    payments = rawPayments.filter((item) => existingOrderIds.has(item.orderId))
+    payments = rawPayments.filter((item) => existingOrderIds.has(item.orderId) && !voidedOrderIds.has(item.orderId))
   }
   const shiftMovements: CashMovement[] = (expensesResult.data ?? []).map((row) => ({ id: String(row.id), accountId: String(row.account_id), accountType: String(row.account_type) as CashMovement['accountType'], sourceAccountId: row.source_account_id ? String(row.source_account_id) : null, destinationAccountId: row.destination_account_id ? String(row.destination_account_id) : null, movementKind: String(row.movement_kind) as CashMovement['movementKind'], reasonCategory: String(row.reason_category), amount: Number(row.amount), note: row.note ? String(row.note) : null, relatedBillId: row.related_bill_id ? String(row.related_bill_id) : null, createdBy: String(row.created_by), createdAtEpochMillis: Date.parse(String(row.created_at)), shiftId: String(row.shift_id), shiftSessionId: row.shift_session_id ? String(row.shift_session_id) : null }))
   const voidedIds = voidedExpenseIds(shiftMovements)
@@ -143,7 +144,8 @@ export async function approveShiftAudit(input: { businessDate: string; shiftType
 }
 
 export function calculateAuditVariance(expectedCash: number, countedCash: number, expectedGcash: number, verifiedGcash: number) {
-  return { cashVariance: countedCash - expectedCash, gcashVariance: verifiedGcash - expectedGcash }
+  const variance = (expected: number, counted: number) => (Math.round(counted * 100) - Math.round(expected * 100)) / 100
+  return { cashVariance: variance(expectedCash, countedCash), gcashVariance: variance(expectedGcash, verifiedGcash) }
 }
 
 function mapAdjustment(row: Record<string, unknown>): ShiftAdjustment {
@@ -187,16 +189,16 @@ export async function decideShiftAdjustment(id: string, decision: 'APPROVED' | '
 export function calculateShiftTotals(report: ShiftReport) {
   const shiftId = report.sessions[0]?.shiftId ?? report.orders[0]?.shiftId ?? report.payments[0]?.collectionShiftId ?? ''
   const collectedHere = report.payments.filter((item) => !shiftId || item.collectionShiftId === shiftId)
-  const grossCash = collectedHere.filter((item) => item.method === 'CASH').reduce((sum, item) => sum + item.amount, 0)
-  const grossGcash = collectedHere.filter((item) => item.method === 'GCASH').reduce((sum, item) => sum + item.amount, 0)
-  // Sales in a shift report are collections received during that shift. An order
-  // may have originated in an earlier shift, so summing only this shift's orders
-  // can disagree with the cash and GCash actually collected at the register.
-  const totalSales = grossCash + grossGcash
-  const cashExpenses = report.expenses.filter((item) => item.accountType !== 'BANK').reduce((sum, item) => sum + item.amount, 0)
-  const gcashExpenses = report.expenses.filter((item) => item.accountType === 'BANK').reduce((sum, item) => sum + item.amount, 0)
+  const cents = (value: number) => Math.round(value * 100)
+  const sumCents = <T,>(items: T[], amount: (item: T) => number) => items.reduce((sum, item) => sum + cents(amount(item)), 0)
+  const grossCash = sumCents(collectedHere.filter((item) => item.method === 'CASH'), (item) => item.amount)
+  const grossGcash = sumCents(collectedHere.filter((item) => item.method === 'GCASH'), (item) => item.amount)
+  const cashExpenses = sumCents(report.expenses.filter((item) => item.accountType !== 'BANK'), (item) => item.amount)
+  const gcashExpenses = sumCents(report.expenses.filter((item) => item.accountType === 'BANK'), (item) => item.amount)
   const approved = report.adjustments.filter((item) => item.status === 'APPROVED')
-  const adjustment = (account: 'CASH' | 'GCASH') => approved.filter((item) => item.account === account).reduce((sum, item) => sum + (item.direction === 'ADD' ? item.amount : -item.amount), 0)
-  const totalUnpaid = report.orders.reduce((sum, item) => sum + Math.max(item.total - report.payments.filter((payment) => payment.orderId === item.deviceOrderId).reduce((paid, payment) => paid + payment.amount, 0), 0), 0)
-  return { totalSales, grossCash, cashExpenses, netCash: grossCash - cashExpenses + adjustment('CASH'), grossGcash, gcashExpenses, netGcash: grossGcash - gcashExpenses + adjustment('GCASH'), totalUnpaid }
+  const adjustment = (account: 'CASH' | 'GCASH') => sumCents(approved.filter((item) => item.account === account), (item) => item.direction === 'ADD' ? item.amount : -item.amount)
+  const paidByOrder = new Map<string, number>()
+  for (const payment of report.payments) paidByOrder.set(payment.orderId, (paidByOrder.get(payment.orderId) ?? 0) + cents(payment.amount))
+  const totalUnpaid = report.orders.reduce((sum, item) => sum + Math.max(cents(item.total) - (paidByOrder.get(item.deviceOrderId) ?? 0), 0), 0)
+  return { totalSales: (grossCash + grossGcash) / 100, grossCash: grossCash / 100, cashExpenses: cashExpenses / 100, netCash: (grossCash - cashExpenses + adjustment('CASH')) / 100, grossGcash: grossGcash / 100, gcashExpenses: gcashExpenses / 100, netGcash: (grossGcash - gcashExpenses + adjustment('GCASH')) / 100, totalUnpaid: totalUnpaid / 100 }
 }

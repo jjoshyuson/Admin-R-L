@@ -1,5 +1,11 @@
-import { Component, useEffect, useMemo, useState } from 'react'
-import type { ErrorInfo, ReactNode } from 'react'
+import { ChevronUp, ChevronDown, SlidersHorizontal, Tablet } from 'lucide-react'
+import { ShoppingCart as UiCart, Settings as UiGear, Search as UiSearch, Plus as UiPlus, Bell as UiBell, CalendarDays as UiCalendar, Pencil as UiPencil, Trash2 as UiTrash, X as UiClose, GripVertical as UiDragHandle, ArrowLeftRight as UiModeSwitch, RefreshCw as UiSyncLogs, ReceiptText as UiOrderHistory, UtensilsCrossed as UiProductSettings, BookOpen as UiRecipeBook, Wallet as UiFinanceOverview, Banknote as UiCashDrawer, Receipt as UiBills, ChartNoAxesCombined as UiProfitInsights, RotateCcw as UiReset } from 'lucide-react'
+import { ThemePicker } from './components/ThemePicker'
+import { ChartPulse } from './components/ChartPulse'
+import { LayoutDashboard, Package, CalendarDays, Ellipsis } from 'lucide-react'
+import { createLiveRefresh } from './lib/liveRefresh'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, ErrorInfo, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AdminDataProvider } from './hooks/AdminDataContext'
 import { useDashboardData } from './hooks/useDashboardData'
@@ -13,7 +19,6 @@ import {
   clearInventoryData,
   clearDailyLogsData,
   clearExpensesLogData,
-  clearMenuCatalogData,
   clearOrdersData,
   clearRecipesData,
   deactivateMenuCategory,
@@ -37,8 +42,8 @@ import {
   rejectOrderEditRequest,
   subscribeToOrderEditRequests,
 } from './lib/orderEditRequests'
-import { hasSupabaseConfig } from './lib/supabase/client'
-import { approveShiftAudit, calculateShiftTotals, createShiftAdjustment, decideShiftAdjustment, defaultShiftSchedule, fetchPendingShiftAdjustments, fetchShiftReport, fetchShiftSchedule, saveShiftSchedule, subscribeToShiftAdjustments } from './lib/shiftService'
+import { hasSupabaseConfig, requireSupabase } from './lib/supabase/client'
+import { approveShiftAudit, calculateAuditVariance, calculateShiftTotals, resolveShiftWindow, createShiftAdjustment, decideShiftAdjustment, defaultShiftSchedule, fetchPendingShiftAdjustments, fetchShiftReport, fetchShiftSchedule, saveShiftSchedule, subscribeToShiftAdjustments } from './lib/shiftService'
 import type { ShiftReport } from './lib/shiftService'
 import type {
   DailyAccountingRecord,
@@ -1161,7 +1166,7 @@ function AdminShell() {
     zeroSellableStock: zeroSellableStockMutation,
   } = useFinanceData()
   const { ingredients, setIngredients, persistIngredients, clearIngredients } = useInventoryState(ingredientLogs, recipeIngredients)
-  const [activeTab, setActiveTab] = useState<AppTab>('more')
+  const [activeTab, setActiveTab] = useState<AppTab>('dashboard')
   const [inventoryRoute, setInventoryRoute] = useState<InventoryRoute>('overview')
   const [moreRoute, setMoreRoute] = useState<MoreRoute>('home')
   const [menuItems, setMenuItems] = useState<MenuItem[]>([])
@@ -1181,7 +1186,7 @@ function AdminShell() {
   }))
   const [activeRecipeFilter, setActiveRecipeFilter] = useState('All')
   const [dashboardMetricsPeriod, setDashboardMetricsPeriod] = useState<DashboardMetricsPeriod>('Today')
-  const [salesRange, setSalesRange] = useState<SalesRange>('Last 7 Days')
+  const [salesRange, setSalesRange] = useState<SalesRange>('Today')
   const [dailyLogDraft, setDailyLogDraft] = useState<DailyLogDraftState | null>(null)
   const [dailyLogCategoryModal, setDailyLogCategoryModal] = useState<DailyLogCategoryModalState>(null)
   const [dailyLogBellOpen, setDailyLogBellOpen] = useState(false)
@@ -2395,7 +2400,7 @@ function AdminShell() {
     await runResetAction(
       'testing-reset',
       async () => {
-        await resetOperationalDataMutation({ clearMenuCatalog: true })
+        await resetOperationalDataMutation()
         const seedData = buildTroubleshootingSeedData()
         await seedTroubleshootingData({
           orders: seedData.orders,
@@ -2415,8 +2420,8 @@ function AdminShell() {
   async function handleEmptyEverythingReset() {
     await runResetAction(
       'empty-everything',
-      () => resetOperationalDataMutation({ clearMenuCatalog: true }),
-      'Everything was cleared from the current workspace.',
+      () => resetOperationalDataMutation(),
+      'Operational data cleared; the menu was preserved.',
     )
   }
 
@@ -2432,9 +2437,6 @@ function AdminShell() {
     await runResetAction('clear-orders', () => clearOrdersData(), 'Orders and accounting totals were cleared.')
   }
 
-  async function handleClearMenuReset() {
-    await runResetAction('clear-menu', () => clearMenuCatalogData(), 'Menu categories and products were cleared.')
-  }
 
   async function handleClearRecipesReset() {
     await runResetAction('clear-recipes', () => clearRecipesData(), 'Recipes were cleared.')
@@ -2912,13 +2914,25 @@ function AdminShell() {
   return (
     <main className="app-shell">
       <section className="screen-body inventory-screen" aria-label="Admin web mobile shell">
+        <header className="admin-workspace-header">
+          <div className="admin-workspace-brand"><span className="admin-brand-mark">R</span><div><strong>RNL Admin</strong><span>Restaurant operations</span></div></div>
+          <div className="admin-workspace-status"><span className={`admin-connection-dot ${syncError ? 'has-error' : ''}`} />{manualRefreshBusy || syncLoading ? 'Refreshing…' : syncError ? 'Sync needs attention' : hasSupabaseConfig ? 'Live workspace' : 'Preview workspace'}
+            {syncError ? <button type="button" disabled={manualRefreshBusy || syncLoading} onClick={() => void handleManualSyncRefresh('navbar')}>Retry sync</button> : null}
+          </div>
+          <ThemePicker />
+        </header>
         <div className="app-content">
           {activeTab === 'dashboard' ? (
             <DashboardScreen
               loading={loading}
               error={error}
+              fullAdmin={appMode === 'full-admin'}
+              onOpenSection={(tab, route) => { handleTabChange(tab); if (route) setMoreRoute(route) }}
               period={dashboardMetricsPeriod}
-              onPeriodChange={setDashboardMetricsPeriod}
+              onPeriodChange={(period) => {
+                setDashboardMetricsPeriod(period)
+                setSalesRange(period === 'Today' ? 'Today' : period === 'Week to date' ? 'Week to Date' : 'Month to Date')
+              }}
               salesRange={salesRange}
               onSalesRangeChange={setSalesRange}
               metrics={dashboardView.metrics}
@@ -3035,6 +3049,7 @@ function AdminShell() {
                 onAddCategory={() => openCategoryEditor(null)}
                 onEditCategory={(categoryId) => openCategoryEditor(categoryId)}
                 onDeleteCategory={handleDeleteCategory}
+                requestOrders={orders}
                 orderItems={filteredOrders}
                 orderPaymentFilter={orderPaymentFilter}
                 orderDeviceFilter={orderDeviceFilter}
@@ -3096,11 +3111,7 @@ function AdminShell() {
         <BottomNavigation
           activeTab={activeTab}
           appMode={appMode}
-          syncBusy={manualRefreshBusy || syncLoading}
-          onTabChange={handleTabChange}
-          onSync={() => {
-            void handleManualSyncRefresh('navbar')
-          }}
+          onTabChange={(tab) => { handleTabChange(tab); if (tab === 'more') setMoreRoute('home') }}
         />
 
         {isPurchaseModalOpen ? (
@@ -3142,7 +3153,6 @@ function AdminShell() {
             onEmptyEverything={() => void handleEmptyEverythingReset()}
             onSafeState={() => void handleSafeStateReset()}
             onClearOrders={() => void handleClearOrdersReset()}
-            onClearMenu={() => void handleClearMenuReset()}
             onClearRecipes={() => void handleClearRecipesReset()}
             onClearDailyLogs={() => void handleClearDailyLogsReset()}
             onClearExpensesLog={() => void handleClearExpensesLogReset()}
@@ -3421,17 +3431,18 @@ function buildLinePath(values: number[], width: number, height: number) {
     .join(' ')
 }
 
+function ShiftMiniChart({ value, maximum }: { value: number; maximum: number }) {
+  const height = maximum > 0 ? Math.max(0, Math.min(1, value / maximum)) * 48 : 0
+  return <svg className="shift-mini-chart" viewBox="0 0 36 54" aria-hidden="true">
+    <rect className="shift-bar-frame" x="2" y="2" width="32" height="50" rx="3" />
+    <rect className="shift-bar-value" x="3" y={51 - height} width="30" height={height} rx="2" />
+  </svg>
+}
+
 function buildChartAxisLabels(points: Array<{ value: number }>) {
   const maxValue = Math.max(...points.map((point) => point.value), 0)
   const step = maxValue <= 0 ? 25 : Math.max(Math.ceil(maxValue / 5), 1)
   return Array.from({ length: 6 }, (_, index) => String(step * (5 - index)))
-}
-
-function breakdownWidth(value: number, maxValue: number) {
-  if (maxValue <= 0 || value <= 0) {
-    return 0
-  }
-  return Math.max((value / maxValue) * 100, 12)
 }
 
 function chartX(index: number, total: number, width: number) {
@@ -3548,13 +3559,13 @@ function buildDashboardView({
       },
       {
         label: 'Latest Food Cost',
-        value: latestAccounting ? formatPhp(latestAccounting.totalCost) : formatPhp(0),
+        value: latestAccounting ? formatPhp(latestAccounting.totalCost) : '—',
         hint: latestAccounting?.businessDate ?? 'No accounting records yet',
         hintTone: 'muted' as const,
       },
       {
         label: 'Latest Gross Profit',
-        value: latestAccounting ? formatPhp(latestAccounting.grossProfit) : formatPhp(0),
+        value: latestAccounting ? formatPhp(latestAccounting.grossProfit) : '—',
         hint: latestAccounting?.businessDate ?? 'No accounting records yet',
         hintTone: 'muted' as const,
       },
@@ -3563,10 +3574,10 @@ function buildDashboardView({
       { label: `${rangeLabel} Cash`, value: formatPhp(metricPaymentBreakdown.cash) },
       { label: `${rangeLabel} GCash`, value: formatPhp(metricPaymentBreakdown.gcash) },
       { label: `${rangeLabel} Orders`, value: String(metricOrders.length) },
-      { label: `${rangeLabel} Net Profit`, value: formatPhp(accountingNetProfit), tone: accountingNetProfit < 0 ? 'danger' as const : 'default' as const },
+      { label: `${rangeLabel} Net Profit`, value: accountingWindow.length ? formatPhp(accountingNetProfit) : 'Not calculated', tone: accountingNetProfit < 0 ? 'danger' as const : 'default' as const },
     ],
     alerts: [
-      { title: 'Low Stock', action: `${products.filter((product) => product.isLowStock || product.stockCount <= 5).length} menu items need review`, icon: '!' },
+      { title: 'Menu Stock Review', action: `${products.filter((product) => product.isLowStock || product.stockCount <= 5).length} menu items need review`, icon: '!' },
       { title: 'Price Logs', action: `${logs.length} synced ingredient price rows`, icon: 'TAG' },
       { title: 'Cloud Orders', action: `${metricOrders.length} active orders in ${rangeLabel.toLowerCase()}`, icon: 'SYNC' },
     ],
@@ -3587,7 +3598,7 @@ function buildDashboardView({
     paymentBreakdown,
     deviceBreakdown,
     syncBannerTitle: salesOrders.length > 0 ? `${salesOrders.length} synced orders in ${salesRange}` : `No synced orders in ${salesRange}`,
-    syncBannerSubtitle: salesOrders.length > 0 ? 'Dashboard reflects live non-voided Supabase orders for the selected range.' : 'Sync tablets or seed/test live orders to populate the dashboard.',
+    syncBannerSubtitle: salesOrders.length > 0 ? 'Dashboard reflects live non-voided Supabase orders for the selected range.' : 'No orders recorded for this period. Check the selected dates and device sync status.',
   }
 }
 
@@ -4233,6 +4244,8 @@ function emptyRecipeSummary(): RecipeSummaryMetrics {
 }
 
 type DashboardScreenProps = {
+  fullAdmin: boolean
+  onOpenSection: (tab: AppTab, route?: MoreRoute) => void
   loading: boolean
   error: string | null
   period: DashboardMetricsPeriod
@@ -4254,6 +4267,8 @@ type DashboardScreenProps = {
 }
 
 function DashboardScreen({
+  fullAdmin,
+  onOpenSection,
   loading,
   error,
   period,
@@ -4291,7 +4306,7 @@ function DashboardScreen({
   return (
     <div className="dashboard-panel">
       <header className="dashboard-header">
-        <h1>My Restaurant Dashboard</h1>
+        <div><p className="section-kicker">Restaurant overview</p><h1>{period === 'Today' ? 'Today at a glance' : period === 'Week to date' ? 'This week at a glance' : 'This month at a glance'}</h1><p className="dashboard-scope-note">Sales summaries: {period}. Latest accounting figures are labeled separately.</p></div>
       </header>
 
       {loading ? <div className="finance-notice-banner">Loading live admin data...</div> : null}
@@ -4326,7 +4341,7 @@ function DashboardScreen({
         <div className="section-head">
           <h2>Sales Trend</h2>
           <label className="ghost-select">
-            <span className="sr-only">Sales range</span>
+            <span className="sr-only">Chart and breakdown date range</span>
             <select value={salesRange} onChange={(event) => onSalesRangeChange(event.target.value as SalesRange)}>
               {salesRanges.map((option) => (
                 <option key={option} value={option}>
@@ -4337,6 +4352,7 @@ function DashboardScreen({
           </label>
         </div>
 
+        <p className="dashboard-scope-note">Chart and payment breakdown: {salesRange}</p>
         <div className="chart-shell">
           <div className="chart-grid" aria-hidden="true">
             {[0, 1, 2, 3, 4].map((line) => (
@@ -4348,18 +4364,19 @@ function DashboardScreen({
               <span key={label}>{label}</span>
             ))}
           </div>
-          <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="chart-svg" role="img" aria-label="Sales trend chart">
+          <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="chart-svg" role="img" aria-label="Sales trend chart (decorative pulse does not indicate new sales)">
             <path className="line secondary" d={secondaryPath} />
             <path className="line primary" d={primaryPath} />
+            <ChartPulse path={primaryPath} enabled={!loading && primaryValues.length > 1} />
             {salesTrendSecondary.map((point, index) => {
               const x = chartX(index, salesTrendSecondary.length, chartWidth)
               const y = chartY(point.value, secondaryValues, chartHeight)
-              return <circle key={`secondary-${point.day}`} cx={x} cy={y} r="2.8" className="point secondary" />
+              return <circle key={`secondary-${point.day}`} cx={x} cy={y} r="1.4" className="point secondary" />
             })}
             {salesTrendPrimary.map((point, index) => {
               const x = chartX(index, salesTrendPrimary.length, chartWidth)
               const y = chartY(point.value, primaryValues, chartHeight)
-              return <circle key={`primary-${point.day}`} cx={x} cy={y} r="3.4" className="point primary" />
+              return <circle key={`primary-${point.day}`} cx={x} cy={y} r="1.7" className="point primary" />
             })}
           </svg>
           <div className="chart-x-axis" aria-hidden="true">
@@ -4370,7 +4387,7 @@ function DashboardScreen({
         </div>
       </article>
 
-      <button type="button" className="sync-banner">
+      <button type="button" className="sync-banner" onClick={() => onOpenSection('more', 'sync')}>
         <span className="sync-banner-icon">SYNC</span>
         <span className="sync-banner-copy">
           <strong>{syncBannerTitle}</strong>
@@ -4400,7 +4417,7 @@ function DashboardScreen({
         <div className="breakdown-grid">
           <div className="breakdown-block">
             <p className="eyebrow">By Payment Method</p>
-            <div className="donut-chart" aria-hidden="true" />
+            <div className="donut-chart" aria-hidden="true" style={{ '--cash-share': `${paymentBreakdown.cash + paymentBreakdown.gcash > 0 ? paymentBreakdown.cash / (paymentBreakdown.cash + paymentBreakdown.gcash) * 100 : 0}%` } as CSSProperties} />
             <div className="legend">
               <span><i className="legend-dot cash" />Cash {formatPhp(paymentBreakdown.cash)}</span>
               <span><i className="legend-dot gcash" />GCash {formatPhp(paymentBreakdown.gcash)}</span>
@@ -4410,17 +4427,11 @@ function DashboardScreen({
             <p className="eyebrow">By Shift</p>
             <div className="device-bars" aria-hidden="true">
               <div className="device-bar">
-                <span
-                  className="bar-fill bar-fill-one"
-                  style={{ width: `${breakdownWidth(deviceBreakdown.tablet1, Math.max(deviceBreakdown.tablet1, deviceBreakdown.tablet2))}%` }}
-                />
+                <ShiftMiniChart value={deviceBreakdown.tablet1} maximum={Math.max(deviceBreakdown.tablet1, deviceBreakdown.tablet2)} />
                 <small>First Shift {formatPhp(deviceBreakdown.tablet1)}</small>
               </div>
               <div className="device-bar">
-                <span
-                  className="bar-fill bar-fill-two"
-                  style={{ width: `${breakdownWidth(deviceBreakdown.tablet2, Math.max(deviceBreakdown.tablet1, deviceBreakdown.tablet2))}%` }}
-                />
+                <ShiftMiniChart value={deviceBreakdown.tablet2} maximum={Math.max(deviceBreakdown.tablet1, deviceBreakdown.tablet2)} />
                 <small>Second Shift {formatPhp(deviceBreakdown.tablet2)}</small>
               </div>
             </div>
@@ -4446,7 +4457,7 @@ function DashboardScreen({
       <article className="surface-card section-card">
         <div className="section-head">
           <h2>Tablet &amp; Sync Management</h2>
-          <button type="button" className="primary-chip">Sync New</button>
+          <button type="button" className="primary-chip" onClick={() => onOpenSection('more', 'sync')}>View sync</button>
         </div>
         <div className="device-list">
           {devices.map((device) => (
@@ -4468,30 +4479,19 @@ function DashboardScreen({
         </div>
       </article>
 
-      <section className="section-stack">
-        <div className="section-head section-head-tight">
-          <h2>Key Metrics</h2>
-        </div>
-        <div className="key-metrics-grid">
-          <article className="surface-card compact-card">
-            <p className="eyebrow">Latest Food Cost</p>
-            <strong>--</strong>
-          </article>
-          <article className="surface-card compact-card">
-            <p className="eyebrow">Latest Gross Profit</p>
-            <strong>--</strong>
-          </article>
-        </div>
+      {fullAdmin ? <section className="section-stack">
+        <div className="section-head section-head-tight"><h2>Accounting</h2></div>
+        <p className="dashboard-scope-note">Review daily records before calculating financial results.</p>
         <div className="action-row">
-          <button type="button" className="action-button">Run Finance</button>
-          <button type="button" className="action-button">Calculate Day</button>
+          <button type="button" className="action-button" onClick={() => onOpenSection('more', 'profit')}>Open profit insights</button>
+          <button type="button" className="action-button" onClick={() => onOpenSection('daily-log')}>Review daily accounting</button>
         </div>
-      </section>
+      </section> : null}
 
       <article className="surface-card section-card">
         <div className="section-head">
           <h2>Top Selling Products</h2>
-          <button type="button" className="ghost-pill">Menu Settings</button>
+          <button type="button" className="ghost-pill" onClick={() => onOpenSection('more', 'menu-settings')}>Menu Settings</button>
         </div>
         <div className="products-table">
           <div className="table-head">
@@ -4960,6 +4960,7 @@ type MoreDetailScreenProps = {
   onAddCategory: () => void
   onEditCategory: (categoryId: string) => void
   onDeleteCategory: (categoryId: string) => void
+  requestOrders: OrderRecord[]
   orderItems: OrderHistoryItem[]
   orderPaymentFilter: string
   orderDeviceFilter: string
@@ -5013,8 +5014,20 @@ type MoreDetailScreenProps = {
   onMoveCategory: (sourceId: string, targetId: string) => void
 }
 
-function RequestCenterScreen({
+function RequestOrderContext({ order, requestType }: { order?: OrderRecord; requestType: 'edit' | 'cancel' }) {
+  if (!order) return <p className="request-context-unavailable">Order details unavailable. Refresh data before approval.</p>
+  return <div className="request-order-context">
+    <div className="request-order-total"><span>Current order total</span><strong>{formatPhp(order.total)}</strong></div>
+    <div className="request-order-meta"><span>{order.serviceMode || 'Service type unavailable'}</span><span>{order.paymentStatus || 'Payment status unavailable'}</span><span>{order.workflowStatus || 'Preparation status unavailable'}</span></div>
+    <ul>{order.items.map((item, index) => <li key={`${item.productId ?? item.name}-${index}`}><span>{item.quantity} × {item.name}{item.isHalfOrder ? ' · Half order' : ''}</span><strong>{formatPhp(item.lineTotal)}</strong></li>)}</ul>
+    {order.orderNote ? <p><strong>Order note:</strong> {order.orderNote}</p> : null}
+    <p className="request-context-hint">{requestType === 'edit' ? 'Approval unlocks editing on the POS; proposed changes are not recorded in this request.' : 'Cancellation will remove this order from sales reporting. No cancellation reason was recorded with this request.'}</p>
+  </div>
+}
+
+export function RequestCenterScreen({
   orderRequests,
+  orders,
   shiftAdjustments,
   orderBusyId,
   adjustmentBusyId,
@@ -5024,6 +5037,7 @@ function RequestCenterScreen({
   onBack,
 }: {
   orderRequests: OrderEditRequestRecord[]
+  orders: OrderRecord[]
   shiftAdjustments: ShiftAdjustment[]
   orderBusyId: string | null
   adjustmentBusyId: string | null
@@ -5032,6 +5046,15 @@ function RequestCenterScreen({
   onAdjustmentDecision: (request: ShiftAdjustment, decision: 'APPROVED' | 'REJECTED') => void
   onBack: () => void
 }) {
+  const [review, setReview] = useState<{ order: OrderEditRequestRecord } | { shift: ShiftAdjustment } | null>(null)
+  const reviewDialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (review && reviewDialog.current && !reviewDialog.current.open) reviewDialog.current.showModal()
+  }, [review])
+  function currentOrder(request: OrderEditRequestRecord) {
+    return orders.find((order) => order.deviceOrderId === request.deviceOrderId && (!request.deviceId || normalizeDeviceId(order.deviceId) === normalizeDeviceId(request.deviceId)))
+  }
+  const reviewOrder = review && 'order' in review ? currentOrder(review.order) : null
   const requestCount = orderRequests.length + shiftAdjustments.length
   return (
     <div className="more-panel request-center-screen">
@@ -5043,7 +5066,8 @@ function RequestCenterScreen({
         </div>
         <span className="system-badge is-synced">{requestCount} pending</span>
       </header>
-      {error ? <div className="admin-request-error">{error}</div> : null}
+      <p className="request-center-intro">Review the order and impact before approving. Requests stay pending until you decide.</p>
+      {error ? <div className="admin-request-error" role="alert">{error}</div> : null}
 
       <MoreSection title="ORDER CANCELLATIONS">
         {orderRequests.filter((request) => request.requestType === 'cancel').length === 0 ? <p>No cancellation requests.</p> : null}
@@ -5053,10 +5077,11 @@ function RequestCenterScreen({
               <strong>Cancel {formatShortOrderNumber(request.displayOrderId)}</strong>
               <p>{request.requestedBy} · {request.deviceId || 'POS Web'}</p>
               <small>{formatFullDateTime(request.requestedAt)}</small>
+              <RequestOrderContext order={currentOrder(request)} requestType={request.requestType} />
             </div>
             <div className="admin-request-actions request-center-actions">
-              <button type="button" className="ghost-pill" disabled={orderBusyId === request.id} onClick={() => onOrderDecision(request, 'rejected')}>Reject</button>
-              <button type="button" className="save-changes-button" disabled={orderBusyId === request.id} onClick={() => onOrderDecision(request, 'approved')}>Approve Void</button>
+              <button type="button" className="ghost-pill" disabled={orderBusyId !== null} onClick={() => onOrderDecision(request, 'rejected')}>Reject</button>
+              <button type="button" className="request-void-button" disabled={orderBusyId !== null || !currentOrder(request)} onClick={() => setReview({ order: request })}>Review cancellation</button>
             </div>
           </article>
         ))}
@@ -5070,10 +5095,11 @@ function RequestCenterScreen({
               <strong>Edit {formatShortOrderNumber(request.displayOrderId)}</strong>
               <p>{request.requestedBy} · {request.deviceId || 'POS Web'}</p>
               <small>{formatFullDateTime(request.requestedAt)}</small>
+              <RequestOrderContext order={currentOrder(request)} requestType={request.requestType} />
             </div>
             <div className="admin-request-actions request-center-actions">
-              <button type="button" className="ghost-pill" disabled={orderBusyId === request.id} onClick={() => onOrderDecision(request, 'rejected')}>Reject</button>
-              <button type="button" className="save-changes-button" disabled={orderBusyId === request.id} onClick={() => onOrderDecision(request, 'approved')}>Approve Edit</button>
+              <button type="button" className="ghost-pill" disabled={orderBusyId !== null} onClick={() => onOrderDecision(request, 'rejected')}>Reject</button>
+              <button type="button" className="save-changes-button" disabled={orderBusyId !== null || !currentOrder(request)} onClick={() => setReview({ order: request })}>Review edit access</button>
             </div>
           </article>
         ))}
@@ -5089,12 +5115,33 @@ function RequestCenterScreen({
               <small>{formatFullDateTime(request.requestedAt)}</small>
             </div>
             <div className="admin-request-actions request-center-actions">
-              <button type="button" className="ghost-pill" disabled={adjustmentBusyId === request.id} onClick={() => onAdjustmentDecision(request, 'REJECTED')}>Reject</button>
-              <button type="button" className="save-changes-button" disabled={adjustmentBusyId === request.id} onClick={() => onAdjustmentDecision(request, 'APPROVED')}>Approve</button>
+              <button type="button" className="ghost-pill" disabled={adjustmentBusyId !== null} onClick={() => onAdjustmentDecision(request, 'REJECTED')}>Reject</button>
+              <button type="button" className="save-changes-button" disabled={adjustmentBusyId !== null} onClick={() => setReview({ shift: request })}>Review adjustment</button>
             </div>
           </article>
         ))}
       </MoreSection>
+      {review ? (
+        <dialog ref={reviewDialog} className="request-review-dialog" aria-labelledby="request-review-title" onCancel={() => setReview(null)} onClose={() => setReview(null)}>
+          <div className="request-review-content">
+            <p className="section-kicker">Approval review</p>
+            <h2 id="request-review-title">{'order' in review ? (review.order.requestType === 'cancel' ? 'Confirm order cancellation' : 'Allow order editing') : 'Confirm shift adjustment'}</h2>
+            {'order' in review ? <>
+              <p>Order {formatShortOrderNumber(review.order.displayOrderId)} · Requested by {review.order.requestedBy}</p>
+              <RequestOrderContext order={reviewOrder ?? undefined} requestType={review.order.requestType} />
+              <p className="request-review-impact">{review.order.requestType === 'cancel' ? 'Approval voids this order and excludes it from sales reporting.' : 'Approval unlocks editing on the requesting POS. Proposed changes are not stored in this request.'}</p>
+            </> : <><p>{review.shift.requestedBy} requests {review.shift.direction.toLowerCase()} {formatPhp(review.shift.amount)} in {review.shift.account}.</p><p>{review.shift.reason}</p></>}
+            <div className="request-review-actions">
+              <button type="button" className="ghost-pill" autoFocus onClick={() => { reviewDialog.current?.close(); setReview(null) }}>Keep pending</button>
+              <button type="button" className={'order' in review && review.order.requestType === 'cancel' ? 'request-void-button' : 'save-changes-button'} disabled={'order' in review ? orderBusyId !== null || !reviewOrder : adjustmentBusyId !== null} onClick={() => {
+                if ('order' in review) onOrderDecision(review.order, 'approved')
+                else onAdjustmentDecision(review.shift, 'APPROVED')
+                setReview(null)
+              }}>{'order' in review ? (review.order.requestType === 'cancel' ? 'Approve void' : 'Allow editing') : 'Approve adjustment'}</button>
+            </div>
+          </div>
+        </dialog>
+      ) : null}
     </div>
   )
 }
@@ -5123,6 +5170,7 @@ function MoreDetailScreen({
   onAddCategory,
   onEditCategory,
   onDeleteCategory,
+  requestOrders,
   orderItems,
   orderPaymentFilter,
   orderDeviceFilter,
@@ -5289,6 +5337,7 @@ function MoreDetailScreen({
     return (
       <RequestCenterScreen
         orderRequests={orderRequests}
+        orders={requestOrders}
         shiftAdjustments={shiftAdjustmentRequests}
         orderBusyId={orderRequestBusyId}
         adjustmentBusyId={shiftAdjustmentBusyId}
@@ -5419,8 +5468,8 @@ function TurnoverSettingsScreen({ onBack }: { onBack: () => void }) {
 
 
 function ShiftReportsScreen({ onBack, onRefreshFinance }: { onBack: () => void; onRefreshFinance: () => Promise<void> }) {
-  const [businessDate, setBusinessDate] = useState(() => new Date().toISOString().slice(0, 10))
-  const [shiftType, setShiftType] = useState<ShiftType>('FIRST')
+  const [businessDate, setBusinessDate] = useState(() => resolveShiftWindow(new Date(), defaultShiftSchedule).businessDate)
+  const [shiftType, setShiftType] = useState<ShiftType>(() => resolveShiftWindow(new Date(), defaultShiftSchedule).shiftType)
   const [page, setPage] = useState<'summary' | 'expenses' | 'adjustments'>('summary')
   const [expenseAccount, setExpenseAccount] = useState<'CASH' | 'GCASH' | null>(null)
   const [report, setReport] = useState<ShiftReport>({ sessions: [], orders: [], payments: [], expenses: [], adjustments: [], audit: null })
@@ -5429,7 +5478,25 @@ function ShiftReportsScreen({ onBack, onRefreshFinance }: { onBack: () => void; 
   const [auditDraft, setAuditDraft] = useState({ countedCash: '', verifiedGcash: '', notes: '', varianceReason: '', auditedBy: 'Admin Web' })
   const [auditBusy, setAuditBusy] = useState(false)
   async function load() { try { const value = await fetchShiftReport(businessDate, shiftType); setReport(value); setStatus('Live shift report loaded.') } catch (error) { setStatus(error instanceof Error ? error.message : 'Could not load report.') } }
-  useEffect(() => { void load() }, [businessDate, shiftType])
+  useEffect(() => {
+    let active = true
+    const refresh = createLiveRefresh(async () => {
+      try {
+        const value = await fetchShiftReport(businessDate, shiftType)
+        if (active) { setReport(value); setStatus('Live shift report loaded.') }
+      } catch (error) { if (active) setStatus(error instanceof Error ? error.message : 'Could not load report.') }
+    })
+    const reconcile = () => { void refresh.request() }
+    reconcile()
+    window.addEventListener('online', reconcile)
+    const supabase = hasSupabaseConfig ? requireSupabase() : null
+    let channel = supabase?.channel(`admin-shift-report-${businessDate}-${shiftType}`)
+    for (const table of ['orders','order_voids','shift_sessions','shift_payment_events','cash_movements','shift_adjustments','shift_audits']) {
+      channel = channel?.on('postgres_changes', { event: '*', schema: 'public', table }, reconcile)
+    }
+    channel?.subscribe(status => { if (status === 'SUBSCRIBED') reconcile() })
+    return () => { active=false; refresh.dispose(); window.removeEventListener('online', reconcile); if (supabase && channel) void supabase.removeChannel(channel) }
+  }, [businessDate, shiftType])
   const totals = calculateShiftTotals(report)
   async function addAdjustment() {
     const amount = Number(adjustment.amount); if (!(amount > 0) || !adjustment.reason.trim()) { setStatus('Adjustment amount and reason are required.'); return }
@@ -5456,12 +5523,12 @@ function ShiftReportsScreen({ onBack, onRefreshFinance }: { onBack: () => void; 
     finally { setAuditBusy(false) }
   }
   const summaryMetrics = [
-    { label: 'Total Sales', detail: 'Cash + GCash', value: totals.totalSales, glyph: '🛒', tone: 'green' },
-    { label: 'Total Cash Sales', value: totals.grossCash, glyph: '▣', tone: 'blue' },
-    { label: 'Total GCash Sales', value: totals.grossGcash, glyph: 'G', tone: 'purple' },
-    { label: 'Ending Cash', detail: `After ${formatPhp(totals.cashExpenses)} expenses`, value: totals.netCash, glyph: '▱', tone: 'orange', expenseAccount: 'CASH' as const },
-    { label: 'Ending GCash', detail: `After ${formatPhp(totals.gcashExpenses)} expenses`, value: totals.netGcash, glyph: '▯', tone: 'cyan', expenseAccount: 'GCASH' as const },
-    { label: 'Unpaid', value: totals.totalUnpaid, glyph: '▦', tone: 'navy' },
+    { label: 'Total Sales', detail: 'Cash + GCash', value: totals.totalSales, glyph: <UiCart size={20} strokeWidth={1.75} />, tone: 'green' },
+    { label: 'Total Cash Sales', value: totals.grossCash, glyph: <UiCashDrawer size={20} strokeWidth={1.75} />, tone: 'blue' },
+    { label: 'Total GCash Sales', value: totals.grossGcash, glyph: <UiFinanceOverview size={20} strokeWidth={1.75} />, tone: 'purple' },
+    { label: 'Ending Cash', detail: `After ${formatPhp(totals.cashExpenses)} expenses`, value: totals.netCash, glyph: <UiCashDrawer size={20} strokeWidth={1.75} />, tone: 'green', expenseAccount: 'CASH' as const },
+    { label: 'Ending GCash', detail: `After ${formatPhp(totals.gcashExpenses)} expenses`, value: totals.netGcash, glyph: <UiFinanceOverview size={20} strokeWidth={1.75} />, tone: 'cyan', expenseAccount: 'GCASH' as const },
+    { label: 'Unpaid', value: totals.totalUnpaid, glyph: <UiBills size={20} strokeWidth={1.75} />, tone: 'navy' },
   ]
   const visibleExpenses = expenseAccount === null
     ? report.expenses
@@ -5473,19 +5540,20 @@ function ShiftReportsScreen({ onBack, onRefreshFinance }: { onBack: () => void; 
   const hasOpenSessions = report.sessions.some((session) => session.status === 'OPEN')
   const draftCountedCash = auditDraft.countedCash === '' ? totals.netCash : Number(auditDraft.countedCash)
   const draftVerifiedGcash = auditDraft.verifiedGcash === '' ? totals.netGcash : Number(auditDraft.verifiedGcash)
-  const draftVariance = (Number.isFinite(draftCountedCash) ? draftCountedCash - totals.netCash : 0) + (Number.isFinite(draftVerifiedGcash) ? draftVerifiedGcash - totals.netGcash : 0)
+  const draftVariances = calculateAuditVariance(totals.netCash, Number.isFinite(draftCountedCash) ? draftCountedCash : totals.netCash, totals.netGcash, Number.isFinite(draftVerifiedGcash) ? draftVerifiedGcash : totals.netGcash)
+  const draftVariance = (Math.round(draftVariances.cashVariance * 100) + Math.round(draftVariances.gcashVariance * 100)) / 100
   return <div className="record-screen shift-admin-screen shift-report-screen">
-    <header className="record-header shift-report-header"><button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back">‹</button><h1>Shift Reports</h1><button type="button" className="ghost-pill shift-print-button" onClick={() => window.print()}><span aria-hidden="true">▣</span> Print</button></header>
+    <header className="record-header shift-report-header"><button type="button" className="back-button icon-back-button" onClick={onBack} aria-label="Back">‹</button><h1>Shift Reports</h1><button type="button" className="ghost-pill shift-print-button" onClick={() => window.print()}><CalendarDays size={14} strokeWidth={1.75} aria-hidden="true" /> Print</button></header>
     <section className="surface-card shift-report-controls"><div className="shift-control-row"><label><span>Business Date</span><input type="date" value={businessDate} onChange={(event) => setBusinessDate(event.target.value)} /></label><div className="segmented-control shift-selector"><button type="button" className={shiftType === 'FIRST' ? 'is-active' : ''} onClick={() => setShiftType('FIRST')}>First Shift</button><button type="button" className={shiftType === 'SECOND' ? 'is-active' : ''} onClick={() => setShiftType('SECOND')}>Second Shift</button></div></div><span className="shift-live-status"><i aria-hidden="true">✓</i>{status}</span></section>
-    <nav className="shift-report-tabs"><button className={page === 'summary' ? 'is-active' : ''} onClick={() => setPage('summary')}><span aria-hidden="true">▥</span>Summary</button><button className={page === 'expenses' ? 'is-active' : ''} onClick={() => { setExpenseAccount(null); setPage('expenses') }}><span aria-hidden="true">▤</span>Expenses</button><button className={page === 'adjustments' ? 'is-active' : ''} onClick={() => setPage('adjustments')}><span aria-hidden="true">⌘</span>Adjustments</button></nav>
+    <nav className="shift-report-tabs"><button className={page === 'summary' ? 'is-active' : ''} onClick={() => setPage('summary')}><LayoutDashboard size={18} strokeWidth={1.75} aria-hidden="true" />Summary</button><button className={page === 'expenses' ? 'is-active' : ''} onClick={() => { setExpenseAccount(null); setPage('expenses') }}><UiBills size={18} strokeWidth={1.75} aria-hidden="true" />Expenses</button><button className={page === 'adjustments' ? 'is-active' : ''} onClick={() => setPage('adjustments')}><SlidersHorizontal size={18} strokeWidth={1.75} aria-hidden="true" />Adjustments</button></nav>
     {page === 'summary' ? <><section className="shift-metric-grid">{summaryMetrics.map((metric) => {
       const content = <><span className={`shift-metric-icon is-${metric.tone}`} aria-hidden="true">{metric.glyph}</span><span className="shift-metric-copy"><small>{metric.label}</small><strong className={metric.value < 0 ? 'is-negative' : ''}>{formatPhp(metric.value)}</strong>{metric.detail ? <em>{metric.detail}</em> : null}</span>{metric.expenseAccount ? <span className="shift-metric-chevron" aria-hidden="true">›</span> : null}</>
       return metric.expenseAccount
         ? <button type="button" className="surface-card shift-metric-row is-clickable" key={metric.label} onClick={() => openExpenses(metric.expenseAccount)} aria-label={`${metric.label}; show ${metric.expenseAccount === 'CASH' ? 'cash' : 'GCash'} expenses`}>{content}</button>
         : <article className="surface-card shift-metric-row" key={metric.label}>{content}</article>
-    })}</section><section className="surface-card shift-session-card"><h2>Cashier Sessions</h2><div className="audit-session-list">{report.sessions.length === 0 ? <p>No cashier sessions for this shift.</p> : report.sessions.map((item) => { const initials = item.employeeName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase(); const open = item.status === 'OPEN'; return <article key={item.id}><span className="audit-session-avatar">{initials}</span><span className="audit-session-copy"><strong>{item.employeeName}</strong><small><span aria-hidden="true">▣</span>{new Date(item.clockedInAt).toLocaleString()} – {item.clockedOutAt ? new Date(item.clockedOutAt).toLocaleString() : 'Open'}</small><small><span aria-hidden="true">▦</span>{item.deviceId}</small></span><em className={open ? 'is-open' : 'is-closed'}>{open ? '◷ Open' : '✓ Closed'}</em></article> })}</div><button type="button" className="audit-view-sessions">View all sessions <span aria-hidden="true">›</span></button></section>
+    })}</section><section className="surface-card shift-session-card"><h2>Cashier Sessions</h2><div className="audit-session-list">{report.sessions.length === 0 ? <p>No cashier sessions for this shift.</p> : report.sessions.map((item) => { const initials = item.employeeName.split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase(); const open = item.status === 'OPEN'; return <article key={item.id}><span className="audit-session-avatar">{initials}</span><span className="audit-session-copy"><strong>{item.employeeName}</strong><small><CalendarDays size={14} strokeWidth={1.75} aria-hidden="true" />{new Date(item.clockedInAt).toLocaleString()} – {item.clockedOutAt ? new Date(item.clockedOutAt).toLocaleString() : 'Open'}</small><small><Tablet size={14} strokeWidth={1.75} aria-hidden="true" />{item.deviceId}</small></span><em className={open ? 'is-open' : 'is-closed'}>{open ? '◷ Open' : '✓ Closed'}</em></article> })}</div><button type="button" className="audit-view-sessions">View all sessions <span aria-hidden="true">›</span></button></section>
     <section className="surface-card shift-audit-card"><span className={`audit-status-pill ${report.audit ? 'is-audited' : ''}`}>{report.audit ? '✓ Audited' : '◷ Awaiting Audit'}</span>
-    {report.audit ? <div className="audit-completed-summary"><div className="audit-value-grid"><div><small>Expected / Counted Cash</small><strong>{formatPhp(report.audit.expectedCash)} / {formatPhp(report.audit.countedCash)}</strong></div><div><small>Expected / Verified GCash</small><strong>{formatPhp(report.audit.expectedGcash)} / {formatPhp(report.audit.verifiedGcash)}</strong></div></div><div className="audit-variance-row"><span>Combined Variance</span><strong className={(report.audit.cashVariance + report.audit.gcashVariance) >= 0 ? 'is-over' : 'is-short'}>{formatSignedPhp(report.audit.cashVariance + report.audit.gcashVariance)}</strong></div><div className="audit-approved-meta"><span>Approved by {report.audit.auditedBy}</span><span>{report.audit.varianceReason || report.audit.notes || 'No variance or notes.'}</span></div></div> : <div className="audit-form"><div className="audit-value-grid audit-entry-grid"><label><span className="shift-metric-icon is-green" aria-hidden="true">▣</span><span><small>Physically Counted Cash</small><input inputMode="decimal" value={auditDraft.countedCash} onChange={(event) => setAuditDraft({ ...auditDraft, countedCash: event.target.value })} placeholder={totals.netCash.toFixed(2)} /></span></label><label><span className="shift-metric-icon is-purple" aria-hidden="true">G</span><span><small>Verified GCash Total</small><input inputMode="decimal" value={auditDraft.verifiedGcash} onChange={(event) => setAuditDraft({ ...auditDraft, verifiedGcash: event.target.value })} placeholder={totals.netGcash.toFixed(2)} /></span></label></div><div className="audit-value-grid audit-expected-grid"><div><small>Expected Cash</small><strong>{formatPhp(totals.netCash)}</strong></div><div><small>Expected GCash</small><strong>{formatPhp(totals.netGcash)}</strong></div></div><div className="audit-variance-row"><span>Variance</span><strong className={draftVariance >= 0 ? 'is-over' : 'is-short'}>{formatSignedPhp(draftVariance)}<small>{draftVariance > 0 ? '(over)' : draftVariance < 0 ? '(short)' : '(balanced)'}</small></strong></div><label className="audit-reason-field"><span>Variance Reason</span><div><input value={auditDraft.varianceReason} onChange={(event) => setAuditDraft({ ...auditDraft, varianceReason: event.target.value })} placeholder="Required when over or short" /><span aria-hidden="true">›</span></div></label></div>}
+    {report.audit ? <div className="audit-completed-summary"><div className="audit-value-grid"><div><small>Expected / Counted Cash</small><strong>{formatPhp(report.audit.expectedCash)} / {formatPhp(report.audit.countedCash)}</strong></div><div><small>Expected / Verified GCash</small><strong>{formatPhp(report.audit.expectedGcash)} / {formatPhp(report.audit.verifiedGcash)}</strong></div></div><div className="audit-variance-row"><span>Combined Variance</span><strong className={(report.audit.cashVariance + report.audit.gcashVariance) >= 0 ? 'is-over' : 'is-short'}>{formatSignedPhp(report.audit.cashVariance + report.audit.gcashVariance)}</strong></div><div className="audit-approved-meta"><span>Approved by {report.audit.auditedBy}</span><span>{report.audit.varianceReason || report.audit.notes || 'No variance or notes.'}</span></div></div> : <div className="audit-form"><div className="audit-value-grid audit-entry-grid"><label><span className="shift-metric-icon is-green" aria-hidden="true"><UiCashDrawer size={20} strokeWidth={1.75} /></span><span><small>Physically Counted Cash</small><input inputMode="decimal" value={auditDraft.countedCash} onChange={(event) => setAuditDraft({ ...auditDraft, countedCash: event.target.value })} placeholder={totals.netCash.toFixed(2)} /></span></label><label><span className="shift-metric-icon is-purple" aria-hidden="true"><UiFinanceOverview size={20} strokeWidth={1.75} /></span><span><small>Verified GCash Total</small><input inputMode="decimal" value={auditDraft.verifiedGcash} onChange={(event) => setAuditDraft({ ...auditDraft, verifiedGcash: event.target.value })} placeholder={totals.netGcash.toFixed(2)} /></span></label></div><div className="audit-value-grid audit-expected-grid"><div><small>Expected Cash</small><strong>{formatPhp(totals.netCash)}</strong></div><div><small>Expected GCash</small><strong>{formatPhp(totals.netGcash)}</strong></div></div><div className="audit-variance-row"><span>Variance</span><strong className={draftVariance > 0 ? 'is-over' : draftVariance < 0 ? 'is-short' : 'is-balanced'}>{formatSignedPhp(draftVariance)}<small>{draftVariance > 0 ? '(over)' : draftVariance < 0 ? '(short)' : '(balanced)'}</small></strong></div><label className="audit-reason-field"><span>Variance Reason</span><div><input value={auditDraft.varianceReason} onChange={(event) => setAuditDraft({ ...auditDraft, varianceReason: event.target.value })} placeholder="Required when over or short" /><span aria-hidden="true">›</span></div></label></div>}
     </section>{!report.audit ? <button type="button" className="audit-start-button" disabled={auditBusy || hasOpenSessions} onClick={() => void approveAudit()}><span aria-hidden="true">♢</span>{auditBusy ? 'Approving...' : 'Approve'}</button> : null}</> : null}
     {page === 'expenses' ? <section className="surface-card"><div className="shift-expense-heading"><div><h2>{expenseAccount ? `${expenseAccount === 'CASH' ? 'Cash' : 'GCash'} Expense Log` : 'Expense Log'}</h2>{expenseAccount ? <p>Total expenses: <strong>{formatPhp(expenseAccount === 'CASH' ? totals.cashExpenses : totals.gcashExpenses)}</strong></p> : null}</div>{expenseAccount ? <button type="button" className="ghost-pill" onClick={() => setExpenseAccount(null)}>Show all</button> : null}</div><div className="shift-ledger-list">{visibleExpenses.length === 0 ? <p>No {expenseAccount === 'CASH' ? 'cash ' : expenseAccount === 'GCASH' ? 'GCash ' : ''}expenses for this shift.</p> : visibleExpenses.map((item) => <article key={item.id}><strong>{formatPhp(item.amount)} • {item.accountType === 'BANK' ? 'GCash' : 'Cash'}</strong><span>{item.reasonCategory} — {item.note || 'No note'}</span><em>{item.createdBy} • {new Date(item.createdAtEpochMillis).toLocaleString()}</em></article>)}</div></section> : null}
     {page === 'adjustments' ? <><section className="surface-card shift-adjustment-entry"><h2>Admin Adjustment</h2><select value={adjustment.account} onChange={(e) => setAdjustment({ ...adjustment, account: e.target.value as 'CASH' | 'GCASH' })}><option>CASH</option><option>GCASH</option></select><select value={adjustment.direction} onChange={(e) => setAdjustment({ ...adjustment, direction: e.target.value as 'ADD' | 'REMOVE' })}><option>ADD</option><option>REMOVE</option></select><input inputMode="decimal" value={adjustment.amount} onChange={(e) => setAdjustment({ ...adjustment, amount: e.target.value })} placeholder="Amount" /><input value={adjustment.reason} onChange={(e) => setAdjustment({ ...adjustment, reason: e.target.value })} placeholder="Required reason" /><button className="ghost-pill" onClick={() => void addAdjustment()}>Apply Adjustment</button></section><section className="surface-card"><div className="shift-ledger-list">{report.adjustments.map((item) => <article key={item.id}><strong>{item.direction} {formatPhp(item.amount)} • {item.account}</strong><span>{item.reason} — {item.status}</span><em>{item.requestedBy} • {new Date(item.requestedAt).toLocaleString()}</em>{item.status === 'PENDING' ? <div><button onClick={() => void decide(item.id, 'APPROVED')}>Approve</button><button onClick={() => void decide(item.id, 'REJECTED')}>Reject</button></div> : null}</article>)}</div></section></> : null}
@@ -9061,7 +9129,6 @@ type ResetOptionsModalProps = {
   onEmptyEverything: () => void
   onSafeState: () => void
   onClearOrders: () => void
-  onClearMenu: () => void
   onClearRecipes: () => void
   onClearDailyLogs: () => void
   onClearExpensesLog: () => void
@@ -9080,7 +9147,6 @@ function ResetOptionsModal({
   onEmptyEverything,
   onSafeState,
   onClearOrders,
-  onClearMenu,
   onClearRecipes,
   onClearDailyLogs,
   onClearExpensesLog,
@@ -9133,10 +9199,10 @@ function ResetOptionsModal({
 
         <div className="reset-action-list">
           {renderResetAction('testing-reset', 'Testing Reset', 'Clear the current workspace, then repopulate troubleshooting sample data.', 'Testing Reset', onTestingReset)}
-          {renderResetAction('empty-everything', 'Empty Everything', 'Clear orders, menu, recipes, logs, finance rows, and current synced workspace data.', 'Empty Everything', onEmptyEverything)}
+          {renderResetAction('empty-everything', 'Empty Operational Data', 'Clear orders, recipes, logs, and finance while preserving the menu.', 'Empty Operational Data', onEmptyEverything)}
           {renderResetAction('safe-state', 'Safe State', 'Clear operational history while keeping the current menu catalog in place.', 'Safe State', onSafeState)}
           {renderResetAction('clear-orders', 'Queue / Orders', 'Clear orders, void records, and derived accounting totals.', 'Clear Orders', onClearOrders)}
-          {renderResetAction('clear-menu', 'Menu', 'Clear categories and menu products.', 'Clear Menu', onClearMenu)}
+          <p>The menu, options, images, and stock are protected during operational resets.</p>
           {renderResetAction('clear-recipes', 'Recipes', 'Clear recipes and recipe ingredient links.', 'Clear Recipes', onClearRecipes)}
           {renderResetAction('clear-daily-logs', 'Daily Logs', 'Clear ingredient price logs and saved accounting logs.', 'Clear Logs', onClearDailyLogs)}
           {renderResetAction('clear-expenses-log', 'Expenses Log', 'Clear expense entries while keeping other cash movement history.', 'Clear Expenses', onClearExpensesLog)}
@@ -9670,10 +9736,10 @@ function DailyLogCategorySettingsModal({
                   </button>
                   <div className="category-row-actions">
                     <button type="button" className="icon-button" aria-label={`Move ${category.name} up`} disabled={index === 0} onClick={() => onMoveCategory(category.id, -1)}>
-                      ^
+                      <ChevronUp size={20} strokeWidth={1.75} aria-hidden="true" />
                     </button>
                     <button type="button" className="icon-button" aria-label={`Move ${category.name} down`} disabled={index === activeCategories.length - 1} onClick={() => onMoveCategory(category.id, 1)}>
-                      v
+                      <ChevronDown size={20} strokeWidth={1.75} aria-hidden="true" />
                     </button>
                     <button type="button" className="icon-button" aria-label={`Edit ${category.name}`} onClick={() => onOpenCategory(category.id)}>
                       <PencilIcon />
@@ -9769,7 +9835,7 @@ function LogsScreen({
               onClick={() => onOpenRecord(record.id)}
             >
               <UnifiedRecordCard
-                media={<ClipboardIcon />}
+                media={<CalendarDays size={24} strokeWidth={1.75} />}
                 title={record.title}
                 subtitle={record.detail}
                 status={record.status}
@@ -9834,41 +9900,31 @@ function UnifiedRecordCard({
 type BottomNavigationProps = {
   activeTab: AppTab
   appMode: AppMode
-  syncBusy: boolean
   onTabChange: (tab: AppTab) => void
-  onSync: () => void
 }
 
-function BottomNavigation({ activeTab, appMode, syncBusy, onTabChange, onSync }: BottomNavigationProps) {
+function BottomNavigation({ activeTab, appMode, onTabChange }: BottomNavigationProps) {
   return (
     <nav className="bottom-nav" aria-label="Primary">
       <button type="button" className={`bottom-nav-item ${activeTab === 'dashboard' ? 'is-active' : ''}`} onClick={() => onTabChange('dashboard')}>
-        <GridIcon />
+        <LayoutDashboard size={24} strokeWidth={1.75} />
         <span>Dashboard</span>
       </button>
       {appMode === 'full-admin' ? (
         <button type="button" className={`bottom-nav-item ${activeTab === 'inventory' ? 'is-active' : ''}`} onClick={() => onTabChange('inventory')}>
-          <InventoryIcon />
+          <Package size={24} strokeWidth={1.75} />
           <span>Inventory</span>
         </button>
       ) : null}
-      <button
-        type="button"
-        className="bottom-nav-sync"
-        onClick={onSync}
-        aria-label="Refresh live admin data"
-        disabled={syncBusy}
-      >
-        <SyncIcon />
-      </button>
+
       {appMode === 'full-admin' ? (
         <button type="button" className={`bottom-nav-item ${activeTab === 'daily-log' ? 'is-active' : ''}`} onClick={() => onTabChange('daily-log')}>
-          <ClipboardIcon />
+          <CalendarDays size={24} strokeWidth={1.75} />
           <span>Daily Log</span>
         </button>
       ) : null}
       <button type="button" className={`bottom-nav-item ${activeTab === 'more' ? 'is-active' : ''}`} onClick={() => onTabChange('more')}>
-        <MenuIcon />
+        <Ellipsis size={24} strokeWidth={1.75} />
         <span>More</span>
       </button>
     </nav>
@@ -10051,68 +10107,9 @@ function statusLabel(status: IngredientStatus) {
   }
 }
 
-function CartIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M4 5h2l1.3 6.2a1 1 0 0 0 1 .8h7.9a1 1 0 0 0 1-.8L19 7H7.1" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="10" cy="18" r="1.5" fill="currentColor" />
-      <circle cx="17" cy="18" r="1.5" fill="currentColor" />
-    </svg>
-  )
-}
+function CartIcon() { return <UiCart size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function GearIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2Zm8 3.6-.9-.4a7.6 7.6 0 0 0-.5-1.3l.5-.9-1.6-1.6-.9.5a7.6 7.6 0 0 0-1.3-.5L15 6h-3l-.4.9a7.6 7.6 0 0 0-1.3.5l-.9-.5-1.6 1.6.5.9a7.6 7.6 0 0 0-.5 1.3L6 12v3l.9.4a7.6 7.6 0 0 0 .5 1.3l-.5.9 1.6 1.6.9-.5a7.6 7.6 0 0 0 1.3.5l.4.9h3l.4-.9a7.6 7.6 0 0 0 1.3-.5l.9.5 1.6-1.6-.5-.9a7.6 7.6 0 0 0 .5-1.3l.9-.4v-3Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-function GridIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <rect x="4" y="4" width="6" height="6" rx="1.2" fill="currentColor" />
-      <rect x="14" y="4" width="6" height="6" rx="1.2" fill="currentColor" />
-      <rect x="4" y="14" width="6" height="6" rx="1.2" fill="currentColor" />
-      <rect x="14" y="14" width="6" height="6" rx="1.2" fill="currentColor" />
-    </svg>
-  )
-}
-
-function SyncIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg sync-nav-icon" aria-hidden="true">
-      <path d="M7 8a6 6 0 0 1 10-1m0 0V3m0 4h-4M17 16a6 6 0 0 1-10 1m0 0v4m0-4h4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-function ClipboardIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M9 4h6l1 2h2v14H6V6h2l1-2Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M9 11h6M9 15h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function InventoryIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M6 5h12v4H6zM6 11h12v8H6z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-      <path d="M10 8h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function MenuIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M5 7h14M5 12h14M5 17h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  )
-}
+function GearIcon() { return <UiGear size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
 function menuStatusLabel(status: MenuItemStatus) {
   switch (status) {
@@ -10136,158 +10133,40 @@ function syncStatusLabel(status: SyncStatus) {
   }
 }
 
-function SearchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" strokeWidth="1.8" />
-      <path d="M16 16l4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  )
-}
+function SearchIcon() { return <UiSearch size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function PlusIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  )
-}
+function PlusIcon() { return <UiPlus size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function BellIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M18 9a6 6 0 0 0-12 0c0 6-2 7-2 7h16s-2-1-2-7Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M10 20a2.2 2.2 0 0 0 4 0" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  )
-}
+function BellIcon() { return <UiBell size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function CalendarIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M6 5h12a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      <path d="M8 3v4M16 3v4M4 10h16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  )
-}
+function CalendarIcon() { return <UiCalendar size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function PencilIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M4 20l4.2-1 9.5-9.5-3.2-3.2L5 15.8 4 20Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      <path d="M13.8 5.8 17 9" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  )
-}
+function PencilIcon() { return <UiPencil size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function TrashIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M5 7h14M9 7V5h6v2m-8 0 1 12h8l1-12" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
+function TrashIcon() { return <UiTrash size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function CloseIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  )
-}
+function CloseIcon() { return <UiClose size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function DragHandleIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M8 6h8M8 12h8M8 18h8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  )
-}
+function DragHandleIcon() { return <UiDragHandle size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function ModeSwitchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M7 8h10M7 16h10M15 5l3 3-3 3M9 13l-3 3 3 3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
+function ModeSwitchIcon() { return <UiModeSwitch size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function SyncLogsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M7 8a6 6 0 0 1 10-1m0 0V3m0 4h-4M17 16a6 6 0 0 1-10 1m0 0v4m0-4h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
+function SyncLogsIcon() { return <UiSyncLogs size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function OrderHistoryIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M6 5h12v14H6z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      <path d="M9 9h6M9 13h6M9 17h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  )
-}
+function OrderHistoryIcon() { return <UiOrderHistory size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function ProductSettingsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M7 4h10l3 4v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8l3-4Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      <path d="M8 9h8M10 13h4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  )
-}
+function ProductSettingsIcon() { return <UiProductSettings size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function RecipeBookIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M6 4h10a2 2 0 0 1 2 2v14H8a2 2 0 0 0-2 2V4Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      <path d="M9 8h5M9 12h5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  )
-}
+function RecipeBookIcon() { return <UiRecipeBook size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function FinanceOverviewIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M5 18 10 13l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M5 6v12h14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
+function FinanceOverviewIcon() { return <UiFinanceOverview size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function CashDrawerIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M4 9h16v8H4zM7 9V6h10v3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      <circle cx="12" cy="13" r="1.4" fill="currentColor" />
-    </svg>
-  )
-}
+function CashDrawerIcon() { return <UiCashDrawer size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function BillsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M7 4h10v16l-2-1.4L13 20l-2-1.4L9 20l-2-1.4L5 20V6a2 2 0 0 1 2-2Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-      <path d="M9 9h6M9 13h6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  )
-}
+function BillsIcon() { return <UiBills size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function ProfitInsightsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M6 18 18 6M10 6h8v8" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
+function ProfitInsightsIcon() { return <UiProfitInsights size={24} strokeWidth={1.75} aria-hidden="true" /> }
 
-function ResetIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="icon-svg" aria-hidden="true">
-      <path d="M12 4a8 8 0 1 1-7.2 4.5M4 4v5h5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
+function ResetIcon() { return <UiReset size={24} strokeWidth={1.75} aria-hidden="true" /> }
 export default App
 

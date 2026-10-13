@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { PosApp } from './PosApp'
 import { registerServiceWorker } from '../registerServiceWorker'
 import './pos.css'
+import '../rnl-theme.css'
 
 function disableMobileBrowserZoom() {
   let lastTouchEnd = 0

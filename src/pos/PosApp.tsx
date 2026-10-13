@@ -1,5 +1,11 @@
-﻿import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import { fetchStaffDirectory } from '../lib/pos/attendanceService'
+import { StaffClockDialog } from './StaffClockDialog'
+import { ThemePicker } from '../components/ThemePicker'
+import { acknowledgeCollection, identifyCollection, mergePendingCollections } from '../lib/pos/pendingCollections'
+import { createLiveRefresh } from '../lib/liveRefresh'
+import { clearBacklogPending, partitionBacklogForReset } from '../lib/pos/offlineBacklog'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import {
   ChartNoAxesColumnIncreasing,
   Banknote,
@@ -14,12 +20,12 @@ import {
   Glasses,
   LayoutGrid,
   List,
-  LogOut,
   MapPin,
   Pencil,
   Plus,
   RefreshCw,
   Settings,
+  Search,
   Shirt,
   ShoppingCart,
   Table as TableIcon,
@@ -29,12 +35,13 @@ import {
   WalletCards,
   X,
 } from 'lucide-react'
-import { fetchAdminSetting, fetchCashMovements, fetchOrders, saveAdminSetting, upsertCashMovements, voidedExpenseIds, voidOrder } from '../lib/adminApi'
+import { fetchAdminSetting, fetchCashMovements, fetchOrders, fetchOrderVoids, saveAdminSetting, upsertCashMovements, voidedExpenseIds, voidOrder } from '../lib/adminApi'
 import type { CashMovement, OrderRecord } from '../lib/adminTypes'
 import { fetchPosMenu, getPreviewPosMenu, isProductVisibleOnPos, updatePosMenuProductStatus } from '../lib/pos/menuService'
 import type { CompletedOrder, PosMenuCategory, PosMenuProduct, ProductStatus, ServiceMode } from '../lib/pos/posTypes'
 import { formatCustomerOrderNumber, peekHourlyOrderNumber, reserveHourlyOrderNumber } from '../lib/orderNumber'
 import { checkNativePrinterStatus, printPosDocument, type NativePrinterStatus, type PrintDocumentType, type ReceiptDetailMode, type ReceiptPaperWidth } from '../lib/pos/printService'
+import { formatOrderAge, isEarlierServiceDay, productMatchesSearch } from '../lib/interfaceReview'
 import { paymentBelongsToActiveShift } from '../lib/pos/shiftFiltering'
 import {
   cancelOrderEditRequest,
@@ -44,8 +51,8 @@ import {
   subscribeToOrderEditRequest,
 } from '../lib/orderEditRequests'
 import { hasSupabaseConfig, requireSupabase } from '../lib/supabase/client'
-import { closeOpenShiftSession, createShiftAdjustment, fetchOpenShiftSession, fetchShiftAdjustments, fetchShiftSchedule, openShiftSession } from '../lib/shiftService'
-import type { ShiftAdjustment, ShiftSchedule, ShiftSession } from '../lib/adminTypes'
+import { createShiftAdjustment, fetchOpenShiftSession, fetchShiftAdjustments } from '../lib/shiftService'
+import type { ShiftAdjustment, ShiftSession } from '../lib/adminTypes'
 
 type MainTab = 'new-order' | 'ongoing' | 'kitchen' | 'sale-tracker' | 'settings'
 type PrinterDetectionLogEntry = NativePrinterStatus & { checkedAt: string }
@@ -57,7 +64,7 @@ type OrderSort = 'oldest' | 'newest'
 type PaymentMethod = 'cash' | 'gcash' | 'split'
 type CheckoutTarget = { type: 'order'; orderId: string }
 type KitchenNoteTarget = { orderNumber: string; itemCount: number; appendToOrderId?: string; editOrderId?: string; noteOrderId?: string; initialNote?: string }
-type SettingsSection = 'menu' | 'history' | 'money' | 'printing' | 'backlog'
+type SettingsSection = 'menu' | 'history' | 'money' | 'printing' | 'backlog' | 'experimental'
 type MoneyAccount = 'cash' | 'gcash'
 type MovementDirection = 'in' | 'out'
 type ExpensePaymentMethod = 'cash' | 'gcash'
@@ -65,6 +72,11 @@ type ReceiptPrintSettings = {
   paperWidth: ReceiptPaperWidth
   detailMode: ReceiptDetailMode
   includeOrderNote: boolean
+}
+type PosTouchSettings = {
+  instantFeedback: boolean
+  largeTouchTargets: boolean
+  delayedPointerActivation: boolean
 }
 type EditApprovalRequest = {
   requestId: string | null
@@ -86,10 +98,8 @@ type ExpenseCategorySetting = {
 type PosEmployee = {
   id: string
   name: string
-  dailyRate: number
   isCashier: boolean
   isActive: boolean
-  pin: string
 }
 
 export type SalePayment = {
@@ -176,6 +186,7 @@ type PendingCancellation = {
   order: RestaurantOrder
 }
 
+type PendingCollection = { id: string; payment: OrderPaymentInput; shiftSession?: ShiftSession | null; collectedBy?: string }
 type OfflineBacklogEntry = {
   id: string
   order: RestaurantOrder
@@ -183,6 +194,7 @@ type OfflineBacklogEntry = {
   orderPending: boolean
   paymentPending: boolean
   payment?: OrderPaymentInput
+  collections?: PendingCollection[]
   shiftSession?: ShiftSession | null
   collectedBy?: string
 }
@@ -190,6 +202,7 @@ type OfflineBacklogEntry = {
 const defaultCategoryNames = ['Meals', 'Drinks', 'Add-ons', 'Others']
 const posAppVersion = 'V1'
 const taxRate = 0
+const posTouchSettingsKey = 'pos-web-touch-settings-v1'
 const paymentModeTiles = [
   { id: 'full', label: 'Full Payment', helper: 'Pay full amount', icon: '$' },
   { id: 'split-items', label: 'Split by Items', helper: 'Share items', icon: '1/2' },
@@ -214,14 +227,11 @@ export function PosApp() {
   const [primaryNavCollapsed, setPrimaryNavCollapsed] = useState(readPrimaryNavCollapsed)
   const [employees, setEmployees] = useState<PosEmployee[]>(readLocalPosEmployees)
   const [activeEmployeeId, setActiveEmployeeId] = useState(readActiveEmployeeId)
-  const [shiftSchedule, setShiftSchedule] = useState<ShiftSchedule | null>(null)
+  const [staffClockOpen, setStaffClockOpen] = useState(false)
   const [activeShiftSession, setActiveShiftSession] = useState<ShiftSession | null>(null)
-  const [shiftBusy, setShiftBusy] = useState(false)
-  const [pendingEmployeeId, setPendingEmployeeId] = useState('')
-  const [loginPin, setLoginPin] = useState('')
-  const [pinError, setPinError] = useState('')
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('menu')
+  const [menuQuery, setMenuQuery] = useState('')
   const [statusMessage, setStatusMessage] = useState('Loading menu...')
-  const [refreshing, setRefreshing] = useState(false)
   const [nextOrderNumber, setNextOrderNumber] = useState(peekHourlyOrderNumber)
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
   const [prepaidCheckoutOrderId, setPrepaidCheckoutOrderId] = useState<string | null>(null)
@@ -236,6 +246,15 @@ export function PosApp() {
   const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' ? true : navigator.onLine)
   const [offlineBacklog, setOfflineBacklog] = useState<OfflineBacklogEntry[]>(readOfflineBacklog)
   const [pendingCancellations, setPendingCancellations] = useState<PendingCancellation[]>(readPendingCancellations)
+  const [touchSettings, setTouchSettings] = useState<PosTouchSettings>(readPosTouchSettings)
+  const delayedMenuPointerRef = useRef<{
+    element: HTMLButtonElement
+    startX: number
+    startY: number
+    timer: number | null
+    fired: boolean
+    cancelled: boolean
+  } | null>(null)
 
   useEffect(() => {
     const interval = window.setInterval(() => setNextOrderNumber(peekHourlyOrderNumber()), 30_000)
@@ -269,6 +288,10 @@ export function PosApp() {
   }, [pendingCancellations])
 
   useEffect(() => {
+    window.localStorage.setItem(posTouchSettingsKey, JSON.stringify(touchSettings))
+  }, [touchSettings])
+
+  useEffect(() => {
     if (!hasSupabaseConfig || pendingCancellations.length === 0) return undefined
     let active = true
     for (const pending of pendingCancellations) {
@@ -295,6 +318,7 @@ export function PosApp() {
   }, [pendingCancellations])
 
   useEffect(() => {
+    if (hasSupabaseConfig) return
     let active = true
     fetchPosMenu()
       .then((menu) => {
@@ -329,13 +353,19 @@ export function PosApp() {
         if (active) setStatusMessage(error instanceof Error ? error.message : 'Could not sync the shared menu.')
       }
     }
+    const refresh = createLiveRefresh(refreshSharedMenu)
+    const reconcile = () => { void refresh.request() }
+    reconcile()
+    window.addEventListener('online', reconcile)
     const channel = supabase
       .channel('pos-shared-menu')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => void refreshSharedMenu())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, () => void refreshSharedMenu())
-      .subscribe()
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => reconcile())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, () => reconcile())
+      .subscribe((status) => { if (status === 'SUBSCRIBED') reconcile() })
     return () => {
       active = false
+      refresh.dispose()
+      window.removeEventListener('online', reconcile)
       void supabase.removeChannel(channel)
     }
   }, [])
@@ -350,7 +380,7 @@ export function PosApp() {
 
   useEffect(() => {
     let active = true
-    fetchAdminSetting('employees')
+    fetchStaffDirectory()
       .then((setting) => {
         if (!active) return
         const nextEmployees = normalizePosEmployees(setting)
@@ -379,13 +409,33 @@ export function PosApp() {
 
   useEffect(() => {
     let active = true
-    Promise.all([fetchShiftSchedule(), fetchOpenShiftSession(deviceId)]).then(([schedule, session]) => {
-      if (!active) return
-      setShiftSchedule(schedule)
-      setActiveShiftSession(session)
-      setActiveEmployeeId(session?.employeeId ?? '')
-    }).catch((error: unknown) => setStatusMessage(error instanceof Error ? error.message : 'Could not load shift status.'))
-    return () => { active = false }
+    const refresh = createLiveRefresh(async () => {
+      try {
+        const [session,directory] = await Promise.all([fetchOpenShiftSession(deviceId),fetchStaffDirectory()])
+        if (!active) return
+        const staff=normalizePosEmployees(directory)
+        setEmployees(staff)
+        writeLocalPosEmployees(staff)
+        setActiveShiftSession(session)
+        setActiveEmployeeId(session?.employeeId ?? '')
+      } catch (error) {
+        if (active) setStatusMessage(error instanceof Error ? error.message : 'Could not load shift status.')
+      }
+    })
+    const reconcile = () => { void refresh.request() }
+    reconcile()
+    window.addEventListener('online', reconcile)
+    const supabase = hasSupabaseConfig ? requireSupabase() : null
+    const channel = supabase?.channel(`pos-shift-${deviceId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_sessions' }, reconcile)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'admin_settings' }, reconcile)
+      .subscribe(status => { if (status === 'SUBSCRIBED') reconcile() })
+    return () => {
+      active = false
+      refresh.dispose()
+      window.removeEventListener('online', reconcile)
+      if (supabase && channel) void supabase.removeChannel(channel)
+    }
   }, [deviceId])
 
   useEffect(() => {
@@ -409,7 +459,9 @@ export function PosApp() {
 
     async function loadSyncedOrders() {
       try {
-        const items = await fetchOrders()
+        const [rawItems, voids] = await Promise.all([fetchOrders(), fetchOrderVoids()])
+        const voidIds = new Set(voids.map(item => item.deviceOrderId))
+        const items = rawItems.filter(item => !voidIds.has(item.deviceOrderId))
         if (!active) return
         const mappedOrders = items.map(mapAdminOrderToRestaurantOrder)
         const storedPending = readPendingCancellations()
@@ -427,7 +479,9 @@ export function PosApp() {
       }
     }
 
-    void loadSyncedOrders()
+    const refresh = createLiveRefresh(loadSyncedOrders)
+    const reconcile = () => { void refresh.request() }
+    reconcile()
 
     if (!hasSupabaseConfig) {
       return () => {
@@ -436,15 +490,19 @@ export function PosApp() {
     }
 
     const supabase = requireSupabase()
+    window.addEventListener('online', reconcile)
     const channel = supabase
       .channel('pos-active-orders')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
-        void loadSyncedOrders()
+        reconcile()
       })
-      .subscribe()
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_voids' }, reconcile)
+      .subscribe((status) => { if (status === 'SUBSCRIBED') reconcile() })
 
     return () => {
       active = false
+      refresh.dispose()
+      window.removeEventListener('online', reconcile)
       void supabase.removeChannel(channel)
     }
   }, [])
@@ -486,7 +544,8 @@ export function PosApp() {
     return products
       .filter(isProductVisibleOnPos)
       .filter((product) => selectedCategory === 'All Items' || sameCategory(selectedCategory, product.categoryName))
-  }, [products, selectedCategory])
+      .filter((product) => productMatchesSearch(product, menuQuery))
+  }, [products, selectedCategory, menuQuery])
   const categoryByProductId = useMemo(
     () => new Map(products.map((product) => [product.id, product.categoryName || 'Uncategorized'])),
     [products],
@@ -518,24 +577,15 @@ export function PosApp() {
   const activeEmployee = cashierEmployees.find((employee) => employee.id === activeEmployeeId) ?? null
   const activeEmployeeName = activeEmployee?.name ?? 'Select cashier'
 
-  async function clockInEmployee(employeeId: string) {
-    const employee = cashierEmployees.find((item) => item.id === employeeId)
-    if (!employee || !shiftSchedule || shiftBusy) return
-    setShiftBusy(true)
+  async function reconcileStaffClock(message: string) {
+    setActiveShiftSession(null)
+    setActiveEmployeeId('')
     try {
-      const session = await openShiftSession({ employeeId: employee.id, employeeName: employee.name, deviceId, schedule: shiftSchedule })
-      setActiveEmployeeId(employee.id); setActiveShiftSession(session)
-      setStatusMessage(`${employee.name} clocked into ${session.shiftType === 'FIRST' ? 'First' : 'Second'} Shift. Cash starts at ₱0.`)
-    } catch (error) { setStatusMessage(error instanceof Error ? error.message : 'Could not clock in.') }
-    finally { setShiftBusy(false) }
-  }
-
-  async function clockOutEmployee() {
-    if (shiftBusy) return
-    setShiftBusy(true)
-    try { await closeOpenShiftSession(deviceId); setActiveEmployeeId(''); setActiveShiftSession(null); setStatusMessage('Shift closed. Cash reset to ₱0 for the next cashier.') }
-    catch (error) { setStatusMessage(error instanceof Error ? error.message : 'Could not close shift.') }
-    finally { setShiftBusy(false) }
+      const session = await fetchOpenShiftSession(deviceId)
+      setActiveShiftSession(session)
+      setActiveEmployeeId(session?.employeeId ?? '')
+      setStatusMessage(message)
+    } catch { setStatusMessage(`${message} Cashier status could not be refreshed; POS is locked until it reconnects.`) }
   }
   const selectedOrder = selectedOrderId
     ? ongoingOrders.find((order) => order.id === selectedOrderId) ?? ongoingOrders[0] ?? null
@@ -593,6 +643,58 @@ export function PosApp() {
     })
   }
 
+  function clearDelayedMenuPointerTimer() {
+    const pending = delayedMenuPointerRef.current
+    if (pending?.timer != null) window.clearTimeout(pending.timer)
+    if (pending) pending.timer = null
+  }
+
+  function handleMenuPointerDown(event: ReactPointerEvent<HTMLButtonElement>, product: PosMenuProduct) {
+    if (!touchSettings.delayedPointerActivation || event.pointerType === 'mouse' || !event.isPrimary) return
+    clearDelayedMenuPointerTimer()
+    const pending = {
+      element: event.currentTarget,
+      startX: event.clientX,
+      startY: event.clientY,
+      timer: null as number | null,
+      fired: false,
+      cancelled: false,
+    }
+    pending.timer = window.setTimeout(() => {
+      if (delayedMenuPointerRef.current !== pending || pending.cancelled) return
+      pending.fired = true
+      pending.timer = null
+      addProduct(product)
+    }, 500)
+    delayedMenuPointerRef.current = pending
+  }
+
+  function handleMenuPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const pending = delayedMenuPointerRef.current
+    if (!pending || pending.element !== event.currentTarget || pending.fired) return
+    if (Math.hypot(event.clientX - pending.startX, event.clientY - pending.startY) < 12) return
+    pending.cancelled = true
+    clearDelayedMenuPointerTimer()
+  }
+
+  function handleMenuPointerEnd(event: ReactPointerEvent<HTMLButtonElement>) {
+    const pending = delayedMenuPointerRef.current
+    if (!pending || pending.element !== event.currentTarget) return
+    clearDelayedMenuPointerTimer()
+  }
+
+  function handleMenuClick(event: ReactMouseEvent<HTMLButtonElement>, product: PosMenuProduct) {
+    const pending = delayedMenuPointerRef.current
+    if (touchSettings.delayedPointerActivation && pending?.element === event.currentTarget) {
+      delayedMenuPointerRef.current = null
+      if (pending.fired || pending.cancelled) {
+        event.preventDefault()
+        return
+      }
+    }
+    addProduct(product)
+  }
+
   function changeTicketQuantity(lineId: string, delta: number) {
     setTicketItems((current) =>
       current.flatMap((item) => {
@@ -609,31 +711,6 @@ export function PosApp() {
 
   function printSentKitchenTicket(order: RestaurantOrder) {
     return printOrderDocument(order, 'kitchen-ticket', setStatusMessage, 1, receiptPrintSettings, menuCategoriesEnabled, categoryByProductId)
-  }
-
-  function requestClockIn(employeeId: string) {
-    if (!employeeId) return
-    const employee = cashierEmployees.find((item) => item.id === employeeId)
-    if (!employee) return
-    if (!employee.pin) {
-      setStatusMessage(`${employee.name} needs a login PIN. Add one in Employee Management.`)
-      return
-    }
-    setPendingEmployeeId(employeeId)
-    setLoginPin('')
-    setPinError('')
-  }
-
-  function verifyPinAndClockIn() {
-    const employee = cashierEmployees.find((item) => item.id === pendingEmployeeId)
-    if (!employee || loginPin !== employee.pin) {
-      setPinError('Incorrect PIN. Please try again.')
-      setLoginPin('')
-      return
-    }
-    setPendingEmployeeId('')
-    setPinError('')
-    void clockInEmployee(employee.id)
   }
 
   function reprintKitchenTicket(orderId: string) {
@@ -827,7 +904,7 @@ export function PosApp() {
     const riceProduct = products.find((product) => product.status === 'AVAILABLE' && product.name.trim().toLowerCase() === 'plain rice')
     if (!order) return
     if (!riceProduct) {
-      setStatusMessage('The Plain Rice menu item is unavailable. Refresh the POS or check Menu Settings.')
+      setStatusMessage('The Plain Rice menu item is unavailable. Check Menu Settings.')
       return
     }
     const riceOrderType = order.orderType === 'MIXED' ? order.items[0]?.orderType ?? 'DINE IN' : order.orderType
@@ -1078,9 +1155,9 @@ export function PosApp() {
   }
 
   function applyOrderPayment(orderId: string, payment: OrderPaymentInput) {
-    let updatedOrder: RestaurantOrder | null = null
-    setOrders((current) => current.map((order) => {
-      if (order.id !== orderId) return order
+    const order = orders.find(item => item.id === orderId)
+    if (!order) return
+    payment = { ...payment, id: crypto.randomUUID(), collectedAt: new Date().toISOString() }
       const totalDue = orderTotal(order)
       const nextReceived = Math.min(totalDue, roundCurrency(order.paymentReceived + payment.amount))
       const itemPayments = payment.itemPayments ?? {}
@@ -1090,7 +1167,7 @@ export function PosApp() {
           ? { ...item, paidQuantity: Math.min(item.quantity, item.paidQuantity + paidUnits) }
           : item
       })
-      updatedOrder = {
+      const paymentOrder: RestaurantOrder = {
         ...order,
         items: nextReceived >= totalDue ? items.map((item) => ({ ...item, paidQuantity: item.quantity })) : items,
         status: nextReceived >= totalDue && order.readyForPayment ? 'paid' : order.status,
@@ -1102,9 +1179,7 @@ export function PosApp() {
           ? [order.paymentNotes, 'Customer prepaid'].filter(Boolean).join(' | ')
           : order.paymentNotes,
       }
-      return updatedOrder
-    }))
-    const paymentOrder = updatedOrder as RestaurantOrder | null
+    setOrders(current => current.map(item => item.id === orderId ? paymentOrder : item))
     const isFullyCollected = Boolean(paymentOrder && paymentOrder.paymentReceived >= orderTotal(paymentOrder))
     setStatusMessage(`${formatPosOrderRef(orderId)} ${paymentOrder?.paid ? 'marked paid' : isFullyCollected ? 'marked prepaid' : 'payment recorded'}.`)
     if (paymentOrder && paymentOrder.paymentReceived >= orderTotal(paymentOrder)) setPrepaidCheckoutOrderId(null)
@@ -1158,32 +1233,10 @@ export function PosApp() {
     })
   }
 
-  async function refreshPosData() {
-    if (refreshing) return
-    setRefreshing(true)
-    setStatusMessage('Refreshing POS data...')
-
-    try {
-      const [menu, syncedOrders] = await Promise.all([fetchPosMenu(), fetchOrders()])
-      const mappedOrders = syncedOrders.map(mapAdminOrderToRestaurantOrder)
-      const storedPending = readPendingCancellations()
-      const pendingOrderIds = new Set(storedPending.map((item) => item.order.id))
-      const activeOrders = mappedOrders.filter((order) => !order.paid && !pendingOrderIds.has(order.id))
-
-      setCategories(menu.categories)
-      setProducts(menu.products)
-      setOrders(activeOrders)
-      setHistory([...storedPending.map((item) => item.order), ...mappedOrders.filter((order) => order.paid && !pendingOrderIds.has(order.id))])
-      setStatusMessage(`POS refreshed. ${activeOrders.length} active order${activeOrders.length === 1 ? '' : 's'} loaded.`)
-    } catch (error) {
-      setStatusMessage(error instanceof Error ? `Refresh failed: ${error.message}` : 'Refresh failed. Please try again.')
-    } finally {
-      setRefreshing(false)
-    }
-  }
 
   return (
-    <main className={`pos-shell is-${activeTab} ${primaryNavCollapsed ? 'is-nav-collapsed' : ''} ${activeTab === 'ongoing' || activeTab === 'kitchen' ? 'is-ongoing-screen' : ''}`}>
+    <main className={`pos-shell is-${activeTab} ${primaryNavCollapsed ? 'is-nav-collapsed' : ''} ${activeTab === 'ongoing' || activeTab === 'kitchen' ? 'is-ongoing-screen' : ''} ${touchSettings.instantFeedback ? 'has-instant-touch-feedback' : ''} ${touchSettings.largeTouchTargets ? 'has-large-touch-targets' : ''}`}>
+      {staffClockOpen ? <StaffClockDialog employees={employees} deviceId={deviceId} activeEmployeeId={activeEmployeeId} canChangeCashier={ticketItems.length === 0} onClose={() => setStaffClockOpen(false)} onChanged={reconcileStaffClock} /> : null}
       <aside className="pos-sidebar">
         <button
           type="button"
@@ -1193,6 +1246,7 @@ export function PosApp() {
         >
           {primaryNavCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
         </button>
+        <ThemePicker />
         <div className="pos-sidebar-brand">
           <span className="pos-logo-mark"><ShoppingCart size={20} aria-hidden="true" /></span>
           <div>
@@ -1210,47 +1264,14 @@ export function PosApp() {
         </nav>
 
         <div className="sidebar-status">
-          <span className={`online-dot ${isOnline ? '' : 'is-offline'}`}>{isOnline ? 'Online' : 'Offline'}</span>
+          <span className={`online-dot ${isOnline ? '' : 'is-offline'}`}>{isOnline ? 'Network online' : 'Offline'}</span>
+          <button type="button" className="sidebar-sync-summary" onClick={() => { setSettingsSection('backlog'); setActiveTab('settings') }}>
+            {offlineBacklog.length > 0 ? `${offlineBacklog.length} orders awaiting sync` : 'No queued orders'}
+          </button>
+          <p className="pos-data-status" role="status">{statusMessage}</p>
           <strong>{activeEmployeeName}</strong>
-          <small>{activeEmployee ? `Cashier - ${formatPhp(activeEmployee.dailyRate)} / day` : 'Choose person on shift'}</small>
-          {activeEmployee ? (
-            <button type="button" disabled={shiftBusy} onClick={() => void clockOutEmployee()}><LogOut size={16} aria-hidden="true" /> Clock Out</button>
-          ) : null}
-          {!activeEmployee ? (
-            <select
-              className="sidebar-employee-select"
-              value={pendingEmployeeId || activeEmployeeId}
-              onChange={(event) => requestClockIn(event.target.value)}
-              aria-label="Select cashier on shift"
-            >
-              <option value="">{shiftBusy ? 'Opening shift...' : 'Select cashier to clock in'}</option>
-              {cashierEmployees.map((employee) => (
-                <option key={employee.id} value={employee.id}>{employee.name}</option>
-              ))}
-            </select>
-          ) : null}
-          {pendingEmployeeId ? (
-            <div className="sidebar-pin-entry">
-              <strong>Enter PIN for {cashierEmployees.find((item) => item.id === pendingEmployeeId)?.name}</strong>
-              <input
-                autoFocus
-                type="password"
-                inputMode="numeric"
-                autoComplete="off"
-                maxLength={6}
-                value={loginPin}
-                onChange={(event) => { setLoginPin(event.target.value.replace(/\D/g, '').slice(0, 6)); setPinError('') }}
-                onKeyDown={(event) => { if (event.key === 'Enter' && loginPin.length >= 4) verifyPinAndClockIn() }}
-                aria-label="Cashier PIN"
-                placeholder="Enter 4–6 digit PIN"
-              />
-              {pinError ? <small className="cashier-pin-error" role="alert">{pinError}</small> : null}
-              <div>
-                <button type="button" onClick={() => { setPendingEmployeeId(''); setLoginPin(''); setPinError('') }}>Cancel</button>
-                <button type="button" disabled={loginPin.length < 4 || shiftBusy} onClick={verifyPinAndClockIn}>{shiftBusy ? 'Opening...' : 'Clock in'}</button>
-              </div>
-            </div>
-          ) : null}
+          <small>{activeEmployee ? 'Active cashier on this tablet' : 'No active cashier'}</small>
+          <button type="button" onClick={() => setStaffClockOpen(true)}>Staff clock in / out</button>
           <span>{ongoingOrders.length} ongoing</span>
           <span>{completedThisShift} closed this shift</span>
           <span>{activeShiftSession ? `${activeShiftSession.shiftType === 'FIRST' ? 'First' : 'Second'} Shift • Cash ₱0 opening` : 'No open shift'}</span>
@@ -1265,7 +1286,8 @@ export function PosApp() {
                   key={category.name}
                   type="button"
                   className={selectedCategory === category.name ? 'is-active' : ''}
-                  onClick={() => setSelectedCategory(category.name)}
+                  aria-pressed={selectedCategory === category.name}
+                  onClick={() => { setSelectedCategory(category.name); setMenuQuery('') }}
                 >
                   <span className="category-tab-icon">{categoryIconLabel(category.name)}</span>
                   <strong>{category.name}</strong>
@@ -1299,28 +1321,32 @@ export function PosApp() {
                 >
                   Half
                 </button>
-                <button
-                  type="button"
-                  className="header-icon-button"
-                  aria-label="Refresh POS data"
-                  title="Refresh POS data"
-                  disabled={refreshing}
-                  onClick={() => void refreshPosData()}
-                >
-                  <RefreshCw size={18} className={refreshing ? 'is-spinning' : undefined} aria-hidden="true" />
-                </button>
-                <button type="button" className="header-icon-button" aria-label="Settings" onClick={() => setActiveTab('settings')}><Settings size={18} aria-hidden="true" /></button>
+                <button type="button" className="header-icon-button" aria-label="Settings" onClick={() => { setSettingsSection('menu'); setActiveTab('settings') }}><Settings size={18} aria-hidden="true" /></button>
               </div>
             </header>
-            <div className="product-section-label">{selectedCategory}</div>
+            <a className="mobile-ticket-link" href="#current-order">View order · {ticketItems.reduce((count, item) => count + item.quantity, 0)} items <strong>{formatPhp(total)}</strong></a>
+            <div className="pos-menu-tools">
+              <label className="pos-menu-search">
+                <Search size={18} aria-hidden="true" />
+                <input type="search" aria-label="Search menu items" placeholder="Search dishes or categories" value={menuQuery}
+                  onChange={(event) => { setMenuQuery(event.target.value); setSelectedCategory('All Items') }} />
+              </label>
+              {menuQuery ? <button type="button" onClick={() => setMenuQuery('')}>Clear search</button> : null}
+            </div>
+            <div className="product-section-label">{menuQuery ? `Search results · ${visibleProducts.length} ${visibleProducts.length === 1 ? 'item' : 'items'}` : selectedCategory}</div>
             <div className="product-grid">
+              {visibleProducts.length === 0 ? <div className="pos-menu-empty" role="status"><strong>No menu items found</strong><p>Try another dish or category.</p><button type="button" onClick={() => { setMenuQuery(''); setSelectedCategory('All Items') }}>Show all items</button></div> : null}
               {visibleProducts.map((product) => (
                 <button
                   key={product.id}
                   type="button"
                   className={`menu-card ${product.status === 'UNAVAILABLE' ? 'is-unavailable' : ''}`}
                   disabled={product.status === 'UNAVAILABLE'}
-                  onClick={() => addProduct(product)}
+                  onPointerDown={(event) => handleMenuPointerDown(event, product)}
+                  onPointerMove={handleMenuPointerMove}
+                  onPointerUp={handleMenuPointerEnd}
+                  onPointerCancel={handleMenuPointerEnd}
+                  onClick={(event) => handleMenuClick(event, product)}
                 >
                   {product.imagePath ? <img src={product.imagePath} alt="" /> : <span className="menu-card-art">{initials(product.name)}</span>}
                   <strong>{product.name}</strong>
@@ -1417,11 +1443,13 @@ export function PosApp() {
           onHalfOrderToggle={() => setHalfOrderEnabled((enabled) => !enabled)}
         />
       </section>
-      {!activeShiftSession ? <div className="shift-lock-overlay"><section><Clock3 size={38} /><h2>Clock in to start</h2><p>Select the cashier in the sidebar. Orders and financial entries are locked until a shift is open.</p></section></div> : null}
+      {!activeShiftSession ? <div className="shift-lock-overlay"><section><Clock3 size={38} /><h2>Choose a cashier to start</h2><p>Open Staff clock in / out to record attendance and choose the active cashier. Orders and financial entries stay locked until a cashier session is open.</p><button type="button" className="staff-clock-primary" onClick={() => setStaffClockOpen(true)}>Staff clock in / out</button></section></div> : null}
 
       {activeTab === 'settings' ? (
         <section className="pos-workspace">
           <SettingsPage
+            section={settingsSection}
+            onSectionChange={setSettingsSection}
             history={shiftHistory}
             products={products}
             categories={visibleCategories.map((category) => category.name)}
@@ -1443,6 +1471,8 @@ export function PosApp() {
             isOnline={isOnline}
             onRetryBacklog={() => void flushOfflineBacklog(setStatusMessage)}
             onWithdrawCancellation={(requestId) => void withdrawPendingCancellation(requestId)}
+            touchSettings={touchSettings}
+            onTouchSettingsChange={setTouchSettings}
           />
         </section>
       ) : null}
@@ -1900,7 +1930,7 @@ function OrderTicketPanel({
       ? 'No items in this order.'
       : 'Tap menu items to build an order.'
   return (
-    <aside className="order-ticket">
+    <aside className="order-ticket" id="current-order" tabIndex={-1}>
       <header className="ticket-header">
         <div>
           <p className="eyebrow">Order {orderNumber}</p>
@@ -2024,6 +2054,8 @@ type OngoingOrdersPageProps = {
 }
 
 type OrderPaymentInput = {
+  id?: string
+  collectedAt?: string
   method: PaymentMethod
   amount: number
   reference: string
@@ -2051,10 +2083,12 @@ function OngoingOrdersBoard({
   unsyncedOrderIds = new Set(),
 }: OngoingOrdersPageProps) {
   const [sort, setSort] = useState<OrderSort>('oldest')
+  const [serviceDay, setServiceDay] = useState<'all' | 'today' | 'earlier'>('all')
   const [viewMode, setViewMode] = useState<'tiles' | 'list'>('tiles')
   const filteredOrders = useMemo(() => {
-    return [...orders].sort((left, right) => sort === 'oldest' ? left.createdAt - right.createdAt : right.createdAt - left.createdAt)
-  }, [orders, sort])
+    return orders.filter((order) => serviceDay === 'all' || (serviceDay === 'earlier' ? isEarlierServiceDay(order.createdAt) : !isEarlierServiceDay(order.createdAt)))
+      .sort((left, right) => sort === 'oldest' ? left.createdAt - right.createdAt : right.createdAt - left.createdAt)
+  }, [orders, sort, serviceDay])
 
   return (
     <section className="ongoing-dashboard">
@@ -2073,6 +2107,13 @@ function OngoingOrdersBoard({
           </div>
         </div>
 
+        <div className="service-day-filter" aria-label="Order service date">
+          {(['all', 'today', 'earlier'] as const).map((day) => <button key={day} type="button" aria-pressed={serviceDay === day} onClick={() => setServiceDay(day)}>
+            {day === 'all' ? 'All unresolved' : day === 'today' ? 'Today' : 'Earlier dates'}
+            <span>{orders.filter((order) => day === 'all' || (day === 'earlier' ? isEarlierServiceDay(order.createdAt) : !isEarlierServiceDay(order.createdAt))).length}</span>
+          </button>)}
+        </div>
+        {orders.some((order) => isEarlierServiceDay(order.createdAt)) ? <p className="earlier-order-notice">Earlier unresolved orders remain visible until reviewed. Use the date filter to focus on today.</p> : null}
         <div className={`ongoing-grid ${viewMode === 'list' ? 'is-list-view' : ''}`}>
           {filteredOrders.length === 0 ? <EmptyState text="No ongoing orders match this filter." /> : null}
           {filteredOrders.map((order) => (
@@ -2091,7 +2132,7 @@ function OngoingOrdersBoard({
       </section>
 
       <OngoingTrackingDetailPanel
-        order={selectedOrder}
+        order={selectedOrder && filteredOrders.some((order) => order.id === selectedOrder.id) ? selectedOrder : null}
         onToggleItem={onToggleItem}
         onMarkAllServed={onMarkAllServed}
         onViewDetails={onViewDetails}
@@ -2125,7 +2166,7 @@ function OngoingTrackingCard({
   const kitchenItems = kitchenPrintableItems(order.items, kitchenCategorySettings, categoryByProductId)
   const hasUnprintedKitchenItems = kitchenItems.some((item) => item.kitchenPrintedQuantity < item.quantity)
   return (
-    <article className={`mini-order-card ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''} ${unsynced ? 'is-unsynced' : ''}`} onClick={onSelect}>
+    <article className={`mini-order-card ${selected ? 'is-selected' : ''} ${ready ? 'is-ready' : ''} ${unsynced ? 'is-unsynced' : ''}`} role="button" tabIndex={0} aria-label={`View order ${formatPosOrderRef(order.id)}`} aria-pressed={selected} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelect() } }} onClick={onSelect}>
       <span className="order-card-icon"><Utensils size={24} aria-hidden="true" /></span>
       <div className="order-card-copy">
         <header>
@@ -2139,11 +2180,12 @@ function OngoingTrackingCard({
           <span>{formatOrderType(order.orderType)}</span>
           <span className={`status-pill status-${order.status}`}>{statusLabel(order.status)}</span>
           {paymentStatus(order) === 'paid' && !order.paid ? <span className="status-pill payment-paid">PREPAID</span> : null}
+          {isEarlierServiceDay(order.createdAt) ? <span className="earlier-order-badge">EARLIER DATE</span> : null}
           {hasUnprintedKitchenItems ? <span className="print-status-pill is-not-printed">NOT PRINTED</span> : null}
           {unsynced ? <span className="offline-sync-pill">NOT SYNCED</span> : null}
         </div>
         <footer>
-          <span>{minutesAgo(order.createdAt)} mins ago</span>
+          <span>{formatOrderAge(order.createdAt)}</span>
           <strong className="ongoing-card-price">{formatPhp(orderTotal(order))}</strong>
           <span className="order-card-chevron"><ChevronRight size={18} aria-hidden="true" /></span>
         </footer>
@@ -2200,8 +2242,8 @@ function OngoingTrackingDetailPanel({
           {paymentStatus(order) === 'paid' && !order.paid ? <span className="status-pill payment-paid">PREPAID</span> : null}
         </div>
         <div className="detail-time">
-          <time>{formatOrderTime(order.createdAt)}</time>
-          <span>{minutesAgo(order.createdAt)} mins ago</span>
+          <time dateTime={Number.isFinite(order.createdAt) ? new Date(order.createdAt).toISOString() : undefined}>{Number.isFinite(order.createdAt) ? new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(order.createdAt) : 'Date unavailable'}</time>
+          <span>{formatOrderAge(order.createdAt)}</span>
         </div>
       </header>
       <section>
@@ -2233,16 +2275,19 @@ function OngoingTrackingDetailPanel({
         <button type="button" className="send-kitchen" onClick={() => onMarkAllServed(order.id)}>
           <CircleCheckBig size={16} /> {allReady ? 'Mark as Served' : 'Mark All Ready'}
         </button>
-        <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
-        <button type="button" onClick={() => onQuickAddRice?.(order.id)}><Plus size={16} /> Extra Rice</button>
         {paymentStatus(order) === 'paid' ? (
           <button type="button" disabled><CircleCheckBig size={16} /> Prepay</button>
         ) : (
           <button type="button" onClick={() => onCustomerPrepaid?.(order.id)}><WalletCards size={16} /> Prepay</button>
         )}
+        <details className="secondary-order-actions"><summary>More order actions</summary>
+        <div>
+        <button type="button" onClick={() => onAddOrder?.(order.id)}><Plus size={16} /> Add Order</button>
+        <button type="button" onClick={() => onQuickAddRice?.(order.id)}><Plus size={16} /> Extra Rice</button>
         <button type="button" className="edit-order-action" onClick={() => onViewDetails(order.id)}><Pencil size={16} /> Edit Order</button>
         <button type="button" onClick={() => setConfirmingReprint(true)}><RefreshCw size={16} /> Reprint</button>
-        <button type="button" className="cancel-order-action" onClick={() => onCancelOrder?.(order.id)}><X size={16} /> Cancel Order</button>
+        <button type="button" className="cancel-order-action" onClick={() => onCancelOrder?.(order.id)}><X size={16} /> Request cancellation</button>
+        </div></details>
       </section>
       {confirmingReprint ? (
         <div className="modal-backdrop" role="presentation">
@@ -2385,7 +2430,7 @@ function FinishOrderCard({
           {unsynced ? <span className="offline-sync-pill">NOT SYNCED</span> : null}
         </div>
         <footer>
-          <span>{minutesAgo(order.createdAt)} mins ago</span>
+          <span>{formatOrderAge(order.createdAt)}</span>
           <strong className="ongoing-card-price">{payStatus === 'partial' ? `${formatPhp(balance)} due` : formatPhp(total)}</strong>
           <span className="order-card-chevron"><ChevronRight size={18} aria-hidden="true" /></span>
         </footer>
@@ -2549,7 +2594,7 @@ function FinishOrderDetailPanel({
         </div>
         <div className="detail-time">
           <time>{formatOrderTime(order.createdAt)}</time>
-          <span>{minutesAgo(order.createdAt)} mins ago</span>
+          <span>{formatOrderAge(order.createdAt)}</span>
         </div>
       </header>
       <section className="finish-total-block">
@@ -3009,7 +3054,7 @@ function OngoingMiniCard({
         ))}
       </div>
       <footer>
-        <span>{minutesAgo(order.createdAt)} mins ago</span>
+        <span>{formatOrderAge(order.createdAt)}</span>
         {ready ? <button type="button" onClick={(event) => { event.stopPropagation(); onMarkAllServed(order.id) }}>Mark as Served</button> : null}
       </footer>
     </article>
@@ -3106,7 +3151,6 @@ function SaleTrackerPage({
   const [showFinancialHistory, setShowFinancialHistory] = useState(false)
   const [shiftExpenses, setShiftExpenses] = useState<CashMovement[]>(() => cachedShiftMatches ? saleTrackerCache.expenses : [])
   const [shiftAdjustments, setShiftAdjustments] = useState<ShiftAdjustment[]>(() => cachedShiftMatches ? saleTrackerCache.adjustments : [])
-  const [refreshRequest, setRefreshRequest] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -3142,7 +3186,9 @@ function SaleTrackerPage({
       }
     }
 
-    void loadPayments()
+    const refresh = createLiveRefresh(loadPayments)
+    const reconcile = () => { void refresh.request() }
+    reconcile()
 
     if (!hasSupabaseConfig) {
       return () => {
@@ -3151,23 +3197,28 @@ function SaleTrackerPage({
     }
 
     const supabase = requireSupabase()
+    window.addEventListener('online', reconcile)
     const channel = supabase
       .channel('pos-sale-tracker-payments')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, () => {
-        void loadPayments()
+        reconcile()
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
-        void loadPayments()
+        reconcile()
       })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'cash_movements' }, () => { void loadPayments() })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_adjustments' }, () => { void loadPayments() })
-      .subscribe()
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cash_movements' }, () => { reconcile() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_adjustments' }, () => { reconcile() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'order_voids' }, reconcile)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shift_payment_events' }, reconcile)
+      .subscribe((status) => { if (status === 'SUBSCRIBED') reconcile() })
 
     return () => {
       active = false
+      refresh.dispose()
+      window.removeEventListener('online', reconcile)
       void supabase.removeChannel(channel)
     }
-  }, [shiftSession?.id, refreshRequest])
+  }, [shiftSession?.id])
 
   const shiftPayments = shiftSession
     ? payments.filter((payment) => salePaymentBelongsToShift(payment, shiftSession))
@@ -3274,7 +3325,7 @@ function SaleTrackerPage({
                 <h2>Transactions</h2>
                 <span>{trackerStatus}</span>
               </div>
-              <button type="button" onClick={() => { setTrackerStatus('Refreshing payments...'); setRefreshRequest((value) => value + 1) }}>Refresh Status</button>
+
             </header>
             <div className="sale-simple-table">
               <div className="sale-simple-table-head">
@@ -3620,6 +3671,8 @@ function SalePaymentDetailsModal({ payment, cashierName, onClose }: { payment: S
 }
 
 function SettingsPage({
+  section: activeSection,
+  onSectionChange: setActiveSection,
   history,
   products,
   categories,
@@ -3638,7 +3691,11 @@ function SettingsPage({
   isOnline,
   onRetryBacklog,
   onWithdrawCancellation,
+  touchSettings,
+  onTouchSettingsChange,
 }: {
+  section: SettingsSection
+  onSectionChange: (section: SettingsSection) => void
   history: RestaurantOrder[]
   products: PosMenuProduct[]
   categories: string[]
@@ -3657,8 +3714,9 @@ function SettingsPage({
   isOnline: boolean
   onRetryBacklog: () => void
   onWithdrawCancellation: (requestId: string) => void
+  touchSettings: PosTouchSettings
+  onTouchSettingsChange: (settings: PosTouchSettings) => void
 }) {
-  const [activeSection, setActiveSection] = useState<SettingsSection>('menu')
   const [movements, setMovements] = useState<CashMovement[]>([])
   const [movementStatus, setMovementStatus] = useState('Loading money movements...')
   const [moneyAccount, setMoneyAccount] = useState<MoneyAccount>('cash')
@@ -3773,6 +3831,7 @@ function SettingsPage({
     { id: 'menu', title: 'Menu List', subtitle: `${products.length} products` },
     { id: 'printing', title: 'Printing', subtitle: 'Receipt print setup' },
     { id: 'backlog', title: 'Backlog', subtitle: `${backlog.length + pendingCancellations.length} pending` },
+    { id: 'experimental', title: 'Experimental', subtitle: 'Touch responsiveness' },
   ]
 
   return (
@@ -4069,6 +4128,34 @@ function SettingsPage({
           </section>
         ) : null}
 
+        {activeSection === 'experimental' ? (
+          <section className="settings-panel">
+            <SettingsPanelHeader title="Experimental Touch" subtitle="Optional responsiveness controls for tablet POS hardware." />
+            <div className="settings-card experimental-touch-card">
+              <h3>Touch response</h3>
+              <p>These settings affect only this POS terminal and can be turned off at any time.</p>
+              <SettingsToggle
+                label="Instant pressed feedback"
+                checked={touchSettings.instantFeedback}
+                onChange={(instantFeedback) => onTouchSettingsChange({ ...touchSettings, instantFeedback })}
+              />
+              <small>Shows a pressed highlight and scale immediately, before the action finishes.</small>
+              <SettingsToggle
+                label="Larger restaurant touch targets"
+                checked={touchSettings.largeTouchTargets}
+                onChange={(largeTouchTargets) => onTouchSettingsChange({ ...touchSettings, largeTouchTargets })}
+              />
+              <small>Enlarges compact quantity, delete, filter, and action controls to reduce missed taps.</small>
+              <SettingsToggle
+                label="500 ms delayed pointer activation"
+                checked={touchSettings.delayedPointerActivation}
+                onChange={(delayedPointerActivation) => onTouchSettingsChange({ ...touchSettings, delayedPointerActivation })}
+              />
+              <small>Menu items activate after a 0.5 second hold. Moving the finger to scroll cancels the action, and duplicate click events are suppressed.</small>
+            </div>
+          </section>
+        ) : null}
+
       </div>
     </section>
   )
@@ -4274,14 +4361,14 @@ function readActiveEmployeeId() {
 
 function readLocalPosEmployees(): PosEmployee[] {
   try {
-    return normalizePosEmployees(JSON.parse(window.localStorage.getItem('admin-web-employees') ?? '{}') as Record<string, unknown>)
+    return normalizePosEmployees(JSON.parse(window.localStorage.getItem('pos-web-staff-directory') ?? window.localStorage.getItem('admin-web-employees') ?? '{}') as Record<string, unknown>)
   } catch {
     return []
   }
 }
 
 function writeLocalPosEmployees(employees: PosEmployee[]) {
-  window.localStorage.setItem('admin-web-employees', JSON.stringify({ employees }))
+  window.localStorage.setItem('pos-web-staff-directory', JSON.stringify({ employees }))
 }
 
 function normalizePosEmployees(setting: Record<string, unknown> | null): PosEmployee[] {
@@ -4294,10 +4381,8 @@ function normalizePosEmployees(setting: Record<string, unknown> | null): PosEmpl
       return {
         id: String(employee.id ?? `employee-${index}`),
         name,
-        dailyRate: Math.max(0, Number(employee.dailyRate ?? employee.daily_rate ?? 0) || 0),
         isCashier: employee.isCashier !== false && employee.is_cashier !== false,
         isActive: employee.isActive !== false && employee.is_active !== false,
-        pin: String(employee.pin ?? employee.loginPin ?? employee.login_pin ?? '').replace(/\D/g, '').slice(0, 6),
       }
     })
     .filter((employee): employee is PosEmployee => Boolean(employee))
@@ -4761,10 +4846,6 @@ function formatOrderTime(timestamp: number) {
   }).format(new Date(timestamp))
 }
 
-function minutesAgo(timestamp: number) {
-  return Math.max(0, Math.round((Date.now() - timestamp) / 60000))
-}
-
 function normalizeAmountInput(value: string) {
   const normalized = value.replace(/[^\d.]/g, '')
   const [whole, ...decimalParts] = normalized.split('.')
@@ -4913,7 +4994,9 @@ async function fetchSalePaymentsFromOrders() {
     .order('created_at', { ascending: false })
 
   if (error) throw error
-  return (data ?? []).flatMap(mapOrderRowToSalePayments)
+  const voids = await fetchOrderVoids()
+  const voidIds = new Set(voids.map(item => item.deviceOrderId))
+  return (data ?? []).filter(row => !voidIds.has(String(row.device_order_id))).flatMap(mapOrderRowToSalePayments)
 }
 
 function mapSalePaymentRow(row: Record<string, unknown>): SalePayment {
@@ -4933,9 +5016,9 @@ function mapSalePaymentRow(row: Record<string, unknown>): SalePayment {
   }
 }
 
-function mergeSalePaymentRows(paymentRows: SalePayment[], orderRows: SalePayment[]) {
+export function mergeSalePaymentRows(paymentRows: SalePayment[], orderRows: SalePayment[]) {
   const orderRowsByOrderId = new Map(orderRows.map((row) => [row.orderId, row]))
-  const uniquePaymentRows = paymentRows.filter((payment, index, rows) => rows.findIndex((candidate) => salePaymentKey(candidate) === salePaymentKey(payment)) === index)
+  const uniquePaymentRows = paymentRows.filter((payment, index, rows) => orderRowsByOrderId.has(payment.orderId) && rows.findIndex((candidate) => salePaymentKey(candidate) === salePaymentKey(payment)) === index)
   const merged = uniquePaymentRows.map((payment) => {
     const order = orderRowsByOrderId.get(payment.orderId)
     if (!order) return payment
@@ -5215,6 +5298,25 @@ function createDeviceOrderId(deviceId: string, orderNumber: string, createdAt: n
 const offlineBacklogKey = 'pos-web-offline-backlog-v1'
 const pendingCancellationsKey = 'pos-web-pending-cancellations-v1'
 
+function readPosTouchSettings(): PosTouchSettings {
+  const defaults: PosTouchSettings = {
+    instantFeedback: false,
+    largeTouchTargets: false,
+    delayedPointerActivation: false,
+  }
+  if (typeof window === 'undefined') return defaults
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(posTouchSettingsKey) ?? '{}') as Partial<PosTouchSettings>
+    return {
+      instantFeedback: parsed.instantFeedback === true,
+      largeTouchTargets: parsed.largeTouchTargets === true,
+      delayedPointerActivation: parsed.delayedPointerActivation === true,
+    }
+  } catch {
+    return defaults
+  }
+}
+
 function readPendingCancellations(): PendingCancellation[] {
   if (typeof window === 'undefined') return []
   try {
@@ -5249,41 +5351,67 @@ function writeOfflineBacklog(entries: OfflineBacklogEntry[]) {
 function queueOfflineOrder(order: RestaurantOrder, pending: Partial<Pick<OfflineBacklogEntry, 'orderPending' | 'paymentPending' | 'payment' | 'shiftSession' | 'collectedBy'>>) {
   const entries = readOfflineBacklog()
   const existing = entries.find((entry) => entry.id === order.deviceOrderId)
+  let collections = existing?.collections ?? []
+  if (!existing?.collections && existing?.payment) {
+    const legacy = identifyCollection(existing.payment, existing.id, existing.order.paymentReceived)
+    collections = [{ id: legacy.id, payment: legacy, shiftSession: existing.shiftSession, collectedBy: existing.collectedBy }]
+  }
+  if (pending.payment) {
+    const payment = identifyCollection(pending.payment, order.deviceOrderId, order.paymentReceived)
+    collections = mergePendingCollections(collections, { id: payment.id, payment, shiftSession: pending.shiftSession, collectedBy: pending.collectedBy })
+  }
   const next: OfflineBacklogEntry = {
     id: order.deviceOrderId,
     order,
     queuedAt: existing?.queuedAt ?? new Date().toISOString(),
     orderPending: pending.orderPending ?? existing?.orderPending ?? false,
     paymentPending: pending.paymentPending ?? existing?.paymentPending ?? false,
-    payment: pending.payment ?? existing?.payment,
+    payment: undefined,
+    collections,
     shiftSession: pending.shiftSession ?? existing?.shiftSession,
     collectedBy: pending.collectedBy ?? existing?.collectedBy,
   }
   writeOfflineBacklog([next, ...entries.filter((entry) => entry.id !== order.deviceOrderId)])
 }
 
-function clearOfflinePending(orderId: string, kind: 'order' | 'payment') {
-  const entries = readOfflineBacklog().map((entry) => entry.order.id === orderId ? {
-    ...entry,
-    orderPending: kind === 'order' ? false : entry.orderPending,
-    paymentPending: kind === 'payment' ? false : entry.paymentPending,
-  } : entry)
-  writeOfflineBacklog(entries.filter((entry) => entry.orderPending || entry.paymentPending))
+function clearOfflinePending(orderId: string, kind: 'order' | 'payment', collectionId?: string) {
+  if (kind === 'payment' && collectionId) {
+    const entries = readOfflineBacklog().map(entry => {
+      if (entry.id !== orderId) return entry
+      const collections = acknowledgeCollection(entry.collections ?? [], collectionId)
+      return { ...entry, collections, paymentPending: collections.length > 0 }
+    })
+    writeOfflineBacklog(entries.filter(entry => entry.orderPending || entry.paymentPending))
+  } else writeOfflineBacklog(clearBacklogPending(readOfflineBacklog(), orderId, kind))
 }
 
 let flushingOfflineBacklog = false
 async function flushOfflineBacklog(setStatusMessage: (message: string) => void) {
   if (flushingOfflineBacklog || !hasSupabaseConfig || !navigator.onLine) return
   flushingOfflineBacklog = true
-  const entries = readOfflineBacklog()
   try {
+    const { data, error } = await requireSupabase().from('admin_settings').select('value').eq('key', 'operational_reset_at').maybeSingle()
+    if (error) throw error
+    const { active: entries, quarantined } = partitionBacklogForReset(readOfflineBacklog(), typeof data?.value === 'string' ? data.value : null)
+    if (quarantined.length) {
+      const archiveKey = `${offlineBacklogKey}-quarantine`
+      const saved = JSON.parse(window.localStorage.getItem(archiveKey) ?? '[]')
+      window.localStorage.setItem(archiveKey, JSON.stringify([...(Array.isArray(saved) ? saved : []), ...quarantined]))
+      writeOfflineBacklog(entries)
+    }
     for (const entry of entries) {
       if (!navigator.onLine) break
       if (entry.orderPending) await syncOrderSnapshot(entry.order, setStatusMessage)
-      if (entry.paymentPending) await syncPaymentSnapshot(entry.order, setStatusMessage, entry.payment, entry.shiftSession, entry.collectedBy)
+      if (entry.paymentPending) {
+        if (entry.collections?.length) {
+          for (const collection of entry.collections) await syncPaymentSnapshot(entry.order, setStatusMessage, collection.payment, collection.shiftSession, collection.collectedBy)
+        } else await syncPaymentSnapshot(entry.order, setStatusMessage, entry.payment, entry.shiftSession, entry.collectedBy)
+      }
     }
     const remaining = readOfflineBacklog().length
     setStatusMessage(remaining === 0 ? `${entries.length} offline order${entries.length === 1 ? '' : 's'} synced successfully.` : `${remaining} offline order${remaining === 1 ? '' : 's'} still waiting to sync.`)
+  } catch (error) {
+    setStatusMessage(error instanceof Error ? error.message : 'Could not reconcile offline backlog.')
   } finally {
     flushingOfflineBacklog = false
   }
@@ -5302,7 +5430,7 @@ async function syncOrderSnapshot(order: RestaurantOrder, setStatusMessage: (mess
     const fullPayload = buildSupabaseOrderPayload(order, true)
     const fullResult = await supabase.from('orders').upsert(fullPayload, { onConflict: 'device_order_id' })
     if (!fullResult.error) {
-      clearOfflinePending(order.id, 'order')
+      clearOfflinePending(order.deviceOrderId, 'order')
       setStatusMessage(`${order.id} synced to Supabase.`)
       return
     }
@@ -5313,7 +5441,7 @@ async function syncOrderSnapshot(order: RestaurantOrder, setStatusMessage: (mess
 
     const baseResult = await supabase.from('orders').upsert(buildSupabaseOrderPayload(order, false), { onConflict: 'device_order_id' })
     if (baseResult.error) throw baseResult.error
-    clearOfflinePending(order.id, 'order')
+    clearOfflinePending(order.deviceOrderId, 'order')
     setStatusMessage(`${order.id} synced to Supabase with base order fields.`)
   } catch (error) {
     queueOfflineOrder(order, { orderPending: true })
@@ -5328,6 +5456,10 @@ async function syncPaymentSnapshot(
   shiftSession?: ShiftSession | null,
   collectedBy = 'POS Web',
 ) {
+  if (payment) {
+    payment = identifyCollection(payment, order.deviceOrderId, order.paymentReceived)
+    queueOfflineOrder(order, { paymentPending: true, payment, shiftSession, collectedBy })
+  }
   if (!hasSupabaseConfig || (typeof navigator !== 'undefined' && !navigator.onLine)) {
     queueOfflineOrder(order, { paymentPending: true, payment, shiftSession, collectedBy })
     return
@@ -5362,14 +5494,14 @@ async function syncPaymentSnapshot(
       const result = await supabase.from('shift_payment_events').upsert(eventRows, { onConflict: 'id' })
       if (result.error && !isMissingTableError(result.error)) throw result.error
     }
-    clearOfflinePending(order.id, 'payment')
+    clearOfflinePending(order.deviceOrderId, 'payment', payment?.id)
   } catch (error) {
     queueOfflineOrder(order, { paymentPending: true, payment, shiftSession, collectedBy })
     setStatusMessage(`${order.id} payment sync failed: ${error instanceof Error ? error.message : 'Unknown Supabase error.'}`)
   }
 }
 
-function buildPaymentRows(order: RestaurantOrder, payment?: OrderPaymentInput) {
+export function buildPaymentRows(order: RestaurantOrder, payment?: OrderPaymentInput) {
   const baseId = normalizeAccountId(order.deviceOrderId || order.id)
   const orderId = order.deviceOrderId || order.id
   const customerName = `Table ${tableNumber(order.id)}`
@@ -5380,10 +5512,10 @@ function buildPaymentRows(order: RestaurantOrder, payment?: OrderPaymentInput) {
     const rows = []
     if (payment && payment.amount > 0) {
       rows.push(...buildPaidPaymentRows({
-        baseId: `${baseId}-${Date.now()}`,
+        baseId: identifyCollection(payment, orderId, order.paymentReceived).id,
         orderId,
         customerName,
-        createdAt: new Date().toISOString(),
+        createdAt: payment.collectedAt ?? createdAt,
         method: payment.method,
         amount: payment.amount,
         cashAmount: payment.cashAmount,
@@ -5403,10 +5535,10 @@ function buildPaymentRows(order: RestaurantOrder, payment?: OrderPaymentInput) {
   }
 
   return buildPaidPaymentRows({
-    baseId,
+    baseId: payment ? identifyCollection(payment, orderId, order.paymentReceived).id : baseId,
     orderId,
     customerName,
-    createdAt,
+    createdAt: payment?.collectedAt ?? createdAt,
     method: payment?.method ?? order.paymentMethod ?? 'other',
     amount: (payment?.amount ?? order.paymentReceived) || orderTotal(order),
     cashAmount: payment?.cashAmount,

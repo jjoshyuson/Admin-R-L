@@ -1,0 +1,2 @@
+// Runs before styles and React to avoid a flash of the wrong theme.
+(()=>{let preference='system';try{preference=localStorage.getItem('rnl-appearance')||'system'}catch{}if(!['system','dark','light'].includes(preference))preference='system';const dark=preference==='dark'||(preference==='system'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=dark?'dark':'light';document.documentElement.style.colorScheme=dark?'dark':'light'})();
